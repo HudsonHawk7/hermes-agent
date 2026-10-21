@@ -3,6 +3,8 @@ import { atom, computed } from 'nanostores'
 import { PRIMARY_SESSION_VIEW } from '@/app/chat/session-view'
 import { persistBoolean, storedBoolean } from '@/lib/storage'
 import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
+import { $activeSessionId, $selectedStoredSessionId, $sessions, knownSessionOwner } from '@/store/session'
+import { requestForSessionProfile, type SessionOwnerScope } from '@/store/session-request-router'
 
 /**
  * Petdex mascot state for the desktop floating pet.
@@ -142,16 +144,51 @@ export const $petActivity = atom<PetActivity>({})
 /** Pet installed + enabled with a loaded spritesheet (ready to show/react). */
 export const $petActive = computed($petInfo, info => info.enabled && Boolean(info.spritesheetBase64))
 
-/**
- * Profile the pet RPCs should resolve against. Pets are per-profile — the active
- * pet (`display.pet.*`) and the installed sprites live under each profile's
- * HERMES_HOME — so every pet RPC carries this. The gateway no-ops it for the
- * launch profile (own-profile backends already resolve it) and rebinds for any
- * other profile, which is what makes per-profile pets work in app-global remote
- * mode (one backend serving every profile).
- */
+/** Bot chats deliberately leave the gateway on the launch profile. Resolve the
+ * visible conversation's owner instead, including its exact remote connection. */
+export const $petOwner = computed(
+  [$sessions, $selectedStoredSessionId, $activeSessionId, $activeGatewayProfile],
+  (sessions, selected, active, gateway): SessionOwnerScope =>
+    knownSessionOwner(sessions, selected ?? active) ?? normalizeProfileKey(gateway)
+)
+
+export const $petOwnerKey = computed($petOwner, owner => JSON.stringify(owner))
+
 export function petProfile(): string {
-  return normalizeProfileKey($activeGatewayProfile.get())
+  const owner = $petOwner.get()
+
+  return normalizeProfileKey(typeof owner === 'string' ? owner : (owner?.targetProfile ?? owner?.profile))
+}
+
+type PetRequest = <T>(
+  method: string,
+  params?: Record<string, unknown>,
+  timeoutMs?: number,
+  signal?: AbortSignal
+) => Promise<T>
+
+/** Share routing between the floating mascot and its picker. A response from
+ * the previous conversation must never repaint the current conversation. */
+export async function requestPet<T>(
+  request: PetRequest,
+  method: string,
+  params: Record<string, unknown> = {}
+): Promise<T> {
+  const owner = $petOwner.get()
+  const key = $petOwnerKey.get()
+
+  const result = await requestForSessionProfile<T>(
+    typeof owner === 'string' && owner === normalizeProfileKey($activeGatewayProfile.get()) ? undefined : owner,
+    request,
+    method,
+    { ...params, profile: petProfile() }
+  )
+
+  if (key !== $petOwnerKey.get()) {
+    throw new Error('Pet owner changed while the request was in flight')
+  }
+
+  return result
 }
 
 /**
