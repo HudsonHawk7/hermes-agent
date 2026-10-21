@@ -65,9 +65,10 @@ export type GatewayRequest = <T>(
   signal?: AbortSignal
 ) => Promise<T>
 
-/** Profile-scoped pet RPC. Pets are per-profile, so every call carries the active
- *  profile (the gateway no-ops it for the launch profile). One chokepoint so no
- *  call site can forget it. */
+/** Typed pet RPC on a request that is already owner-wrapped. The owner routing
+ *  lives in `ownerRequest` → `requestPet` (store/pet.ts): every gallery action
+ *  wraps its request first, which stamps the visible owner's profile and drops a
+ *  reply that arrives after an owner switch. This helper adds neither. */
 const petRpc = <T>(request: GatewayRequest, method: string, params: Record<string, unknown> = {}): Promise<T> =>
   request<T>(method, params)
 
