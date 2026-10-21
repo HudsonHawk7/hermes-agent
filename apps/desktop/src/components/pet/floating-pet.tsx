@@ -5,7 +5,9 @@ import { useGatewayRequest } from '@/app/gateway/hooks/use-gateway-request'
 import { useRouteOverlayActive } from '@/app/hooks/use-route-overlay-active'
 import { PetHeartField } from '@/components/chat/vibe-hearts'
 import { PetBubble } from '@/components/pet/pet-bubble'
+import { isMissingRpcMethod } from '@/lib/gateway-rpc'
 import { persistString, storedString } from '@/lib/storage'
+import { activeGatewayConnectionId } from '@/store/gateway'
 import { $changeEventsAvailable, $petChange } from '@/store/live-sync'
 import {
   $petAtRest,
@@ -13,16 +15,20 @@ import {
   $petOwnerKey,
   $petRoam,
   $petRoamDir,
+  capturePetOwner,
   clearPetUnread,
   hasPetSpriteForMeta,
+  isCurrentPetOwner,
+  isPetOwnerChangedError,
   mergePetInfoMeta,
   type PetInfo,
   type PetInfoMeta,
   requestPet,
   setPetInfo
 } from '@/store/pet'
-import { resetPetGallery, setPetScale } from '@/store/pet-gallery'
+import { setPetScale } from '@/store/pet-gallery'
 import { $petOverlayActive, initPetOverlayBridge, popOutPet, restorePetOverlay } from '@/store/pet-overlay'
+import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import { $gatewayState } from '@/store/session'
 import { isSecondaryWindow } from '@/store/windows'
 import { useTheme } from '@/themes/context'
@@ -146,16 +152,27 @@ export function FloatingPet() {
 
     let cancelled = false
 
-    // Change events belong to the gateway's launch profile, which may differ
-    // from the visible bot. Read metadata through the visible owner's route.
+    // Broadcast metadata belongs only to the active gateway. Preserve immediate
+    // disable there, but never clear a different bot's pet from that broadcast.
+    const scope = capturePetOwner()
+
+    const ownsChange =
+      scope.profile === normalizeProfileKey($activeGatewayProfile.get()) &&
+      (typeof scope.owner === 'string' || scope.owner?.connectionId === activeGatewayConnectionId())
+
+    if (ownsChange && changeEventsAvailable && petChange.tick > 0 && petChange.meta?.enabled === false) {
+      setPetInfo({ enabled: false })
+
+      return
+    }
 
     const pull = async () => {
       try {
         if (active) {
           try {
-            const meta = await requestPet<PetInfoMeta>(requestGateway, 'pet.info.meta')
+            const meta = await requestPet<PetInfoMeta>(requestGateway, 'pet.info.meta', {}, scope)
 
-            if (cancelled || !meta) {
+            if (cancelled || !isCurrentPetOwner(scope) || !meta) {
               return
             }
 
@@ -176,8 +193,15 @@ export function FloatingPet() {
 
               return
             }
-          } catch {
-            // Older gateways may not have pet.info.meta yet; fall back to pet.info.
+          } catch (error) {
+            if (cancelled || isPetOwnerChangedError(error)) {
+              return
+            }
+
+            if (!isMissingRpcMethod(error)) {
+              throw error
+            }
+            // Only an older gateway missing metadata needs the full payload.
           }
         }
 
@@ -187,11 +211,16 @@ export function FloatingPet() {
         const held = $petInfo.get()
         const knownRevision = held.enabled && held.spritesheetBase64 ? held.spritesheetRevision : undefined
 
-        const next = await requestPet<PetInfo & { spritesheetUnchanged?: boolean }>(requestGateway, 'pet.info', {
-          knownRevision
-        })
+        const next = await requestPet<PetInfo & { spritesheetUnchanged?: boolean }>(
+          requestGateway,
+          'pet.info',
+          {
+            knownRevision
+          },
+          scope
+        )
 
-        if (!cancelled && next) {
+        if (!cancelled && isCurrentPetOwner(scope) && next) {
           const current = $petInfo.get()
 
           if (next.enabled && next.spritesheetUnchanged && !next.spritesheetBase64) {
@@ -261,14 +290,6 @@ export function FloatingPet() {
       window.clearInterval(timer)
     }
   }, [gatewayState, active, changeEventsAvailable, petChange, requestGateway, ownerKey])
-
-  // Pets are per-profile. When the active profile changes, drop the previous
-  // profile's mascot + gallery cache so the poll above refetches the new
-  // profile's pet (its config + pets dir resolve per-profile on the backend).
-  useEffect(() => {
-    setPetInfo({ enabled: false })
-    resetPetGallery()
-  }, [ownerKey])
 
   // Wire the overlay control channel once, only in the primary window — the
   // pop-out overlay belongs to it (main.ts positions it against the main

@@ -3,8 +3,9 @@ import { atom, computed } from 'nanostores'
 import { PRIMARY_SESSION_VIEW } from '@/app/chat/session-view'
 import { persistBoolean, storedBoolean } from '@/lib/storage'
 import { $activeGatewayProfile, normalizeProfileKey } from '@/store/profile'
-import { $activeSessionId, $selectedStoredSessionId, $sessions, knownSessionOwner } from '@/store/session'
+import { $activeSessionId, $selectedStoredSessionId, $sessions } from '@/store/session'
 import { requestForSessionProfile, type SessionOwnerScope } from '@/store/session-request-router'
+import { $runtimeSessionOwnerRevision, $sessionStates, knownOwnerForSession } from '@/store/session-states'
 
 /**
  * Petdex mascot state for the desktop floating pet.
@@ -147,9 +148,16 @@ export const $petActive = computed($petInfo, info => info.enabled && Boolean(inf
 /** Bot chats deliberately leave the gateway on the launch profile. Resolve the
  * visible conversation's owner instead, including its exact remote connection. */
 export const $petOwner = computed(
-  [$sessions, $selectedStoredSessionId, $activeSessionId, $activeGatewayProfile],
-  (sessions, selected, active, gateway): SessionOwnerScope =>
-    knownSessionOwner(sessions, selected ?? active) ?? normalizeProfileKey(gateway)
+  [
+    $sessions,
+    $selectedStoredSessionId,
+    $activeSessionId,
+    $activeGatewayProfile,
+    $sessionStates,
+    $runtimeSessionOwnerRevision
+  ],
+  (_sessions, selected, active, gateway): SessionOwnerScope =>
+    knownOwnerForSession(selected ?? active) ?? normalizeProfileKey(gateway)
 )
 
 export const $petOwnerKey = computed($petOwner, owner => JSON.stringify(owner))
@@ -159,6 +167,39 @@ export function petProfile(): string {
 
   return normalizeProfileKey(typeof owner === 'string' ? owner : (owner?.targetProfile ?? owner?.profile))
 }
+
+export class PetOwnerChangedError extends Error {
+  constructor() {
+    super('Pet owner changed while the request was in flight')
+    this.name = 'PetOwnerChangedError'
+  }
+}
+
+export const isPetOwnerChangedError = (error: unknown): error is PetOwnerChangedError =>
+  error instanceof PetOwnerChangedError
+
+let ownerVersion = 0
+let previousOwnerKey: string | undefined
+$petOwnerKey.subscribe(key => {
+  if (previousOwnerKey !== undefined && previousOwnerKey !== key) {
+    ownerVersion += 1
+    setPetInfo({ enabled: false })
+  }
+
+  previousOwnerKey = key
+})
+
+export interface PetOwnerScope {
+  owner: SessionOwnerScope
+  profile: string
+  version: number
+}
+
+export function capturePetOwner(): PetOwnerScope {
+  return { owner: $petOwner.get(), profile: petProfile(), version: ownerVersion }
+}
+
+export const isCurrentPetOwner = (scope: PetOwnerScope): boolean => scope.version === ownerVersion
 
 type PetRequest = <T>(
   method: string,
@@ -172,23 +213,37 @@ type PetRequest = <T>(
 export async function requestPet<T>(
   request: PetRequest,
   method: string,
-  params: Record<string, unknown> = {}
+  params: Record<string, unknown> = {},
+  scope: PetOwnerScope = capturePetOwner()
 ): Promise<T> {
-  const owner = $petOwner.get()
-  const key = $petOwnerKey.get()
-
-  const result = await requestForSessionProfile<T>(
-    typeof owner === 'string' && owner === normalizeProfileKey($activeGatewayProfile.get()) ? undefined : owner,
-    request,
-    method,
-    { ...params, profile: petProfile() }
-  )
-
-  if (key !== $petOwnerKey.get()) {
-    throw new Error('Pet owner changed while the request was in flight')
+  if (!isCurrentPetOwner(scope)) {
+    throw new PetOwnerChangedError()
   }
 
-  return result
+  const { owner, profile } = scope
+
+  try {
+    const result = await requestForSessionProfile<T>(
+      typeof owner === 'string' && owner === normalizeProfileKey($activeGatewayProfile.get()) ? undefined : owner,
+      request,
+      method,
+      { ...params, profile }
+    )
+
+    if (!isCurrentPetOwner(scope)) {
+      throw new PetOwnerChangedError()
+    }
+
+    return result
+  } catch (error) {
+    // A transport error from the previous owner is cancellation too, not an
+    // error or optimistic rollback belonging to the newly visible gallery.
+    if (!isCurrentPetOwner(scope)) {
+      throw new PetOwnerChangedError()
+    }
+
+    throw error
+  }
 }
 
 /**
