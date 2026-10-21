@@ -15,6 +15,7 @@ import {
   PetOwnerChangedError,
   type PetOwnerScope,
   requestPet,
+  requestPetForFormerOwner,
   setPetInfo
 } from '@/store/pet'
 
@@ -96,8 +97,7 @@ let galleryLoad: Promise<void> | null = null
  * new profile's mascot, and the picker reloads its gallery on next mount.
  */
 export function resetPetGallery(): void {
-  clearTimeout(scalePersist)
-  scalePersist = undefined
+  flushPendingScale()
   galleryLoad = null
   thumbCache.clear()
   $petGallery.set(null)
@@ -429,7 +429,29 @@ export function nextScaleFromWheel(current: number | undefined, deltaY: number):
   return clampPetScale(base * Math.exp(-deltaY * WHEEL_SCALE_K))
 }
 
-let scalePersist: ReturnType<typeof setTimeout> | undefined
+interface PendingScale {
+  timer: ReturnType<typeof setTimeout>
+  request: GatewayRequest
+  scale: number
+  scope: PetOwnerScope
+}
+
+let pendingScale: PendingScale | undefined
+
+/** An owner switch inside the debounce window still persists the last resize,
+ *  to the owner it was made for; a reset never silently drops it. */
+function flushPendingScale(): void {
+  if (!pendingScale) {
+    return
+  }
+
+  const { timer, request, scale, scope } = pendingScale
+  clearTimeout(timer)
+  pendingScale = undefined
+  requestPetForFormerOwner(request, 'pet.scale', { scale }, scope).catch(() => {
+    // Cosmetic — the next resize on that owner writes its scale again.
+  })
+}
 
 $petOwnerKey.listen(() => resetPetGallery())
 
@@ -441,13 +463,16 @@ $petOwnerKey.listen(() => resetPetGallery())
  */
 export function setPetScale(request: GatewayRequest, scale: number): void {
   const scope = capturePetOwner()
+  const raw = request
   request = ownerRequest(request, scope)
   const next = clampPetScale(scale)
 
   setPetInfo({ ...$petInfo.get(), scale: next })
 
-  clearTimeout(scalePersist)
-  scalePersist = setTimeout(() => {
+  clearTimeout(pendingScale?.timer)
+
+  const timer = setTimeout(() => {
+    pendingScale = undefined
     petRpc<{ ok: boolean; scale?: number }>(request, 'pet.scale', { scale: next })
       .then(result => {
         // Reconcile with the server's clamp (cheap; only matters at the bounds).
@@ -456,9 +481,12 @@ export function setPetScale(request: GatewayRequest, scale: number): void {
         }
       })
       .catch(() => {
-        // Cosmetic — the pet already resized; persistence self-heals next write.
+        // Cosmetic — the pet already resized; the next resize on this owner
+        // writes its scale again. An owner switch first is flushed, not lost.
       })
   }, 200)
+
+  pendingScale = { timer, request: raw, scale: next, scope }
 }
 
 /** Export a pet as a `.zip` (pet.json + spritesheet) and save it via the browser. */

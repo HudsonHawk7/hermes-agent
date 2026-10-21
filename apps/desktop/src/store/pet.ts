@@ -246,6 +246,17 @@ export async function requestPet<T>(
   }
 }
 
+/** Finish a write that belongs to a former owner, on that owner's own route,
+ * so it never lands on the newly visible one. Its reply repaints nothing. */
+export function requestPetForFormerOwner<T>(
+  request: PetRequest,
+  method: string,
+  params: Record<string, unknown>,
+  scope: PetOwnerScope
+): Promise<T> {
+  return requestForSessionProfile<T>(scope.owner, request, method, { ...params, profile: scope.profile })
+}
+
 /**
  * Pet-local "you have a new message" flag, surfaced as the overlay's mail icon.
  * Deliberately not real unread tracking: it flips on when a turn finishes while
