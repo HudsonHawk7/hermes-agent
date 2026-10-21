@@ -125,15 +125,8 @@ describe('pet owner isolation through asynchronous callers', () => {
     expect($petGallery.get()).toEqual(current)
   })
 
+  // Gallery load is covered mid-flight (no manual reset) in pet-gallery-owner-switch.test.ts.
   const actions: Array<[string, (request: GatewayRequest) => Promise<unknown>]> = [
-    [
-      'gallery load',
-      request => {
-        resetPetGallery()
-
-        return loadPetGallery(request)
-      }
-    ],
     ['adopt', request => adoptPet(request, 'same-slug', 'failed')],
     ['enable', request => setPetEnabled(request, true, { noneAvailable: 'none', fallback: 'failed' })],
     ['disable', request => setPetEnabled(request, false, { noneAvailable: 'none', fallback: 'failed' })],
