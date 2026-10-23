@@ -512,7 +512,7 @@ def _mint_locked(client: httpx.Client, portal: str, auth_store: dict[str, Any], 
     }
     _store_provider_state(auth_store, "nous", state, set_active=False)
     _save_auth_store(auth_store)
-    _write_shared_nous_state(state)
+    _write_shared_nous_state(state, renewal=False)
     logger.info("Nous free tier ready (identity minted)")
     return state
 
@@ -644,7 +644,7 @@ def _reconcile_and_provision(*, timeout_seconds: float, force: bool = False,
                 return state
             if profile_state:
                 if not shared:
-                    _write_shared_nous_state(profile_state)
+                    _write_shared_nous_state(profile_state, renewal=False)
                 return profile_state
             # A caller queued on these locks behind a mint that just failed waits out its cooldown.
             failure = _mint_failure_for_profile()

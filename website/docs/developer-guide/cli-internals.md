@@ -164,6 +164,11 @@ call it:
   record. Records live in `guest_handoff.json` beside the shared Nous store, keyed by a hash of the
   `anon_` credential and bound to the destination account, so profiles sharing one free-tier
   identity share one record and one claim.
+- Only a sign-in changes which identity the shared store holds. Every `_write_shared_nous_state`
+  caller declares `renewal`: a token refresh (`renewal=True`) never replaces another identity there
+  (identity = the guest's `anon_` credential, or the account's JWT `sub`), so a refresh of one
+  profile's account never replaces a guest another profile minted. An empty store still takes a
+  refresh, which keeps profiles that share one account's rotating refresh token in step.
 - `drain` runs the claim outside every lock, bounded to about 10 s (each record, lock wait, token
   read and request counts against the budget): after a shared-store write, when a
   `guest_handoff.deferred()` block exits (a surface that saves under its own lock, such as the desktop

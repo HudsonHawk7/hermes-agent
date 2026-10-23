@@ -449,9 +449,21 @@ def _nous_shared_shape(src: dict[str, Any]) -> dict[str, Any]:
            if src.get(k) not in (None, "")}}
 
 
-def _write_shared_nous_state(state: dict[str, Any]) -> None:
+def _nous_identity(state: dict[str, Any]) -> tuple[str, Any]:
+    """Who a Nous state is: the guest's ``anon_`` credential, else the account's JWT subject (which,
+    unlike the refresh token, survives a refresh)."""
+    from hermes_cli.anon_auth import is_guest_state
+    if is_guest_state(state):
+        return "guest", state.get("anon_token")
+    return "account", _decode_jwt_claims(state.get("access_token")).get("sub")
+
+
+def _write_shared_nous_state(state: dict[str, Any], *, renewal: bool) -> None:
     """Persist a minimal copy of the Nous OAuth state to the shared store.
 
+    A *renewal* (a token refresh) never replaces another identity the store holds: only a sign-in
+    (or a mint) does, so only a sign-in can replace a guest there. An empty store takes a renewal,
+    so profiles sharing one account keep their rotated refresh token in step.
     Best-effort: failures are logged and swallowed; per-profile auth.json stays the source of truth.
     """
     from hermes_cli.auth import _nonempty_str, _save_private_json
@@ -467,7 +479,10 @@ def _write_shared_nous_state(state: dict[str, Any]) -> None:
     try:
         with _nous_shared_store_lock():
             path = _nous_shared_store_path()
-            note_replacement(_read_shared_nous_state(), state)
+            held = _read_shared_nous_state()
+            if renewal and held is not None and _nous_identity(held) != _nous_identity(state):
+                return
+            note_replacement(held, state)
             _save_private_json(path, shared, sort_keys=True)
         _oauth_trace(
             "nous_shared_store_written", path=str(path),
@@ -608,8 +623,8 @@ def _try_import_shared_nous_state(*, timeout_seconds: float = 15.0) -> Optional[
                 "tls": {"insecure": False, "ca_bundle": None}}
             refreshed = refresh_nous_oauth_from_state(
                 state, timeout_seconds=timeout_seconds, force_refresh=True,
-                on_state_update=lambda updated, _reason: _write_shared_nous_state(updated))
-            _write_shared_nous_state(refreshed)
+                on_state_update=lambda updated, _reason: _write_shared_nous_state(updated, renewal=True))
+            _write_shared_nous_state(refreshed, renewal=True)
     except Exception as exc:
         is_auth = isinstance(exc, AuthError)
         _oauth_trace(
@@ -873,7 +888,7 @@ def persist_nous_credentials(creds: dict[str, Any], *, label: Optional[str] = No
     if label and str(label).strip():
         state["label"] = str(label).strip()
     _save_active_provider_state("nous", state)
-    _write_shared_nous_state(state)
+    _write_shared_nous_state(state, renewal=False)
     pool = load_pool("nous")
     return next((e for e in pool.entries() if e.source == NOUS_DEVICE_CODE_SOURCE), None)
 
@@ -969,7 +984,7 @@ class _NousRuntimeResolve:
             access_token_fp=_token_fingerprint(state.get("access_token")))
         self._persisted_state = dict(state)
         self.persisted_any = True
-        _write_shared_nous_state(state)
+        _write_shared_nous_state(state, renewal=True)
 
     def shared_lock(self):
         return _nous_shared_store_lock(timeout_seconds=_shared_lock_timeout(self.timeout_seconds))
@@ -1462,7 +1477,7 @@ def _mirror_nous_state_best_effort(auth_state: dict[str, Any]) -> None:
     """Mirror to the shared store + reseed the pool, swallowing all errors (same as _login_nous)."""
     from hermes_cli.auth import _sync_nous_pool_from_auth_store, _write_shared_nous_state
     with suppress(Exception):
-        _write_shared_nous_state(auth_state)
+        _write_shared_nous_state(auth_state, renewal=False)
     with suppress(Exception):
         _sync_nous_pool_from_auth_store()
 
@@ -1658,7 +1673,7 @@ def _login_nous(args, pconfig: ProviderConfig) -> None:
         with deferred() as handoff:  # a replaced free tier hands its apps over once both saves land
             saved_to = _save_active_provider_state("nous", auth_state)
             # Mirror to the shared store so other profiles can one-tap import (best-effort inside).
-            _write_shared_nous_state(auth_state)
+            _write_shared_nous_state(auth_state, renewal=False)
         _sync_nous_pool_from_auth_store()
         from hermes_cli.anon_auth import settle_after_upgrade
         settle_after_upgrade(auth_state)  # a config left on the free tier's route moves to the account
