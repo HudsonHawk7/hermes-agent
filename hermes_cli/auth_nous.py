@@ -410,12 +410,17 @@ _NOUS_SHARED_STATE_KEYS = (
     "inference_base_url", "obtained_at", "expires_at",
     # Guest (``auth_method: anonymous``) identity: the ``anon_`` credential is the refresh material.
     "auth_method", "account_tier", "anon_token", "user_id", "org_id")
+# Shared-store key: an account's latest refresh, kept beside a different identity the store holds.
+_SHARED_RENEWAL_KEY = "renewal"
 
 
 def _merge_shared_nous_oauth_state(state: dict[str, Any]) -> bool:
     """Copy fresher shared OAuth tokens into a profile-local Nous state."""
     from hermes_cli.auth import _nonempty_str, _parse_iso_timestamp, _read_shared_nous_state
     shared = _read_shared_nous_state() or {}
+    renewed = shared.get(_SHARED_RENEWAL_KEY)
+    if isinstance(renewed, dict) and _nous_identity(renewed) == _nous_identity(state):
+        shared = renewed
     shared_refresh = shared.get("refresh_token")
     if not _nonempty_str(shared_refresh):
         return False  # a free-tier identity has no refresh token; nothing to merge into an OAuth state
@@ -461,9 +466,10 @@ def _nous_identity(state: dict[str, Any]) -> tuple[str, Any]:
 def _write_shared_nous_state(state: dict[str, Any], *, renewal: bool) -> None:
     """Persist a minimal copy of the Nous OAuth state to the shared store.
 
-    A *renewal* (a token refresh) never replaces another identity the store holds: only a sign-in
-    (or a mint) does, so only a sign-in can replace a guest there. An empty store takes a renewal,
-    so profiles sharing one account keep their rotated refresh token in step.
+    The store holds one identity, which profiles adopt or import. Only a sign-in (or a mint) changes
+    it, so only a sign-in can replace a guest there. A *renewal* (a token refresh) of another
+    identity is kept beside it under ``renewal``: siblings on that account read their next
+    single-use refresh token from there (``_merge_shared_nous_oauth_state``).
     Best-effort: failures are logged and swallowed; per-profile auth.json stays the source of truth.
     """
     from hermes_cli.auth import _nonempty_str, _save_private_json
@@ -480,9 +486,13 @@ def _write_shared_nous_state(state: dict[str, Any], *, renewal: bool) -> None:
         with _nous_shared_store_lock():
             path = _nous_shared_store_path()
             held = _read_shared_nous_state()
-            if renewal and held is not None and _nous_identity(held) != _nous_identity(state):
-                return
-            note_replacement(held, state)
+            same = held is not None and _nous_identity(held) == _nous_identity(state)
+            if renewal and held is not None and not same:
+                shared = {**held, _SHARED_RENEWAL_KEY: _nous_shared_shape(state)}
+            else:
+                note_replacement(held, state)
+                if same and _SHARED_RENEWAL_KEY in held:
+                    shared[_SHARED_RENEWAL_KEY] = held[_SHARED_RENEWAL_KEY]
             _save_private_json(path, shared, sort_keys=True)
         _oauth_trace(
             "nous_shared_store_written", path=str(path),
