@@ -1905,6 +1905,16 @@ def configured_max_in_progress() -> Optional[int]:
     return ival if ival >= 1 else None
 
 
+def configured_max_in_progress_per_profile() -> Optional[int]:
+    """Read ``kanban.max_in_progress_per_profile`` from config, or None when unset/invalid."""
+    try:
+        from hermes_cli.config import load_config_readonly
+        raw = (load_config_readonly() or {}).get("kanban", {}).get("max_in_progress_per_profile")
+    except Exception:
+        return None
+    return _positive_int(raw, None)
+
+
 def count_running_tasks(conn: sqlite3.Connection) -> int:
     """Number of tasks in ``status='running'``.
 

@@ -483,6 +483,25 @@ def test_dispatch_dry_run(client):
     # DispatchResult is serialized as a dataclass dict.
     assert isinstance(body, dict)
 
+
+def test_dispatch_nudge_honours_configured_caps(client, monkeypatch):
+    from hermes_cli import kanban_db_dispatch as kbd
+
+    captured = {}
+
+    def fake_dispatch_once(conn, **kwargs):
+        captured.update(kwargs)
+        return kbd.DispatchResult()
+
+    monkeypatch.setattr(kbd, "configured_max_in_progress", lambda: 1)
+    monkeypatch.setattr(kbd, "configured_max_in_progress_per_profile", lambda: 1)
+    monkeypatch.setattr(kbd, "dispatch_once", fake_dispatch_once)
+    r = client.post("/api/plugins/kanban/dispatch")
+    assert r.status_code == 200
+    assert captured["max_spawn"] == 8
+    assert captured["max_in_progress"] == 1
+    assert captured["max_in_progress_per_profile"] == 1
+
 # ---------------------------------------------------------------------------
 # Triage column (new v1 status)
 # ---------------------------------------------------------------------------
