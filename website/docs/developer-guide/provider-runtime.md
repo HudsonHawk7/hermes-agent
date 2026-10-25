@@ -180,6 +180,21 @@ When an auxiliary task is configured with provider `main`, Hermes resolves that 
 - custom endpoints saved via `hermes model` / `config.yaml` also work
 - auxiliary routing can tell the difference between a real saved custom endpoint and the OpenRouter fallback
 
+### Bare `custom` requests and `model.require_local_endpoint`
+
+A session row can persist the bare billing class `custom` — the value a custom route resolves
+*to*, not a provider name. `resolve_runtime_provider` heals that request to its configured
+`custom:<name>` identity (from the model id, then `model.provider`) before the ladder runs, but
+only onto a live route: a local host, or an entry with a credential of its own. On a remote,
+credential-less entry the bare request keeps its loud `#111741` failure instead of resolving a
+placeholder-only route that would 401 on the first turn.
+
+Opt-in second knob: `model.require_local_endpoint: true` (default `false`, no auto-default). A
+resolved runtime whose `base_url` is not a local host (`agent.model_metadata.is_local_endpoint`)
+raises an `AuthError` naming the setting. Because it is typed, `resolve_runtime_with_fallback`
+treats the route as unusable and keeps walking — and every fallback entry passes the same guard,
+so the walk can only land on a local endpoint or re-raise the error.
+
 ## Fallback models
 
 Hermes supports a configured fallback provider chain — a list of `(provider, model)` entries tried in order when the primary model encounters errors. The legacy single-pair `fallback_model` dict is still accepted for back-compat (and migrated on first write).

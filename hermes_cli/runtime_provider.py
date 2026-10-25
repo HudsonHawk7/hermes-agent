@@ -1038,11 +1038,79 @@ def _openrouter_fallback(requested_provider, explicit_api_key, explicit_base_url
                                             explicit_base_url=explicit_base_url), requested_provider)
 
 
+def _heal_bare_custom_provider(requested_provider: str, explicit_base_url: Optional[str],
+                               target_model: Optional[str]) -> str:
+    """Recover the durable ``custom:<name>`` identity behind a bare ``custom`` request (#144437).
+
+    ``custom`` is the billing CLASS a custom route resolves to, not a provider name: a Desktop session
+    that persists it leaves rungs 3-4 with nothing to match (rung 3 wants a literal ``custom`` entry,
+    rung 4 wants ``model.provider`` auto/""), so the ladder fell to the OpenRouter default endpoint
+    and a fresh chat on a named local provider was sent to the cloud. The model name (then the
+    configured ``model.provider``) is the only identity left in a persisted row — the same lookup
+    every session restore path already uses. Fail-closed: no configured identity, no change.
+    """
+    if (requested_provider or "").strip().lower() != "custom" or (explicit_base_url or "").strip():
+        return requested_provider
+    identity = canonical_custom_identity(model=target_model)
+    if not identity:
+        return requested_provider
+    if not _healed_identity_is_usable(identity):
+        # A heal is a repair only when it produces a LIVE route. A remote entry with no credential of
+        # its own would come back as the no-auth placeholder — the dead shape #111741 refuses — so the
+        # bare request keeps that contract (and the require_local_endpoint guard stays the policy knob).
+        logger.info("Bare provider 'custom' has configured identity %s, but it is not a usable route; "
+                    "leaving the request unhealed (#144437)", identity)
+        return requested_provider
+    logger.info("Bare provider 'custom' healed to configured identity %s (#144437)", identity)
+    return identity
+
+
+def _healed_identity_is_usable(identity: str) -> bool:
+    """Endpoint plus either a local host (Ollama/vLLM need no key) or the entry's own credential."""
+    entry = _get_named_custom_provider(identity)
+    if not entry:
+        return False
+    base_url = str(entry.get("base_url") or "").strip()
+    if not base_url:
+        return False
+    from agent.model_metadata import is_local_endpoint
+    return is_local_endpoint(base_url) or bool(entry.get("key_cmd")) or has_usable_secret(entry.get("api_key"))
+
+
+def _require_local_endpoint() -> bool:
+    """``model.require_local_endpoint``: opt-in, default off (no auto-defaults)."""
+    return bool(_get_model_config().get("require_local_endpoint"))
+
+
+def _raise_if_non_local_endpoint(runtime: dict[str, Any]) -> None:
+    """Egress guard: with ``model.require_local_endpoint: true``, refuse a route whose endpoint is not
+    a local host instead of shipping the turn — and the conversation — to a cloud API (#144437).
+
+    Typed ``AuthError`` so the shared fallback walk treats the route as unusable and keeps walking; the
+    guard then rejects every non-local fallback the same way, so the walk can only land on a local
+    endpoint or re-raise. Never a hidden cloud fallback.
+    """
+    if not _require_local_endpoint():
+        return
+    from agent.model_metadata import is_local_endpoint
+    base_url = str(runtime.get("base_url") or "").strip()
+    if base_url and is_local_endpoint(base_url):
+        return
+    provider = str(runtime.get("provider") or "")
+    raise AuthError(
+        f"model.require_local_endpoint is true, but provider '{provider or 'auto'}' resolves to the "
+        f"non-local endpoint '{base_url or '(none)'}'. Refusing to send the turn to a remote host: point "
+        "model.provider at a configured local provider (or leave model.require_local_endpoint off).",
+        provider=provider, code="non_local_endpoint_blocked",
+    )
+
+
 def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_key: Optional[str] = None,
                              explicit_base_url: Optional[str] = None, target_model: Optional[str] = None) -> dict[str, Any]:
     """Resolve runtime provider credentials for agent execution. Ladder (order is behavior — each
     rung returns or raises, else falls to the next):
-      1. disabled-provider guard (``providers.<name>.enabled: false``)
+      1. disabled-provider guard (``providers.<name>.enabled: false``), after a bare ``custom`` request
+         is healed to its configured ``custom:<name>`` identity (model, then ``model.provider``)
       2. requested-name shortcuts: moa, anthropic@azure, azure-foundry, vertex
       3. named custom provider / llamacpp alias / bare-custom direct alias
       4. local-endpoint bypass (no explicit creds, config base_url at a non-cloud host)
@@ -1052,11 +1120,16 @@ def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_ke
          keyless fallback as ``auth_error``) → minimax-oauth
          → external-process → anthropic env → bedrock → registry api_key providers
       8. OpenRouter / bare-custom fallback
-      9. ``model.openai_runtime`` overlay (openai/openai-codex, named custom providers): rewrites the picked rung's
+      9. ``model.require_local_endpoint`` egress guard: a non-local resolved endpoint raises
+         ``AuthError`` naming the setting (so every fallback walk rejects cloud entries too)
+     10. ``model.openai_runtime`` overlay (openai/openai-codex, named custom providers): rewrites the picked rung's
          api_mode to ``codex_app_server``; the rung's credential/endpoint is then not used
     target_model overrides model_cfg["default"] when computing provider-specific api_mode (e.g.
     OpenCode Zen/Go where different models route through different API surfaces)."""
     requested_provider = resolve_requested_provider(requested)
+    # A Desktop session can persist the bare billing class ``custom`` (see #144437 before the ladder:
+    # rungs 3-4 only match a configured identity, so an unhealed bare custom reaches OpenRouter).
+    requested_provider = _heal_bare_custom_provider(requested_provider, explicit_base_url, target_model)
     _raise_if_provider_disabled(requested_provider)
     # Same alias expansion the auxiliary client applies, so ``provider: openai`` means one thing on
     # every path (background review, curator, MoA slots, delegation) instead of "Unknown provider".
@@ -1067,6 +1140,7 @@ def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_ke
     _raise_if_local_alias_missing_endpoint(requested_provider, explicit_base_url)
     runtime = next(r for r in _ladder_rungs(requested_provider, explicit_api_key, explicit_base_url, target_model) if r)
     _raise_for_credentialless_bare_custom(requested_provider, runtime)
+    _raise_if_non_local_endpoint(runtime)
     # model.openai_runtime is applied ONCE, after the ladder: every rung (pool, OAuth store,
     # explicit --api-key/--base-url, env key) hardcodes the wire api_mode for openai/openai-codex,
     # so applying the opt-in inside one rung left the others on codex_responses (#115169).
