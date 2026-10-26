@@ -88,6 +88,10 @@ class _Recovery(OverflowVerdict):
     result: Optional[dict[str, Any]] = None
     provider_overflow_recovery_pending: bool = False
     is_context_length_error: bool = False
+    # The classifier said the server PRUNED the user turn (Ollama 500 "no user query
+    # found"): the served window is below the failed request, so recovery compresses
+    # instead of waiting on a shared slot (#114644's sibling) and adopts a window floor.
+    user_turn_pruned: bool = False
 
     def done(self, action: str, result: Optional[dict[str, Any]] = None) -> OverflowVerdict:
         self.action, self.result = action, result
@@ -223,6 +227,26 @@ class _Recovery(OverflowVerdict):
         from agent.model_metadata import estimate_request_tokens_rough
 
         return estimate_request_tokens_rough(self.api_messages, tools=self.agent.tools or None)
+
+    def adopt_prune_floor(self, old_window: int) -> Optional[int]:
+        """In-memory window floor after a server-side user-turn prune: the failed request
+        proves the served window is below it (request + reserved output, capped at the old
+        window). In memory only — the server may still serve a larger window to a smaller
+        request, so this is a floor, never a persisted limit (contrast
+        ``_adopt_provider_context_limit``)."""
+        floor = self.request_tokens() + max(0, int(getattr(self.agent, "max_tokens", 0) or 0))
+        if floor <= 0 or floor >= old_window:
+            return None
+        self.agent._buffer_vprint(
+            f"{self.agent.log_prefix}No-user-query prune: served window is below this request "
+            f"(~{floor:,} tokens incl. output); adjusting the window in memory (not persisted)"
+        )
+        self.agent.context_compressor.update_model(
+            model=self.agent.model, context_length=floor, base_url=self.agent.base_url,
+            api_key=getattr(self.agent, "api_key", ""), provider=getattr(self.agent, "provider", ""),
+            api_mode=getattr(self.agent, "api_mode", ""),
+        )
+        return floor
 
 
 def _recover_payload_too_large(st: _Recovery, _retry: TurnRetryState) -> OverflowVerdict:
@@ -397,6 +421,12 @@ def _recover_context_length(st: _Recovery, _retry: TurnRetryState, error_msg: st
         )
 
     new_ctx = _adopt_provider_context_limit(st, error_msg, old_ctx)
+    # Ollama's prune (front-trim for num_ctx): the server just failed to RENDER this very
+    # request, so the served window is below it. Adopt the in-memory floor BEFORE the
+    # unexplained-rejection check, so preflight and compression judge a truthy window —
+    # the classifier's user_turn_pruned flag separates this from #114644's shared-slot wait.
+    if st.user_turn_pruned and not new_ctx and isinstance(old_ctx, int) and old_ctx > 0:
+        new_ctx = st.adopt_prune_floor(old_ctx)
 
     # A rejection the transcript cannot explain (#114644): the request sits far below the window
     # Hermes knows for this model (after adopting any limit the server reported), so compressing
@@ -414,6 +444,9 @@ def _recover_context_length(st: _Recovery, _retry: TurnRetryState, error_msg: st
         and not re.search(r"\d{4,}", error_msg)
         and isinstance(window, int) and window > 0
         and request_tokens < window * _UNEXPLAINED_REJECTION_FRACTION
+        and not st.user_turn_pruned
+        # A server-pruned transcript never waits on a slot: the failed request is itself
+        # the proof the window is smaller, and the floor above already shrank it.
     ):
         return st.fail_turn(
             site_copy("server_context_rejection", model=agent.model, tokens=request_tokens, window=window),
@@ -481,6 +514,7 @@ def recover_from_overflow(
         active_system_prompt=active_system_prompt, conversation_history=conversation_history,
         approx_tokens=approx_tokens, compression_attempts=compression_attempts,
         overflow_reason=getattr(classified.reason, "value", None),
+        user_turn_pruned=bool((getattr(classified, "error_context", None) or {}).get("user_turn_pruned")),
     )
 
     # GitHub Models free tier caps requests at 8K tokens, under the system prompt +

@@ -287,8 +287,9 @@ _MODEL_NOT_FOUND_PATTERNS = (
     "is no longer free",
 )
 
-# Qwen/vLLM chat-template "No user query found". Shared by the invalid-body
-# table (→ format_error) and the llama.cpp grammar guard so they cannot drift.
+# Qwen-family chat-template "No user query found". Shared by the invalid-body
+# table (→ format_error, the vLLM 400 shape), the llama.cpp grammar guard and the
+# 5xx prune verdict (Ollama serves the same raise as HTTP 500) so they cannot drift.
 _NO_USER_QUERY_SIGNAL = "no user query found"
 
 # Deterministic rejections of the *transcript* (e.g. a content-less assistant
@@ -719,6 +720,11 @@ class _Ctx:
     num_messages: int
     base_url: str = ""  # the route the call went to; "" when the caller did not say
     anonymous: bool = False
+    # Whether the OUTBOUND transcript carried a user turn at all (``None`` when the
+    # caller did not check). Qwen-family templates render only user turns as the query —
+    # tool/assistant results never count — so an Ollama 500 "no user query found" on a
+    # transcript that still has one is a server-side prune (overflow), not our bug.
+    has_user_turn: Optional[bool] = None
 
     def __post_init__(self) -> None:
         self.error_type = type(self.error).__name__
@@ -733,6 +739,20 @@ class _Ctx:
         return self.approx_tokens > self.context_length * frac or (
             self.context_length <= 256000 and (self.approx_tokens > tokens or self.num_messages > messages)
         )
+
+
+def transcript_has_user_turn(api_messages: Any) -> Optional[bool]:
+    """Whether the OUTBOUND transcript carries any user-role turn; ``None`` when unknown.
+
+    Qwen-family chat templates scan USER messages backward for the query — tool and
+    assistant results never count — so this is the exact signal their strict templates
+    check. A non-list (or missing) transcript means "unknown"."""
+    if api_messages is None or not isinstance(api_messages, (list, tuple)):
+        return None
+    for message in api_messages:
+        if isinstance(message, dict) and message.get("role") == "user":
+            return True
+    return False
 
 
 def _plugin_verdict(c: _Ctx) -> Optional[Verdict]:
@@ -1014,12 +1034,16 @@ def classify_api_error(
     approx_tokens: int = 0, context_length: int = 200000, num_messages: int = 0,
     base_url: str = "",
     api_key: Any = None,
+    has_user_turn: Optional[bool] = None,
 ) -> ClassifiedError:
     """Classify an API error into a structured recovery recommendation (see ``_STAGES``).
 
     ``base_url`` (optional) is the route the call went to; the Nous welcome tier keys its
     dark-tier 403 on it because that refusal carries no distinguishing message.
     ``api_key`` identifies an anonymous request; a host or fairshare reason alone does not.
+    ``has_user_turn`` (optional) says whether the OUTBOUND transcript carried a user turn
+    (``transcript_has_user_turn``) — routes Ollama's 500 "no user query found" (a
+    server-side prune) away from our own user-less request.
     The credential is never included in the returned context."""
     from hermes_cli.anon_auth import is_anonymous_request
     status_code = _extract_status_code(error)
@@ -1030,7 +1054,7 @@ def classify_api_error(
     c = _Ctx(
         error, status_code, body, _build_error_msg(error, body), provider, model,
         approx_tokens, context_length, num_messages, str(base_url or ""),
-        anonymous=is_anonymous_request(provider, api_key),
+        anonymous=is_anonymous_request(provider, api_key), has_user_turn=has_user_turn,
     )
     verdict = next((v for v in (stage(c) for stage in _STAGES) if v is not None), _V_UNKNOWN)
     message = _extract_message(error, body)
@@ -1131,7 +1155,33 @@ def _status_5xx(c: _Ctx) -> Verdict:
     validation = any(p in c.msg for p in _REQUEST_VALIDATION_PATTERNS) or c.code in _5XX_VALIDATION_CODES
     if validation and not _is_server_injected_param_rejection(c.msg, c.provider_slug):
         return _V_FORMAT_ERROR
+    # Ollama serves the Qwen template's raise — the user query was pruned from the front
+    # to fit num_ctx — as HTTP 500 ("no user query found in messages"); vLLM serves the
+    # identical raise as 400 (the invalid-body table). The raise is DETERMINISTIC for a
+    # request the provider cannot render, so it must not read as a transient server flake:
+    # the retry ladder burned ~200 deterministic calls on one board run (2026-10-26).
+    if _NO_USER_QUERY_SIGNAL in c.msg:
+        return _no_user_query_verdict(c)
     return _first_match(c.msg, _OVERFLOW_AS_5XX_RULES) or _V_SERVER_ERROR
+
+
+def _no_user_query_verdict(c: _Ctx) -> Verdict:
+    """Ollama 500 "no user query found in messages": Ollama trims the rendered transcript
+    from the FRONT to fit ``num_ctx`` (its guard protects only the LAST message — in a
+    tool loop that is a tool result, so the user turn that started the loop is the one
+    that goes) and Qwen's template then raises. The identical raise served as a 400 (vLLM)
+    is already a format_error. The raise is deterministic for a request the server cannot
+    render, so:
+
+    - a transcript that still carries its user turn (Hermes never loses it — measured on
+      the failing request dumps, 2026-10-26) is an OVERFLOW IN A MASK: compress (the
+      zero-user guard keeps a user turn on the compressed replay, #58753) instead of
+      burning the retry ladder;
+    - a transcript with NO user turn is our own request bug: fail fast — compression
+      cannot invent the missing turn."""
+    if c.has_user_turn is False:
+        return _V_FORMAT_ERROR
+    return _v(_R.context_overflow, should_compress=True, error_context={"user_turn_pruned": True})
 
 
 def _is_nous_route(c: _Ctx) -> bool:
