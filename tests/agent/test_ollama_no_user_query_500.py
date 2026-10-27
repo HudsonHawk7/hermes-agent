@@ -27,6 +27,10 @@ Contract:
 - a server that QUOTES its own limit (``maximum context length is 128000 tokens``) keeps
   its limit; the prune floor never overrides it.
 
+- the aux summarizer being unavailable (aux window below the 64K minimum: any small
+  local model) never kills the worker mid-recovery: the context-length and 413 paths
+  degrade to a model-free tool-payload trim (user turn + pairing intact, rounds capped)
+  and end with an honest typed failure when they cannot fit;
 Windows note: the main-loop test imports ``run_agent`` like ``test_413_compression`` does;
 run the file after a module that imports it (or with that file) on this host.
 """
@@ -310,3 +314,100 @@ def _no_compression_sleep(monkeypatch):
     from agent import retry_utils as _retry_utils
 
     monkeypatch.setattr(_retry_utils, "jittered_backoff", lambda *a, **k: 0.0)
+
+
+# ── Sub-64K aux: the summarizer is unavailable; recovery must survive, not die ──
+
+
+_AUX_INFEASIBLE = ValueError(
+    "Auxiliary compression model qwen3.8:27b has a context window of 37,168 tokens, which is "
+    "below the minimum 64,000 required by Hermes Agent. Choose a compression model with at "
+    "least 64K context (set auxiliary.compression.model in config.yaml)."
+)
+
+
+def _fake_estimate(msgs, **kwargs):
+    """Rough stand-in for both token estimators, deterministic on content length."""
+    return sum(len(str(m.get("content") or "")) // 4 + 8 for m in msgs if isinstance(m, dict))
+
+
+def _prune_recovery_call(agent, transcript, attempts=0, max_attempts=3):
+    """One recovery pass on a server-pruned 500 with an INFEASIBLE aux summarizer."""
+    _retry = SimpleNamespace(restart_with_compressed_messages=False)
+    with (
+        patch("agent.model_metadata.estimate_messages_tokens_rough", _fake_estimate),
+        patch("agent.model_metadata.estimate_request_tokens_rough", _fake_estimate),
+        patch("agent.turn_overflow.context_compression_timed_out", return_value=False),
+        patch("agent.turn_overflow.compression_skipped_due_to_lock", return_value=False),
+        patch("agent.turn_overflow.compression_blocked_transiently", return_value=False),
+        patch("agent.conversation_compression.conversation_history_after_compression", side_effect=lambda agent_, m, h: h),
+        patch.object(agent, "_compress_context", side_effect=_AUX_INFEASIBLE) as mock_compress,
+    ):
+        verdict = recover_from_overflow(
+            agent, _ollama_500(), classify_api_error(
+                _ollama_500(), provider="ollama", model="qwen3.8:27b",
+                approx_tokens=150000, context_length=256000, num_messages=3,
+                base_url=agent.base_url, has_user_turn=True,
+            ), _retry, status_code=500,
+            error_msg="no user query found in messages", wrapped_output_cap_budget=None,
+            messages=list(transcript), api_messages=list(transcript), system_message="system",
+            active_system_prompt="system", conversation_history=[],
+            approx_tokens=150000, compression_attempts=attempts,
+            max_compression_attempts=max_attempts, api_call_count=1, effective_task_id="t",
+        )
+    return verdict, mock_compress, _retry
+
+
+def test_pruned_500_recovery_survives_infeasible_aux_via_offline_tool_trim():
+    """The measured board crash (t_6d5e44ce): 500-prune -> compression -> the lazy aux
+    feasibility probe hard-raises (37,168 < the 64K summarizer minimum) and the ValueError
+    killed the managed worker. Recovery must degrade to the model-free tool trim, keep the
+    user turn and pairing, and still signal the replay."""
+    agent = _recovery_agent()
+    agent.context_compressor.context_length = 256000
+    agent.context_compressor.update_model = MagicMock(
+        side_effect=lambda **kw: setattr(agent.context_compressor, "context_length", kw["context_length"])
+    )
+    big = "row" * 200000  # ~600K chars: a board dump that blows the 37K window
+    transcript = [
+        {"role": "user", "content": "inspect the board"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function",
+         "function": {"name": "kanban_read", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": big},
+    ]
+
+    verdict, mock_compress, _retry = _prune_recovery_call(agent, transcript)
+
+    assert verdict.action == "break"
+    assert _retry.restart_with_compressed_messages is True
+    assert mock_compress.call_count == 1
+    msgs = verdict.messages
+    assert msgs[0]["role"] == "user" and msgs[0]["content"] == "inspect the board"
+    assert msgs[1]["tool_calls"], "assistant tool_calls survived"
+    assert msgs[2]["tool_call_id"] == "c1", "tool pairing survived"
+    trimmed = msgs[2]["content"]
+    assert len(trimmed) < len(big) and "omitted" in trimmed
+    assert trimmed.startswith(big[:80]) and trimmed.endswith(big[-80:]), trimmed[:120]
+
+
+def test_pruned_500_recovery_with_infeasible_aux_and_nothing_to_trim_still_fails_honestly():
+    """No oversized tool payloads -> trim declines. The prune floor still earns one replay
+    per pass, and with the aux still infeasible the loop repeats until the count_attempt
+    cap ends in the typed max-attempts failure. Never an exception, no transcript mutation."""
+    agent = _recovery_agent()
+    transcript = [
+        {"role": "user", "content": "start the task"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function",
+         "function": {"name": "kanban_read", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "small"},
+    ]
+    for attempt in range(3):
+        verdict, _mc, _retry = _prune_recovery_call(agent, transcript, attempts=attempt)
+        assert verdict.action == "break", (attempt, verdict)
+    final, _mc, _retry = _prune_recovery_call(agent, transcript, attempts=3)
+    assert final.action == "return"
+    result = final.result or {}
+    assert result.get("failed") is True
+    assert result.get("completed") is False
+    assert "grown too long for" in (result.get("final_response") or "").lower()
+    assert len(transcript[2]["content"]) == 5, "transcript untouched"

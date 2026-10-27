@@ -2,7 +2,12 @@
 context-length errors after ``classify_api_error``.
 
 Each path either compresses and signals a restart, defers softly (compression lock /
-transient block), or ends the turn with a typed result. Nothing here imports
+transient block), or ends the turn with a typed result. When the auxiliary summarizer is
+structurally unavailable (aux window below the Hermes 64K summarizer minimum on small local
+models - the lazy feasibility probe hard-rejects mid-recovery, ValueError), the paths
+degrade to a model-free tool-payload trim: user turn and tool_call pairing survive, rounds
+are capped by max_compression_attempts, and the final failure stays an honest typed result.
+Nothing here imports
 ``agent.conversation_loop`` at module level (cycle); loop-internal helpers and the token
 estimators that tests patch on the loop module are imported lazily inside the handlers.
 """
@@ -48,6 +53,93 @@ _GITHUB_MODELS_HINT = (
 )
 
 _MINIMAX_ANTHROPIC_URLS = ("https://api.minimax.io/anthropic", "https://api.minimaxi.com/anthropic")
+
+# Measured 2026-10-26: on a small local model whose AUX window sits below the Hermes 64K
+# summarizer minimum (qwen3.8:27b reports 37,168; the box has no >=64K model), the lazy
+# feasibility probe (conversation_compression) hard-rejects MID-RECOVERY - exactly when
+# overflow recovery needs the summarizer. The summarizer is structurally unavailable, so
+# recovery degrades: a bounded, model-free trim of oversized tool-result payloads, then
+# one replay. The user turn and tool_call pairing are never touched, every shrink is
+# marked honestly, count_attempt caps the rounds, and the failure below stays typed.
+_TOOL_TRIM_WINDOW_SHARE = 0.75  # below the band the server itself serves after front-trim (~27-28K measured)
+_TOOL_TRIM_MIN_KEEP_CHARS = 400
+_TOOL_TRIM_MARKER = (
+    "\n[... {omitted} chars omitted by Hermes overflow recovery "
+    "(tool payload trimmed; user turn kept; pairing intact) ...]\n"
+)
+_CHARS_PER_TOKEN = 4  # rough text sizing for the model-free trim target
+
+
+def _offline_trim_target_tokens(agent: Any) -> Optional[int]:
+    """Token budget the model-free trim drives toward: the known window (the adopted
+    prune floor or the configured/context length) times _TOOL_TRIM_WINDOW_SHARE.
+    ``None`` when no numeric window is known - the trim cannot be scored, so it declines."""
+    value = getattr(getattr(agent, "context_compressor", None), "context_length", None)
+    if not isinstance(value, int) or value <= 0:
+        return None
+    return int(value * _TOOL_TRIM_WINDOW_SHARE)
+
+
+def _trim_tool_payloads_offline(st: Any, target_tokens: int) -> tuple[bool, int]:
+    """Model-free fallback when summarizer compression is structurally unavailable:
+    cap oversized tool-result payloads in place, tighter each compression round.
+
+    Never touches system/user/assistant text; never drops a message (tool_call ids stay
+    paired); every shrink carries an explicit omission marker. Returns ``(trimmed,
+    after_tokens)``."""
+    from agent.model_metadata import estimate_messages_tokens_rough
+
+    oversized: dict[int, int] = {}
+    for idx, msg in enumerate(st.messages):
+        if not isinstance(msg, dict) or msg.get("role") != "tool":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str) and content:
+            oversized[idx] = len(content)
+    before = estimate_messages_tokens_rough(st.messages)
+    if not oversized:
+        return False, before
+    if before <= target_tokens:
+        return False, before
+
+    total_chars = sum(oversized.values())
+    need_cut_chars = (before - target_tokens) * _CHARS_PER_TOKEN
+    # Largest per-message cap that cuts enough; later rounds tighten further and the
+    # _TOOL_TRIM_MIN_KEEP_CHARS floor keeps every trimmed result readable (kept(cap)
+    # is nondecreasing in cap, so binary search).
+    round_scale = 0.5 ** (max(1, st.compression_attempts) - 1)
+    floor = max(80, _TOOL_TRIM_MIN_KEEP_CHARS)
+    goal = total_chars - need_cut_chars
+
+    def kept(cap: int) -> int:
+        return sum(min(n, cap) for n in oversized.values())
+
+    if goal <= kept(floor):
+        # Even the floor cannot cut enough - apply the floor anyway (partial, honest
+        # progress); the replay decides whether it fits.
+        cap = floor
+    else:
+        lo, hi, cap = floor, max(oversized.values()), floor
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            if kept(mid) <= goal:
+                cap = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+    cap = max(floor, int(cap * round_scale))
+
+    for idx in oversized:
+        msg = st.messages[idx]
+        content = msg["content"]
+        if len(content) <= cap:
+            continue
+        half = max(40, cap // 2)
+        marker = _TOOL_TRIM_MARKER.format(omitted=len(content) - 2 * half)
+        msg["content"] = f"{content[:half]}{marker}{content[-half:]}"
+
+    after = estimate_messages_tokens_rough(st.messages)
+    return after < before, after
 
 
 @dataclass
@@ -274,7 +366,18 @@ def _recover_payload_too_large(st: _Recovery, _retry: TurnRetryState) -> Overflo
     # threshold. Token-scored progress here burned all attempts on "no progress" and wedged the session
     # permanently. (#88960 / #47339)
     original_bytes = serialized_messages_bytes(messages)
-    deferred = st.compress(st.request_tokens())
+    try:
+        deferred = st.compress(st.request_tokens())
+    except ValueError as exc:
+        # Same guard as the context-length path: an aux summarizer below the Hermes 64K
+        # minimum (measured - small local models) must degrade, not kill the worker
+        # mid-413. The model-free tool trim shortens the payload; the byte re-measure
+        # below then scores the progress and restarts, or the 413 fails honestly.
+        agent._buffer_vprint(f"Summarizer compression unavailable ({exc}); trying a model-free tool-payload trim")
+        trim_target = _offline_trim_target_tokens(agent)
+        if trim_target is not None:
+            _trim_tool_payloads_offline(st, trim_target)
+        deferred = None
     if deferred is not None:
         return deferred
 
@@ -470,7 +573,29 @@ def _recover_context_length(st: _Recovery, _retry: TurnRetryState, error_msg: st
         tokens=st.approx_tokens, attempt=st.compression_attempts, cap=st.max_compression_attempts,
     ))
 
-    deferred, shrank, new_tokens = st.compress_scored_by_tokens(st.request_tokens(), fail_on_timeout=True)
+    deferred, shrank, new_tokens = None, False, st.approx_tokens
+    try:
+        deferred, shrank, new_tokens = st.compress_scored_by_tokens(st.request_tokens(), fail_on_timeout=True)
+    except ValueError as exc:
+        # Summarizer compression is structurally unavailable here: the lazy aux feasibility
+        # probe (conversation_compression) hard-rejects MID-RECOVERY when the aux window sits
+        # below the Hermes 64K summarizer minimum - small local models all land here (measured
+        # 2026-10-26: qwen3.8:27b aux=37,168; no >=64K model on the box). A hard rejection
+        # must never escape recovery and kill the managed worker (t_6d5e44ce, the live board
+        # follow-up to t_f9c4f6cf): degrade to the model-free tool-payload trim and replay;
+        # the attempt cap bounds the rounds and the fail below stays an honest typed result.
+        agent._buffer_vprint(f"Summarizer compression unavailable ({exc}); trying a model-free tool-payload trim")
+        trim_target = _offline_trim_target_tokens(agent)
+        if trim_target is not None:
+            trimmed, new_tokens = _trim_tool_payloads_offline(st, trim_target)
+            if trimmed:
+                agent._buffer_diagnostic_status(
+                    "Summarizer unavailable - trimmed oversized tool results offline "
+                    f"(~{new_tokens:,} tokens), retrying"
+                )
+            shrank = trimmed
+        else:
+            shrank = False
     if deferred is not None:
         return deferred
     st.approx_tokens = new_tokens
