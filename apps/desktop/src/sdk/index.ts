@@ -47,12 +47,13 @@ import {
 import { onGatewayEvent } from '@/contrib/events'
 import { registry } from '@/contrib/registry'
 import type { WorkspaceMode } from '@/contrib/types'
-import { deleteProfile, getLogs, getStatus, hermesApi, type HermesGateway } from '@/hermes'
+import { deleteProfile, getLogs, getStatus, hermesApi, type HermesGateway, pluginRest } from '@/hermes'
 import { traceIdentityChange } from '@/lib/identity-trace'
 import { completeMcpDesktopOAuth } from '@/lib/mcp-dashboard-oauth'
 import {
   $gateway,
   activeGatewayConnectionId,
+  ensureActiveGatewayOpen,
   openGatewayForAgent,
   openGatewayForProfile,
   requestGatewayForAgent,
@@ -1537,18 +1538,39 @@ export const host = {
     )
   },
 
-  /** Gateway JSON-RPC — sessions, config, skills, cron, kanban, everything
-   *  the app itself uses. Lazy: resolves the LIVE socket per call. `timeoutMs`
-   *  overrides the socket's 30 s default for RPCs that legitimately run longer
-   *  (session.compress); unset keeps the default. */
+  /** Gateway JSON-RPC — sessions, config, skills, cron, everything the app
+   *  itself uses. Lazy: resolves the LIVE socket per call. Page routes can
+   *  leave `$gateway` null while the backend is healthy — re-open the active
+   *  socket before refusing. `timeoutMs` overrides the socket's 30 s default
+   *  for RPCs that legitimately run longer (session.compress); unset keeps
+   *  the default. */
   request: async <T>(method: string, params: Record<string, unknown> = {}, timeoutMs?: number): Promise<T> => {
-    const gateway = $gateway.get()
+    let gateway = $gateway.get()
+
+    if (!gateway) {
+      // Page plugins (and cold Sessions actions) hit this when the active
+      // socket is idle/parked. ensureActiveGatewayOpen reopens a secondary or
+      // returns the primary; still null only when nothing can dial.
+      gateway = await ensureActiveGatewayOpen({ explicit: true })
+    }
 
     if (!gateway) {
       throw new Error('Hermes gateway unavailable')
     }
 
     return timeoutMs === undefined ? gateway.request<T>(method, params) : gateway.request<T>(method, params, timeoutMs)
+  },
+
+  /** Session-free kanban board read for page plugins. Same REST path the
+   *  built-in Kanban page uses (`GET /api/plugins/kanban/board`), so it works
+   *  when the gateway WebSocket is idle and does not need `slash.exec` or a
+   *  focused chat session. Pass `{ board: '<slug>' }` to pin a board without
+   *  flipping the server-wide current pointer. */
+  kanbanBoard: async <T = unknown>(opts: { board?: string } = {}): Promise<T> => {
+    const board = opts.board?.trim()
+    const path = board ? `/board?board=${encodeURIComponent(board)}` : '/board'
+
+    return pluginRest<T>('kanban', path)
   },
 
   /** The LIVE gateway instance for the active profile (null before the first
