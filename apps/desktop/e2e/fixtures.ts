@@ -20,6 +20,7 @@
  * Prerequisite: `npm run build` must have been run so that `dist/` exists.
  */
 
+import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -36,6 +37,149 @@ import { installErrorBannerGuard } from './test'
 const DESKTOP_ROOT = path.resolve(import.meta.dirname, '..')
 const REPO_ROOT = path.resolve(DESKTOP_ROOT, '..', '..')
 const RELEASE_ROOT = path.join(DESKTOP_ROOT, 'release')
+
+/**
+ * List Windows processes whose command line contains `gateway run`.
+ * Returns pid + command line. Empty on non-Windows or when listing fails.
+ */
+export function listGatewayRunProcesses(): Array<{ pid: number; commandLine: string }> {
+  if (process.platform !== 'win32') {
+    return []
+  }
+
+  try {
+    // PowerShell keeps cmdline readable; wmic is removed on some hosts.
+    const raw = execFileSync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-Command',
+        "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ($_.CommandLine -like '*gateway run*') } | ForEach-Object { '{0}|{1}' -f $_.ProcessId, ($_.CommandLine -replace '[\\r\\n]',' ') }",
+      ],
+      { encoding: 'utf8', timeout: 30_000, windowsHide: true },
+    )
+
+    const out: Array<{ pid: number; commandLine: string }> = []
+
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim()
+
+      if (!trimmed || !trimmed.includes('|')) {
+        continue
+      }
+
+      const bar = trimmed.indexOf('|')
+      const pid = Number(trimmed.slice(0, bar))
+      const commandLine = trimmed.slice(bar + 1)
+
+      if (Number.isFinite(pid) && pid > 0) {
+        out.push({ pid, commandLine })
+      }
+    }
+
+    return out
+  } catch {
+    return []
+  }
+}
+
+/** Tree-kill a PID on Windows (`taskkill /T /F`). No-op elsewhere / on failure. */
+export function killProcessTree(pid: number): void {
+  if (process.platform !== 'win32' || !Number.isFinite(pid) || pid <= 0) {
+    return
+  }
+
+  try {
+    execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
+      stdio: 'ignore',
+      windowsHide: true,
+    })
+  } catch {
+    // already gone
+  }
+}
+
+/**
+ * Reap `hermes_cli.main gateway run` orphans left by a sandbox desktop session.
+ *
+ * On Windows the cmdline is just `gateway run --quiet` (no HERMES_HOME path),
+ * so matching by path never hits. Use the sandbox `gateway.lock` pid(s) and
+ * tree-kill them — same approach as e2e/core/harness stopSandboxGatewayDaemons.
+ */
+export function reapSandboxGatewayRuns(hermesHome: string): {
+  after: Array<{ pid: number; commandLine: string }>
+  before: Array<{ pid: number; commandLine: string }>
+  killed: number[]
+  lockPids: number[]
+} {
+  const before = listGatewayRunProcesses()
+  const killed: number[] = []
+  const lockPids: number[] = []
+
+  const profilesDir = path.join(hermesHome, 'profiles')
+
+  const homes = [
+    hermesHome,
+    ...(fs.existsSync(profilesDir)
+      ? fs.readdirSync(profilesDir).map(name => path.join(profilesDir, name))
+      : []),
+  ]
+
+  for (const home of homes) {
+    try {
+      const raw = fs.readFileSync(path.join(home, 'gateway.lock'), 'utf8')
+      const pid = Number(JSON.parse(raw)?.pid)
+
+      if (Number.isInteger(pid) && pid > 0) {
+        lockPids.push(pid)
+        killProcessTree(pid)
+        killed.push(pid)
+      }
+    } catch {
+      // no lock / unreadable
+    }
+  }
+
+  // Also kill any gateway-run process whose parent was just killed (pair child).
+  // Tree-kill usually covers this; this is a belt-and-suspenders pass.
+  const afterKill = listGatewayRunProcesses()
+  const killedSet = new Set(killed)
+
+  for (const proc of afterKill) {
+    // Parent may already be gone; if cmdline is gateway and we still have lock
+    // pids alive as parents, tree-kill again. Fallback: if hermesHome marker
+    // appears in cmdline (rare), kill it.
+    const cmd = proc.commandLine.toLowerCase()
+    const homeNeedle = hermesHome.replace(/\\/g, '/').toLowerCase()
+    const homeNeedleWin = hermesHome.replace(/\//g, '\\').toLowerCase()
+
+    if (
+      (homeNeedle && cmd.includes(homeNeedle))
+      || (homeNeedleWin && cmd.includes(homeNeedleWin))
+    ) {
+      if (!killedSet.has(proc.pid)) {
+        killProcessTree(proc.pid)
+        killed.push(proc.pid)
+        killedSet.add(proc.pid)
+      }
+    }
+  }
+
+  if (killed.length > 0) {
+    try {
+      execFileSync('powershell.exe', ['-NoProfile', '-Command', 'Start-Sleep -Milliseconds 800'], {
+        stdio: 'ignore',
+        windowsHide: true,
+      })
+    } catch {
+      // ignore
+    }
+  }
+
+  const after = listGatewayRunProcesses()
+
+  return { after, before, killed, lockPids }
+}
 
 // ─── Credential stripping (matches launch.spec.ts) ──────────────────────
 

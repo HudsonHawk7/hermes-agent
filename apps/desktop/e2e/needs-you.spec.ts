@@ -17,8 +17,11 @@ import { startMockServer } from '../../../tests-js/scripts/mock-server'
 import {
   buildAppEnv,
   createSandbox,
+  killProcessTree,
   launchDesktop,
+  listGatewayRunProcesses,
   type MockBackendFixture,
+  reapSandboxGatewayRuns,
   waitForAppReady,
 } from './fixtures'
 import { allowErrorBanners, expect, type Page, test } from './test'
@@ -96,10 +99,12 @@ async function closeDrawer(page: Page) {
     await page.keyboard.press('Escape')
     await page.waitForTimeout(300)
   }
+
   // Completion-notify toasts (e.g. "Task blocked — needs your input") sit center-screen
   // and hide cards under them — dismiss so pixel proof can see the board.
   for (let i = 0; i < 5; i++) {
     const dismiss = page.getByRole('button', { name: /Dismiss notification/i }).first()
+
     if ((await dismiss.count()) === 0 || !(await dismiss.isVisible().catch(() => false))) {break}
     await dismiss.click({ force: true }).catch(() => undefined)
     await page.waitForTimeout(150)
@@ -147,7 +152,45 @@ test.describe('Needs you column (gm-asks part 2)', () => {
       mockUrl: mock.url,
       sandbox,
       cleanup: async () => {
+        let electronPid: number | undefined
+
+        try {
+          electronPid = app.process().pid
+        } catch {
+          // already closed
+        }
+
         await app.close().catch(() => undefined)
+
+        // app.close() alone leaves hermes_cli.main gateway run pairs on Windows
+        // (tree detached). Kill the electron tree, then any sandbox-tied gateways.
+        if (electronPid) {
+          killProcessTree(electronPid)
+        }
+
+        const reap = reapSandboxGatewayRuns(sandbox.hermesHome)
+        const report = path.join(shots, 'gateway-reap.json')
+
+        try {
+          fs.writeFileSync(
+            report,
+            JSON.stringify(
+              {
+                after: reap.after.map(p => ({ pid: p.pid, cmd: p.commandLine.slice(0, 200) })),
+                before: reap.before.map(p => ({ pid: p.pid, cmd: p.commandLine.slice(0, 200) })),
+                killed: reap.killed,
+                lockPids: reap.lockPids,
+                sandbox: sandbox.hermesHome,
+              },
+              null,
+              2,
+            ),
+            'utf8',
+          )
+        } catch {
+          // proof dir may be gone; non-fatal
+        }
+
         await mock.close()
         sandbox.cleanup()
       },
@@ -155,9 +198,27 @@ test.describe('Needs you column (gm-asks part 2)', () => {
 
     await waitForAppReady(fixture, 120_000)
     await openKanban(page)
-  })
+  }, { timeout: 180_000 })
 
   test.afterAll(async () => {
+    // Snapshot gateways before teardown so the summary can show before/after.
+    const beforeTeardown = listGatewayRunProcesses()
+    const beforePath = path.join(shots || proofDir(gitSha()), 'gateway-before-teardown.json')
+
+    try {
+      fs.writeFileSync(
+        beforePath,
+        JSON.stringify(
+          beforeTeardown.map(p => ({ pid: p.pid, cmd: p.commandLine.slice(0, 240) })),
+          null,
+          2,
+        ),
+        'utf8',
+      )
+    } catch {
+      // ignore
+    }
+
     await fixture?.cleanup()
     fixture = null
   })
@@ -194,6 +255,12 @@ test.describe('Needs you column (gm-asks part 2)', () => {
 import os, json, sys
 from pathlib import Path
 os.environ["HERMES_HOME"] = r"${home.replace(/\\/g, '/')}"
+for _k in (
+    "HERMES_KANBAN_BOARD", "HERMES_KANBAN_DB", "HERMES_KANBAN_WORKSPACE",
+    "HERMES_KANBAN_WORKSPACES_ROOT", "HERMES_DELEGATED_CHILD_CONTEXT",
+    "HERMES_SESSION_SOURCE",
+):
+    os.environ.pop(_k, None)
 sys.path.insert(0, r"${REPO_ROOT.replace(/\\/g, '/')}")
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
@@ -207,7 +274,13 @@ with kbc.connect_closing(board="alpha") as conn:
 
     const out = execFileSync(py, [check], {
       cwd: REPO_ROOT,
-      env: { ...process.env, HERMES_HOME: home, PYTHONPATH: REPO_ROOT },
+      env: (() => {
+        const e: NodeJS.ProcessEnv = { ...process.env, HERMES_HOME: home, PYTHONPATH: REPO_ROOT }
+        delete e.HERMES_DELEGATED_CHILD_CONTEXT
+        delete e.HERMES_KANBAN_TASK
+
+        return e
+      })(),
       encoding: 'utf8',
     })
 
@@ -284,6 +357,12 @@ with kbc.connect_closing(board="alpha") as conn:
       `
 import os, sys
 os.environ["HERMES_HOME"] = r"${home.replace(/\\/g, '/')}"
+for _k in (
+    "HERMES_KANBAN_BOARD", "HERMES_KANBAN_DB", "HERMES_KANBAN_WORKSPACE",
+    "HERMES_KANBAN_WORKSPACES_ROOT", "HERMES_DELEGATED_CHILD_CONTEXT",
+    "HERMES_SESSION_SOURCE",
+):
+    os.environ.pop(_k, None)
 sys.path.insert(0, r"${REPO_ROOT.replace(/\\/g, '/')}")
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
@@ -293,9 +372,12 @@ with kbc.connect_closing(board="alpha") as conn:
 `,
       'utf8',
     )
+    const claimEnv: NodeJS.ProcessEnv = { ...process.env, HERMES_HOME: home, PYTHONPATH: REPO_ROOT }
+    delete claimEnv.HERMES_DELEGATED_CHILD_CONTEXT
+    delete claimEnv.HERMES_KANBAN_TASK
     execFileSync(py, [claim], {
       cwd: REPO_ROOT,
-      env: { ...process.env, HERMES_HOME: home, PYTHONPATH: REPO_ROOT },
+      env: claimEnv,
       encoding: 'utf8',
     })
 
@@ -308,8 +390,9 @@ with kbc.connect_closing(board="alpha") as conn:
     await closeDrawer(page)
   })
 
-  test('(f) legacy needs_input card renders', async () => {
+  test('(f) legacy needs_input card — Send back clicks and unblocks', async () => {
     const page = fixture!.page
+    const home = fixture!.sandbox.hermesHome
     await closeDrawer(page)
     // After (b–e) the Needs you column scrolls; legacy is often below the fold
     // under Fail path + Beta. Scroll it on-screen so the PNG proves AC5.
@@ -321,6 +404,63 @@ with kbc.connect_closing(board="alpha") as conn:
     await expect(card.getByRole('button', { name: /Send back with a note/i })).toBeVisible()
     // Card-scoped shot so title/reason/hint/Send back stay readable (not cropped).
     await card.screenshot({ path: path.join(shots, 'f-legacy-card.png') })
+
+    // P1: Send back must land a comment + unblock (not 400 "no open GM ask").
+    // NoteBox uses placeholder + "Send note" (same as structured send-back in (d)).
+    await card.getByRole('button', { name: /Send back with a note/i }).click()
+    await expect(card.getByPlaceholder(/What should the agent change/i)).toBeVisible()
+    const sendNote = `e2e legacy send-back ${Date.now()}`
+    await card.getByPlaceholder(/What should the agent change/i).fill(sendNote)
+    await card.getByRole('button', { name: /Send note/i }).click()
+    await expect(page.getByTestId('needs-you-card').filter({ hasText: 'Legacy free-text block' })).toHaveCount(0, {
+      timeout: 15_000,
+    })
+    // Prove comment + ready on the alpha board DB (legacy is seeded there).
+    const tid = seed!.ids.legacy
+    const py = process.env.PYTHON || 'python'
+    const check = path.join(home, 'legacy-sendback-check.py')
+    fs.writeFileSync(
+      check,
+      `
+import os, sys, json
+os.environ["HERMES_HOME"] = r"${home.replace(/\\/g, '/')}"
+for _k in (
+    "HERMES_KANBAN_BOARD", "HERMES_KANBAN_DB", "HERMES_KANBAN_WORKSPACE",
+    "HERMES_KANBAN_WORKSPACES_ROOT", "HERMES_DELEGATED_CHILD_CONTEXT",
+    "HERMES_SESSION_SOURCE",
+):
+    os.environ.pop(_k, None)
+sys.path.insert(0, r"${REPO_ROOT.replace(/\\/g, '/')}")
+from hermes_cli import kanban_db as kb
+from hermes_cli import kanban_db_connect as kbc
+with kbc.connect_closing(board="alpha") as conn:
+    task = kb.get_task(conn, "${tid}")
+    bodies = [c.body for c in kb.list_comments(conn, "${tid}")]
+    print(json.dumps({
+        "status": None if task is None else task.status,
+        "bodies": bodies,
+    }))
+`,
+      'utf8',
+    )
+
+    const legacyEnv: NodeJS.ProcessEnv = { ...process.env, HERMES_HOME: home, PYTHONPATH: REPO_ROOT }
+    delete legacyEnv.HERMES_DELEGATED_CHILD_CONTEXT
+    delete legacyEnv.HERMES_KANBAN_TASK
+
+    const out = execFileSync(py, [check], {
+      cwd: REPO_ROOT,
+      env: legacyEnv,
+      encoding: 'utf8',
+    }).trim()
+
+    const parsed = JSON.parse(out.split('\n').filter(Boolean).pop()!) as {
+      bodies: string[]
+      status: string | null
+    }
+
+    expect(parsed.status).toBe('ready')
+    expect(parsed.bodies.some(b => b.includes(sendNote))).toBe(true)
   })
 
   test('(g) POST fail → rollback', async () => {

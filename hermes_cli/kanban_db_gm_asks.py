@@ -318,6 +318,10 @@ def answer_gm_ask(
 
     Exactly one of *key* or *sent_back* must be set. Raises :class:`GmAskError`
     when there is no open ask or the key is unknown. One transaction.
+
+    Legacy free-text ``needs_input`` cards (no structured ``gm_ask``) accept
+    *sent_back* with a note: comment + unblock, same as structured send-back.
+    Option keys still require an open structured ask.
     """
     if sent_back and key is not None:
         raise GmAskError("pass either an option key or --send-back, not both")
@@ -332,17 +336,54 @@ def answer_gm_ask(
     with _kbc.write_txn(conn):
         open_ask = get_open_gm_ask(conn, task_id)
         if open_ask is None:
-            raise GmAskError(
-                f"{task_id} has no open GM ask to answer "
-                "(already decided, or never asked with a structured ask)"
-            )
+            # Legacy free-text needs_input: no structured ask, but the card is
+            # still waiting on the GM. Send-back with a note unblocks it the
+            # same way the drawer comment+ready path does — never a dead button.
+            if not sent_back:
+                raise GmAskError(
+                    f"{task_id} has no open GM ask to answer "
+                    "(already decided, or never asked with a structured ask)"
+                )
+            if not note_text:
+                raise GmAskError("send-back requires a --note explaining what to change")
+            task = _kb.get_task(conn, task_id)
+            if (
+                task is None
+                or task.status != "blocked"
+                or task.block_kind != "needs_input"
+            ):
+                raise GmAskError(
+                    f"{task_id} has no open GM ask to answer "
+                    "(already decided, or never asked with a structured ask)"
+                )
+            decision: dict[str, Any] = {
+                "sent_back": True,
+                "note": note_text,
+                "by": by,
+                "via": via,
+                "ask_event_id": None,
+                "legacy": True,
+            }
+            comment = f"GM sent it back: {note_text}"
+            decision_id = _append_event_id(conn, task_id, GM_DECISION_KIND, decision)
+            _kb._insert_comment(conn, task_id, by, comment, int(time.time()))
+            _kb._append_event(conn, task_id, "commented", {"author": by, "len": len(comment)})
+            new_status = _unblock_under_txn(conn, task_id)
+            return {
+                "decision_event_id": decision_id,
+                "ask_event_id": None,
+                "decision": decision,
+                "comment": comment,
+                "status": new_status,
+            }
+
         ask_event_id, ask_payload, _ask_at = open_ask
         options = {o["key"]: o for o in ask_payload.get("options") or [] if isinstance(o, dict)}
 
         if sent_back:
             if not note_text:
                 raise GmAskError("send-back requires a --note explaining what to change")
-            decision: dict[str, Any] = {
+            decision = {
                 "sent_back": True,
                 "note": note_text,
                 "by": by,
@@ -451,15 +492,17 @@ def undo_gm_decision(
             raise GmAskError(f"already picked up by {who}")
 
         ask_event_id = decision.get("ask_event_id")
-        if not isinstance(ask_event_id, int):
+        legacy = bool(decision.get("legacy")) or not isinstance(ask_event_id, int)
+        if not legacy and not isinstance(ask_event_id, int):
             raise GmAskError(f"{task_id} decision is missing ask_event_id; cannot undo")
 
         _append_event_id(
             conn, task_id, GM_DECISION_UNDONE_KIND,
             {
                 "decision_event_id": decision_id,
-                "ask_event_id": ask_event_id,
+                "ask_event_id": ask_event_id if isinstance(ask_event_id, int) else None,
                 "by": by,
+                **({"legacy": True} if legacy else {}),
             },
         )
         # Re-block needs_input. Card is typically ready after a decision.
@@ -490,7 +533,11 @@ def undo_gm_decision(
                     "via": "gm_decision_undone",
                 },
             )
-        comment = "GM undid the last decision — ask is open again"
+        comment = (
+            "GM undid the last decision — card needs input again"
+            if legacy
+            else "GM undid the last decision — ask is open again"
+        )
         _kb._insert_comment(conn, task_id, by, comment, int(time.time()))
         _kb._append_event(conn, task_id, "commented", {"author": by, "len": len(comment)})
 
@@ -498,7 +545,7 @@ def undo_gm_decision(
     landed = _kb.get_task(conn, task_id)
     return {
         "undone_decision_event_id": decision_id,
-        "ask_event_id": ask_event_id,
+        "ask_event_id": ask_event_id if isinstance(ask_event_id, int) else None,
         "ask": open_ask[1] if open_ask else None,
         "status": landed.status if landed else None,
     }

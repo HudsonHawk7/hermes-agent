@@ -192,6 +192,31 @@ def test_send_back_with_note(kanban_home: Path) -> None:
         assert any(b == "GM sent it back: need more screenshots" for b in bodies)
 
 
+def test_legacy_needs_input_send_back(kanban_home: Path) -> None:
+    """Free-text needs_input (no gm_ask) must accept send-back with a note."""
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn)
+        blocked = kb.block_task(conn, tid, reason="Which branch?", kind="needs_input")
+        assert blocked is True
+        assert gm.get_open_gm_ask(conn, tid) is None
+        out = gm.answer_gm_ask(
+            conn, tid, sent_back=True, note="use develop", by="gm", via="button",
+        )
+        assert out["decision"]["sent_back"] is True
+        assert out["decision"].get("legacy") is True
+        assert out["ask_event_id"] is None
+        task = kb.get_task(conn, tid)
+        assert task is not None
+        assert task.status == "ready"
+        bodies = [c.body for c in kb.list_comments(conn, tid)]
+        assert any(b == "GM sent it back: use develop" for b in bodies)
+        # Undo still re-blocks without needing a structured ask.
+        undone = gm.undo_gm_decision(conn, tid, by="gm")
+        assert undone["status"] == "blocked"
+        assert undone["ask_event_id"] is None
+        assert gm.get_open_gm_ask(conn, tid) is None
+
+
 def test_double_answer_refused(kanban_home: Path) -> None:
     with kbc.connect_closing() as conn:
         tid = _running_task(conn)
