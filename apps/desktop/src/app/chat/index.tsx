@@ -5,6 +5,7 @@ import type * as React from 'react'
 import { memo, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'react-router'
 
+import { ListeningLight } from '@/app/chat/listening-light'
 import type { SubmitTextOptions } from '@/app/session/hooks/use-prompt-actions/utils'
 import { sessionShouldHaveTranscript } from '@/app/session/hooks/use-session-actions/utils'
 import { Thread } from '@/components/assistant-ui/thread'
@@ -194,6 +195,8 @@ function ChatHeader({
         >
           <TitleMenuTrigger>{title}</TitleMenuTrigger>
         </SessionActionsMenu>
+        {/* VH8: hub-driven listening light + one-click stop (chat header). */}
+        <ListeningLight className="pointer-events-auto ml-2 shrink-0" />
       </div>
     </header>
   )

@@ -3032,6 +3032,7 @@ export interface WakeStartResult {
 export interface WakeStopParams {
   persist?: boolean | null
   profile?: string | null
+  reason?: string | null
 }
 export interface WakeStopResult {
   reason?: string | null
