@@ -605,6 +605,105 @@ def test_active_pr_guard_lifts_for_implementer_after_changes_requested(
         assert kbd.check_respawn_guard(conn, done_id) == "recent_success"
 
 
+def test_active_pr_guard_ignores_pr_url_posted_by_another_profile(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A builder's PR URL must not park a conductor card for 24 hours.
+
+    On a gate/review/merge card the PR URL is the SUBJECT of the work: the
+    builder cards post the new head back, operators post handoffs. Only the
+    card's own worker having opened a PR means "re-running risks a duplicate",
+    so another profile's URL does not guard — not even mid-run.
+    """
+    import hermes_cli.config as cfgmod
+    import hermes_cli.profiles as profmod
+
+    monkeypatch.setattr(profmod, "profile_exists", lambda name: True)
+    monkeypatch.setattr(
+        cfgmod, "load_config", lambda *a, **k: {"kanban": {"review_dispatch": True}},
+    )
+    pr_comment = "New head https://github.com/example/repo/pull/184 — gate this."
+
+    with kbc.connect() as conn:
+        gate = kb.create_task(conn, title="gate run 2", assignee="gatekeeper")
+        kb.add_comment(conn, gate, author="builder", body=pr_comment)
+        kb.add_comment(conn, gate, author="operator", body="Ready for the gate.")
+
+        assert kbd.check_respawn_guard(conn, gate) is None
+        res = kbd.dispatch_once(conn, dry_run=True)
+        assert gate in [s[0] for s in res.spawned]
+        assert dict(res.respawn_guarded).get(gate) is None
+
+        # Still not the worker's own when another profile posts it DURING the
+        # card's own run — the common conductor-card shape.
+        assert kb.claim_task(conn, gate) is not None
+        kb.add_comment(
+            conn, gate, author="builder-b",
+            body=pr_comment + " (posted while the gate worker ran)",
+        )
+        assert kbd.check_respawn_guard(conn, gate) is None
+
+
+def test_active_pr_guard_still_holds_on_the_workers_own_pr_url(kanban_home: Path) -> None:
+    """The duplicate-PR protection survives: the worker's OWN URL still guards,
+    including through an anonymous author inside that worker's own run and an
+    unreadable comment row (both stay fail-closed)."""
+    pr_comment = "Opened https://github.com/example/repo/pull/44 for review."
+
+    with kbc.connect() as conn:
+        own = kb.create_task(conn, title="implementer own pr", assignee="dev")
+        kb.add_comment(conn, own, author="dev", body=pr_comment)
+        assert kbd.check_respawn_guard(conn, own) == "active_pr"
+
+        # No profile identity on the comment, but it landed inside the card's
+        # own run for the assignee: still the worker's own PR.
+        anon = kb.create_task(conn, title="anonymous author", assignee="dev")
+        assert kb.claim_task(conn, anon) is not None
+        kb.add_comment(conn, anon, author="worker", body=pr_comment)
+        assert kbd.check_respawn_guard(conn, anon) == "active_pr"
+
+        # Unreadable timestamp + no author identity: fail closed.
+        garbled = kb.create_task(conn, title="garbled stamp", assignee="dev")
+        with kb.write_txn(conn):
+            conn.execute(
+                "INSERT INTO task_comments (task_id, author, body, created_at) "
+                "VALUES (?, 'worker', ?, 'soon')",
+                (garbled, pr_comment),
+            )
+        assert kbd.check_respawn_guard(conn, garbled) == "active_pr"
+
+
+def test_active_pr_guard_handoff_still_lifts_with_a_newer_builder_comment(
+    kanban_home: Path,
+) -> None:
+    """``changes_requested`` routes the card back to the implementer who owns the
+    PR. The handoff exemption is measured against the worker's OWN PR comment,
+    so a newer builder comment cannot swallow it."""
+    pr_comment = "Opened https://github.com/example/repo/pull/44 for review."
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="fix the same pr", assignee="dev")
+        claimed = kb.claim_task(conn, tid)
+        assert claimed is not None
+        kb.add_comment(conn, tid, author="dev", body=pr_comment)
+        _backdate_comments(conn, tid)
+        assert kbd.check_respawn_guard(conn, tid) == "active_pr"
+
+        assert kb.request_review(
+            conn, tid, summary="PR ready", reviewer="reviewer",
+            expected_run_id=claimed.current_run_id,
+        )
+        rclaim = kb.claim_review_task(conn, tid)
+        assert rclaim is not None
+        ok, implementer = kb.request_changes(
+            conn, tid, reason="fix tests", expected_run_id=rclaim.current_run_id,
+        )
+        assert (ok, implementer) == (True, "dev")
+        # A newer PR URL from a builder must not hide the handoff behind it.
+        kb.add_comment(conn, tid, author="builder", body=pr_comment)
+        assert kbd.check_respawn_guard(conn, tid) is None
+
+
 def test_dispatch_json_exposes_suppression_reasons(
     kanban_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
