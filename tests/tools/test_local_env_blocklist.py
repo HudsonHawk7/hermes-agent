@@ -425,6 +425,7 @@ def test_builders_strip_runtime_markers_and_owned_paths(child_env, monkeypatch, 
     user_path = str(child_env / "user-lib")
     for k, v in {"VIRTUAL_ENV": "/unrelated/venv", "CONDA_PREFIX": "/unrelated/conda",
                  "PYTHONHOME": "/nonexistent/python-home",
+                 "PYTHONSAFEPATH": "1",
                  "PYTHONPATH": os.pathsep.join([str(repo), str(site), user_path])}.items():
         monkeypatch.setenv(k, v)
     factories = {
@@ -434,8 +435,9 @@ def test_builders_strip_runtime_markers_and_owned_paths(child_env, monkeypatch, 
         "nonterminal": local.hermes_subprocess_env,
     }
     before = dict(os.environ)
-    actual = observe_child(factories[builder](), ["VIRTUAL_ENV", "CONDA_PREFIX", "PYTHONHOME", "PYTHONPATH", "HOME"])
+    actual = observe_child(factories[builder](), ["VIRTUAL_ENV", "CONDA_PREFIX", "PYTHONHOME", "PYTHONSAFEPATH", "PYTHONPATH", "HOME"])
     assert actual == {"VIRTUAL_ENV": None, "CONDA_PREFIX": None, "PYTHONHOME": None,
+                      "PYTHONSAFEPATH": None,
                       "PYTHONPATH": user_path, "HOME": str(child_env)}
     assert dict(os.environ) == before
 

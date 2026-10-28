@@ -2878,6 +2878,18 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # external worker (#112729): applied to the sanitized env, after every other decision stands.
     from cron.scheduler_worker_env import pin_hermes_tree_on_pythonpath
     env = pin_hermes_tree_on_pythonpath(env, Path(__file__).resolve().parent.parent)
+    # The pin alone cannot win: the worker is launched with cwd=workspace, and CPython's `-m`
+    # prepends that cwd to sys.path AHEAD of every PYTHONPATH entry (and `pm/_venv_entry` inserts
+    # os.getcwd() the same way unless sys.flags.safe_path). A task whose workspace IS a
+    # hermes-agent checkout therefore booted the WORKSPACE's `hermes_cli` + `pm`: repo_root()
+    # resolved to that checkout, which carries no committed dependency environment, and the
+    # worker died before its first turn with "no dependency environment is committed for this
+    # install" (voice-hub card t_4a5ec79e, runs 310/311). Any workspace holding a planted
+    # `hermes_cli/` ran its own code as Hermes the same way. PYTHONSAFEPATH (CPython 3.11+)
+    # stops the cwd from entering the child's sys.path; the pinned PYTHONPATH above is what
+    # keeps this install importable. Set it AFTER build_subprocess_env, which strips inherited
+    # runtime markers from any child env.
+    env["PYTHONSAFEPATH"] = "1"
     # A worker spawned by a managed systemd gateway must leave the gateway's
     # cgroup before startup; otherwise restarting the service kills the worker
     # that is performing the handoff.

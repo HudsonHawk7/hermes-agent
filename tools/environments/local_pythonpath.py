@@ -135,6 +135,14 @@ def _strip_hermes_owned_pythonpath_and_runtime_markers(env: dict) -> None:
     _strip_hermes_owned_pythonpath(env)
     for _marker in _ACTIVE_VENV_MARKER_VARS:
         env.pop(_marker, None)
+    # PYTHONSAFEPATH is a statement about the process Hermes set it on, not about the user's
+    # children: the kanban dispatcher sets it on a worker (whose cwd is a task workspace that
+    # may itself be a hermes-agent checkout) so `-m` cannot boot the workspace's own
+    # `hermes_cli`/`pm`. Inherited by a terminal command it would instead silently remove the
+    # script dir and the cwd from a `python foo.py` / `python -m pkg` the agent runs in that
+    # workspace, breaking their sibling imports. Drop it here, where the child's own
+    # PYTHONPATH is already resolved.
+    env.pop("PYTHONSAFEPATH", None)
 
 
 def _strip_hermes_owned_pythonpath(env: dict) -> None:
