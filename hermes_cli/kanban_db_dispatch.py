@@ -1576,7 +1576,7 @@ def check_respawn_guard(
     passes own those.
     """
     row = conn.execute(
-        "SELECT last_failure_error, assignee FROM tasks WHERE id = ?",
+        "SELECT last_failure_error, completion_contract, assignee FROM tasks WHERE id = ?",
         (task_id,),
     ).fetchone()
     if row is None:
@@ -1653,6 +1653,11 @@ def check_respawn_guard(
     #    Exception 2: a dependency hand-back AFTER the newest own PR comment — the
     #    worker named a PR and then parked the card on ANOTHER card's unfinished
     #    work. See the ``dependency_wait`` block below.
+    #    Which comments count follows the card's LANE as well as the author
+    #    (#146075 review): an operator/app note is the SUBJECT of the work on a
+    #    card that cannot publish a PR, and the duplicate-PR risk on one that
+    #    can. See ``_task_publishes_pr`` — resolved once per card per tick.
+    publishes_pr = _task_publishes_pr(conn, task_id, row)
     own_pr_times = [t for t, c in _rows_since(
                         conn, "task_comments", task_id, now - _RESPAWN_GUARD_PR_WINDOW,
                         cols=", body, author, created_at AS raw_created_at",
@@ -1660,7 +1665,7 @@ def check_respawn_guard(
                     if _RESPAWN_GUARD_PR_URL_RE.search(_kb._lossy_text(c["body"]) or "")
                     and _comment_is_own_worker(
                         conn, task_id, _guard_worker_owner(conn, task_id, assignee),
-                        c["author"], c["raw_created_at"])]
+                        c["author"], c["raw_created_at"], publishes_pr=publishes_pr)]
     if own_pr_times:
         newest_own = max(own_pr_times)
         # Strictly after: a same-second tie stays guarded (fail closed).
@@ -1691,10 +1696,53 @@ def check_respawn_guard(
 _GUARD_ANON_AUTHORS = frozenset({"", "worker", "unknown"})
 
 # Authors that act FOR someone else on purpose: an operator note (the CLI writes
-# ``operator``), or an app/system write. A PR URL they post says what must be
-# worked, not what this worker opened, so it is never the worker's own — even
-# inside the worker's own run.
+# ``operator``), or an app/system write. A PR URL they post names what must be
+# worked, not what this worker opened — on a CONDUCTOR card (gate, review, merge)
+# that is the subject of the work, so the note must not park the card. On an
+# IMPLEMENTATION card the same note is the duplicate-PR risk this guard exists
+# for, so the exemption follows the card's LANE, not the author alone
+# (``_task_publishes_pr``).
 _GUARD_FOREIGN_AUTHORS = frozenset({"operator", "hermes", "system", "hermes-system"})
+
+
+def _task_publishes_pr(conn: sqlite3.Connection, task_id: str, row: sqlite3.Row) -> bool:
+    """Whether ``task_id`` is implementer work that can open a PR (the PR-bearing lane).
+
+    ``completion_contract`` is the card's own declaration: an unset/empty value
+    stays PR-bearing for compatibility with legacy cards (fail closed); anything
+    other than exactly ``local-only`` (a repo slug or a PR URL) is PR-bearing.
+    ``local-only`` is the report/conductor exemption — unless one of the card's
+    runs actually recorded ``published_pr``, which makes it implementer work
+    whatever it declared.
+
+    A stored ``local-only`` alone is not proof of the declaration:
+    ``validate_contract`` folds an *omitted* contract into the same value, so the
+    exemption also requires the ``created`` event to record ``local-only`` as the
+    raw creation argument (``kanban_pr_acceptance.contract_and_declaration``).
+    Every other ``local-only`` row — legacy cards created before the argument was
+    recorded, a missing or unparseable payload — fails closed to guarded.
+
+    Same rule as ``kanban_pr_guard._task_publishes_pr`` in #145849, kept here
+    until that PR lands; whoever merges second keeps one copy and imports it.
+    """
+    contract = (_kb._lossy_text(row["completion_contract"]) or "").strip()
+    if not contract or contract != "local-only":
+        return True
+    for run in conn.execute(
+        "SELECT metadata FROM task_runs WHERE task_id = ?", (task_id,),
+    ):
+        if _kb._json_dict(run["metadata"]).get("published_pr"):
+            return True
+    created = conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'created' "
+        "ORDER BY id LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if created is not None and _kb._json_dict(created["payload"]).get(
+        "completion_contract"
+    ) == "local-only":
+        return False
+    return True
 
 
 def _same_profile(a: Any, b: Any) -> bool:
@@ -1758,7 +1806,7 @@ def _comment_inside_own_run(conn: sqlite3.Connection, task_id: str, assignee: st
 
 
 def _comment_is_own_worker(conn: sqlite3.Connection, task_id: str, assignee: str,
-                           author: Any, stamp: Any) -> bool:
+                           author: Any, stamp: Any, *, publishes_pr: bool = True) -> bool:
     """True only when a PR-URL comment can be attributed to ``task_id``'s own worker.
 
     ``active_pr`` exists to stop the worker that ALREADY opened a PR from being
@@ -1777,17 +1825,24 @@ def _comment_is_own_worker(conn: sqlite3.Connection, task_id: str, assignee: str
     * nothing is readable at all (anonymous author AND an unreadable timestamp):
       fail closed, exactly like the rest of the window.
 
-    A DIFFERENT named identity never counts — a builder comment is not the
-    worker's own even inside the worker's run — and neither does an operator or
-    app comment (``operator``, ``hermes``, ``system`` — ``_GUARD_FOREIGN_AUTHORS``),
-    which acts for someone else on purpose.
+    A DIFFERENT named profile never counts — a builder comment is not the
+    worker's own even inside the worker's run.
+
+    An operator or app comment (``operator``, ``hermes``, ``system`` —
+    ``_GUARD_FOREIGN_AUTHORS``) acts for someone else on purpose: on a card that
+    cannot publish a PR (``publishes_pr=False``: the declared report/conductor
+    lane) it names the SUBJECT of the work and never counts. On a PR-bearing
+    card the same note is the duplicate-PR risk the step exists for — a builder
+    that crashed before recording ``published_pr``, with the only link to its
+    OPEN PR in an operator note — so it counts and the card stays guarded
+    (fail closed, #146075 review).
     """
     owner = (_kb._lossy_text(assignee) or "").strip()
     who = (_kb._lossy_text(author) or "").strip()
     if _same_profile(who, owner):
         return True
     if who.casefold() in _GUARD_FOREIGN_AUTHORS:
-        return False
+        return publishes_pr
     if who.casefold() not in _GUARD_ANON_AUTHORS:
         return False
     ts = _kb._to_epoch(stamp)
