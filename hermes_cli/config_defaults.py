@@ -1,3 +1,4 @@
+# health: allow FILE_LINES -- VH5 speaker ID: the voice.speaker defaults (enabled/enrolment_dir/threshold/trusted) have to sit in DEFAULT_CONFIG because that is the one place a documented default can live; nothing here is derived and the block is 15 lines of data plus its comment.
 """Default configuration data for Hermes Agent: DEFAULT_CONFIG and OPTIONAL_ENV_VARS.
 
 Pure-data leaf module — must not import from hermes_cli.config. Comments are the user-facing
@@ -1259,6 +1260,21 @@ DEFAULT_CONFIG = {
         # Saying EXACTLY one of these (case-insensitive, punctuation ignored) ends the voice chat
         # instead of going to the agent. [] disables.
         "stop_phrases": ["stop"],
+        # Who is speaking (VH5). Off until you enrol a voice: the listening guard decides THAT
+        # someone spoke, and this decides WHO before an utterance can become a message.
+        # Nothing here is derived — a null enrolment_dir is a named refusal, not a guess.
+        #   hermes voice setup --install-speaker-model   fetch the model (29.6 MB, sha verified)
+        #   hermes voice enrol --identity <name> --threshold 0.62 --enable
+        "speaker": {
+            "enabled": False,
+            # Directory holding <identity>.enrol.json. null = refuse to listen (enrolment_missing).
+            "enrolment_dir": None,
+            # Utterance cosine at or above this is trusted. null = off. The VH4 measurement on the
+            # fixture set recommends 0.62 (FAR 0/164, FRR 0/20).
+            "match_threshold": None,
+            # Enrolled identities allowed to be treated as themselves. [] = everyone is unknown.
+            "trusted_identities": [],
+        },
     },
     # Native images (vision_analyze, browser screenshots, replayed user images) are re-sent on every later call.
     "vision": {

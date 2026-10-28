@@ -268,11 +268,22 @@ def _full_duplex_listener() -> None:
         # Off (the default) keeps the loudness path exactly as it was.
         guard = _build_listening_guard()
         hub = _wake_hub()
+        # VH5: who is speaking. Checked BEFORE the microphone opens — a gate that cannot be
+        # trusted means the listener never starts, rather than hearing an unlabelled room.
+        speaker, reason, detail = _build_speaker_gate()
+        if reason:
+            hub.speaker_unavailable(reason, detail)
+            logger.warning(
+                "full-duplex listener refuses to start: speaker_id_unavailable:%s (%s)",
+                reason, detail)
+            return
         hub.attach_guard(guard)
+        if speaker is not None:
+            hub.attach_speaker(speaker)
         try:
             wav_path = full_duplex_listen(_should_stop, is_playing=is_audio_output_active,
                                           on_trigger=_on_trigger, multiplier=mult or None,
-                                          grace_ms=grace_ms, guard=guard)
+                                          grace_ms=grace_ms, guard=guard, speaker=speaker)
             if not (wav_path and tripped.is_set()):
                 return
             try:
@@ -286,13 +297,39 @@ def _full_duplex_listener() -> None:
             # The listener owns the guard: stop reporting it, then release its backends so the
             # loopback recorder and ONNX session do not outlive the capture (VH3).
             hub.attach_guard(None)
+            hub.attach_speaker(None)
             if guard is not None:
                 guard.close()
+            if speaker is not None:
+                speaker.close()
     except Exception as e:
         logger.debug("full-duplex listener failed: %s", e)
     finally:
         with _fd_listener_lock:
             _fd_listener_active = False
+
+
+def _build_speaker_gate() -> tuple:
+    """``(gate, reason, detail)`` for VH5 speaker ID: the gate, or why it refuses to exist.
+
+    Unlike a broken listening guard — which is logged and skipped so barge-in still works — a
+    broken speaker gate is a REFUSAL, because its whole job is to keep a voice that is not the
+    owner out of the message stream. ``reason`` is one of ``tools.voice_speaker.REASONS`` and is
+    published by the Hub as ``speaker_id_unavailable:<reason>``.
+
+    Built at capture time, never at import or boot, so a restarted gateway has no gate until a
+    surface asks for the mic (VH1 AC1/AC3, unchanged).
+    """
+    try:
+        from tools.voice_speaker import SpeakerError, build_speaker_gate
+    except ImportError as e:  # an install missing its own module cannot be trusted to be off
+        return None, "speaker_backend_unavailable", f"tools.voice_speaker not importable: {e}"
+    try:
+        return build_speaker_gate(), "", ""
+    except SpeakerError as e:
+        return None, e.reason, e.detail
+    except (ImportError, OSError, RuntimeError, ValueError) as e:
+        return None, "speaker_backend_unavailable", f"{type(e).__name__}: {e}"
 
 
 def _build_listening_guard():
@@ -748,6 +785,18 @@ def _(rid, params: dict) -> dict:
     (``degraded``, ``max_reference_lag_ms``) and what is actually in force.
     """
     return _ok(rid, {"guard": _wake_hub().guard_state()})
+
+
+@method("voice_hub.speaker")
+def _(rid, params: dict) -> dict:
+    """The speaker gate's counters, or the refusal, or ``null`` when speaker ID is off (VH5).
+
+    Same split as ``voice_hub.guard``: ``voice_hub.state`` keeps its four-field contract, while
+    this read answers the operator's question — whose voice is trusted, at what threshold, how
+    many utterances were dropped and why — and, when the gate refused to build, the named reason
+    (``speaker_id_unavailable`` + one of the nine reasons from the VH4 spec).
+    """
+    return _ok(rid, {"speaker": _wake_hub().speaker_state(), "gate": _wake_hub().can_listen()[0]})
 
 
 @method("wake.feed")
