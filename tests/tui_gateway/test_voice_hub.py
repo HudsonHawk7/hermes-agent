@@ -340,3 +340,58 @@ def test_second_gateway_on_a_scratch_hermes_home_is_refused_with_one_device_open
     assert result["reason"] == "owned", output          # the detector's typed WakeWordInUse
     assert "OPENS 0" in output, output                  # refused before the device was touched
     assert len(mic) == 1                                # the first owner still holds the one open
+
+
+# ── VH8: one-click stop closes capture with named stop_reason ─────────────────────────────────
+
+
+def test_owner_stop_sets_user_stop_and_closes_device(mic):
+    """One-click stop on the listening light: device closes; hub stop_reason user_stop.
+
+    Hub publish uses status=stopped on full release (idle is reserved for pause while the
+    claim is kept). The light treats both as not-listening; AC2's 'closes capture' is the
+    detector going away + stop_reason user_stop.
+    """
+    transport = _transport()
+    assert _rpc(_wake_start("gui"), transport=transport)["result"]["started"] is True
+    assert len(mic) == 1
+    assert _state()["status"] == "armed"
+
+    stop = _rpc(
+        {"id": "vh8-stop", "method": "wake.stop", "params": {"reason": "user_stop"}},
+        transport=transport,
+    )
+    assert stop["result"]["stopped"] is True, stop
+    after = _state()
+    assert after["status"] == "stopped"
+    assert after["owner_surface"] is None
+    assert after["stop_reason"] == "user_stop"
+    assert wake_word._current_detector() is None
+    assert len(mic) == 1  # no second open; stop closed the only stream
+
+
+def test_stop_with_capture_failed_reason_is_honest(mic):
+    """Capture death must publish capture_failed — never leave status armed."""
+    transport = _transport()
+    assert _rpc(_wake_start("gui"), transport=transport)["result"]["started"] is True
+
+    stop = _rpc(
+        {"id": "vh8-cap", "method": "wake.stop", "params": {"reason": "capture_failed"}},
+        transport=transport,
+    )
+    assert stop["result"]["stopped"] is True, stop
+    after = _state()
+    assert after["status"] in ("idle", "stopped")
+    assert after["stop_reason"] == "capture_failed"
+    assert after["owner_surface"] is None
+
+
+def test_unknown_stop_reason_falls_back_to_user_stop(mic):
+    transport = _transport()
+    assert _rpc(_wake_start("gui"), transport=transport)["result"]["started"] is True
+    stop = _rpc(
+        {"id": "vh8-bad", "method": "wake.stop", "params": {"reason": "not_a_real_reason"}},
+        transport=transport,
+    )
+    assert stop["result"]["stopped"] is True, stop
+    assert _state()["stop_reason"] == "user_stop"

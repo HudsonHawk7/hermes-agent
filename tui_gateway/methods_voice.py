@@ -621,10 +621,20 @@ def _(rid, params: dict) -> dict:
         **_frame_fields(frame)})
 
 
+# stop_reason values the Hub + listening light understand. Unknown client values fall back
+# to user_stop so a typo can't invent a permanent "listening" state.
+_WAKE_STOP_REASONS = frozenset({
+    "user_stop", "paused", "detected", "reclaimed", "start_failed", "capture_failed",
+})
+
+
 @method("wake.stop")
 def _(rid, params: dict) -> dict:
     """Stop this surface's listener; ``persist: true`` also writes ``wake_word.enabled: false``."""
-    stopped = _release_wake_for_transport(_caller_transport(), reason="user_stop")
+    reason = params.get("reason") or "user_stop"
+    if not isinstance(reason, str) or reason not in _WAKE_STOP_REASONS:
+        reason = "user_stop"
+    stopped = _release_wake_for_transport(_caller_transport(), reason=reason)
     disabled_persisted = False
     if params.get("persist"):
         try:
