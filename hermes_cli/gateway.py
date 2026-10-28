@@ -4561,6 +4561,13 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
     kill an existing instance first (avoids systemd restart loops); force: skip the supervised guard;
     idle_exit: a client auto-started this unsupervised gateway, so it exits once idle
     (``gateway.unmanaged_idle_exit_seconds``)."""
+    # FIRST: a gateway started from inside an agent/Kanban session inherits that session's
+    # HERMES_DELEGATED_CHILD_CONTEXT + board pins, and kanban_path_is_fenced() would then deny every
+    # dispatcher tick (PermissionError: delegate_task child contexts cannot mutate Kanban tasks or
+    # boards). The gateway owns its boards, so those markers never apply to it.
+    from hermes_cli.gateway_worker_env import strip_worker_markers
+
+    strip_worker_markers()
     _guard_official_docker_root_gateway()
     _attach_to_host_gateway_or_guard(force=force, replace=replace)
     _guard_supervised_gateway_conflict(force=force)
