@@ -249,6 +249,7 @@ export function applyWakeStartResult(result: WakeStartResponse | null | undefine
     notice: noticeFrom(result),
     pending: false
   })
+
   if (result?.reason) {
     applyVoiceHubState({
       status: 'stopped',
@@ -303,7 +304,7 @@ export async function armWakeWord(request: WakeRequester = gatewayRequester): Pr
           owner_surface: 'gui',
           stop_reason: null
         })
-        void refreshVoiceHub(request)
+        await refreshVoiceHub(request)
         const mode = (status.capture || '').toLowerCase()
 
         if (mode === 'client' || mode === 'remote' || mode === 'external') {
