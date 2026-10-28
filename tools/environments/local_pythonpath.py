@@ -140,9 +140,10 @@ def _strip_hermes_owned_pythonpath_and_runtime_markers(env: dict) -> None:
     # may itself be a hermes-agent checkout) so `-m` cannot boot the workspace's own
     # `hermes_cli`/`pm`. Inherited by a terminal command it would instead silently remove the
     # script dir and the cwd from a `python foo.py` / `python -m pkg` the agent runs in that
-    # workspace, breaking their sibling imports. Drop it here, where the child's own
-    # PYTHONPATH is already resolved.
-    env.pop("PYTHONSAFEPATH", None)
+    # workspace, breaking their sibling imports. Only the value Hermes pinned is dropped: the
+    # marker records ownership, so a PYTHONSAFEPATH the operator set deliberately survives.
+    if env.pop("HERMES_PINNED_PYTHONSAFEPATH", None):
+        env.pop("PYTHONSAFEPATH", None)
 
 
 def _strip_hermes_owned_pythonpath(env: dict) -> None:

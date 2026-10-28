@@ -112,6 +112,7 @@ def test_worker_spawn_env_sets_python_safe_path(monkeypatch, tmp_path):
 
     assert captured["cwd"] == str(workspace)
     assert captured["env"].get("PYTHONSAFEPATH") == "1"
+    assert captured["env"].get("HERMES_PINNED_PYTHONSAFEPATH") == "1"
 
 
 def test_worker_spawn_env_keeps_the_install_tree_importable(monkeypatch, tmp_path):
@@ -198,11 +199,37 @@ def test_the_flag_stops_at_the_worker(monkeypatch, tmp_path):
     """AC3: the worker's own terminal commands keep normal CPython path behaviour.
 
     A worker runs the agent's `python foo.py` / `python -m pkg` inside the task
-    workspace, where the script dir and the cwd belong on sys.path. The flag must not
-    leak into those children, only into the worker's own boot.
+    workspace, where the script dir and the cwd belong on sys.path. The flag Hermes
+    pinned must not leak into those children, only into the worker's own boot.
     """
     from tools.environments import local
 
     monkeypatch.setenv("PYTHONSAFEPATH", "1")
+    monkeypatch.setenv("HERMES_PINNED_PYTHONSAFEPATH", "1")
 
-    assert local.build_subprocess_env().get("PYTHONSAFEPATH") is None
+    child_env = local.build_subprocess_env()
+
+    assert child_env.get("PYTHONSAFEPATH") is None
+    assert child_env.get("HERMES_PINNED_PYTHONSAFEPATH") is None
+
+
+def test_an_operator_python_safe_path_is_not_taken_away(monkeypatch, tmp_path):
+    """AC3b: only our own value is stripped — a deliberate operator value survives."""
+    from tools.environments import local
+
+    monkeypatch.setenv("PYTHONSAFEPATH", "keep-me")
+    monkeypatch.delenv("HERMES_PINNED_PYTHONSAFEPATH", raising=False)
+
+    assert local.build_subprocess_env().get("PYTHONSAFEPATH") == "keep-me"
+
+
+def test_an_operator_python_safe_path_is_left_on_the_worker(monkeypatch, tmp_path):
+    """AC3b on the spawn side: do not claim (and later strip) a value we did not set."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    monkeypatch.setenv("PYTHONSAFEPATH", "1")
+
+    captured = _capture_spawn(monkeypatch, tmp_path, workspace)
+
+    assert captured["env"].get("PYTHONSAFEPATH") == "1"
+    assert "HERMES_PINNED_PYTHONSAFEPATH" not in captured["env"]

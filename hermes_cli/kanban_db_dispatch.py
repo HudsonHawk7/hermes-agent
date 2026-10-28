@@ -2888,8 +2888,13 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # `hermes_cli/` ran its own code as Hermes the same way. PYTHONSAFEPATH (CPython 3.11+)
     # stops the cwd from entering the child's sys.path; the pinned PYTHONPATH above is what
     # keeps this install importable. Set it AFTER build_subprocess_env, which strips inherited
-    # runtime markers from any child env.
-    env["PYTHONSAFEPATH"] = "1"
+    # runtime markers from any child env. The marker records whose value this is: a
+    # PYTHONSAFEPATH the operator set deliberately is left alone, and only ours is stripped
+    # back out of the worker's own children (see
+    # tools/environments/local_pythonpath.py::_strip_hermes_owned_pythonpath_and_runtime_markers).
+    if not env.get("PYTHONSAFEPATH"):
+        env["PYTHONSAFEPATH"] = "1"
+        env["HERMES_PINNED_PYTHONSAFEPATH"] = "1"
     # A worker spawned by a managed systemd gateway must leave the gateway's
     # cgroup before startup; otherwise restarting the service kills the worker
     # that is performing the handoff.
