@@ -1642,13 +1642,16 @@ def check_respawn_guard(
     #    Only the card's OWN worker's comment counts (#active_pr authorship): on a
     #    conductor card (gate, review, merge) the PR URL is the subject of the work
     #    and is normally posted by OTHER profiles — the builder handing its SHA
-    #    back, an operator, the reviewer — so a builder's comment must not park
-    #    the card for the whole window. See ``_comment_is_own_worker``.
-    #    Exception: a handoff AFTER the newest own PR comment (operator reassign,
+    #    back, an operator, the reviewer — so another profile's comment must not
+    #    park the card for the whole window. See ``_comment_is_own_worker``.
+    #    Exception 1: a handoff AFTER the newest own PR comment (operator reassign,
     #    reviewer changes_requested, review reopen) names the profile that must
     #    now work on THAT PR — a closer or the implementer finishing it, not a
     #    duplicate implementation (#111910). A crash/reclaim is not a handoff,
     #    so the worker that opened the PR is still not re-spawned against it.
+    #    Exception 2: a dependency hand-back AFTER the newest own PR comment — the
+    #    worker named a PR and then parked the card on ANOTHER card's unfinished
+    #    work. See the ``dependency_wait`` block below.
     own_pr_times = [t for t, c in _rows_since(
                         conn, "task_comments", task_id, now - _RESPAWN_GUARD_PR_WINDOW,
                         cols=", body, author, created_at AS raw_created_at",
@@ -1658,10 +1661,23 @@ def check_respawn_guard(
                         conn, task_id, _guard_worker_owner(conn, task_id, assignee),
                         c["author"], c["raw_created_at"])]
     if own_pr_times:
+        newest_own = max(own_pr_times)
         # Strictly after: a same-second tie stays guarded (fail closed).
         if any(_is_handoff_event(e["kind"], e["payload"]) for _, e in _rows_since(
-                conn, "task_events", task_id, max(own_pr_times),
+                conn, "task_events", task_id, newest_own,
                 "AND kind IN ('assigned', 'changes_requested', 'review_reopened')", cols=", kind, payload", strict=True)):
+            return None
+        # Exception 2 — dependency hand-back. The worker named a PR and then
+        # parked the card on ANOTHER card's unfinished work (``dependency_wait``,
+        # written by ``kanban_db.block_task(kind='dependency')``). That is the
+        # conductor/gate shape: the PR it names is the SUBJECT of the gate and
+        # belongs to the card it is waiting on, so its own run report is not
+        # evidence that THIS worker opened a PR. ``recompute_ready`` promotes the
+        # card back to ready when the parent lands — a fresh dispatch on the
+        # parent's new work, not a retry of the run that named the PR.
+        if any(_rows_since(
+                conn, "task_events", task_id, newest_own,
+                "AND kind = 'dependency_wait'", strict=True)):
             return None
         return "active_pr"
 
@@ -1669,9 +1685,15 @@ def check_respawn_guard(
 
 
 # Comment authors that carry no identity of their own: a worker running without a
-# profile pin posts as ``worker`` (``tools.kanban_tools._persisted_identity``), and
-# the CLI writes ``operator``. For those the card's own run window decides.
-_GUARD_ANON_AUTHORS = frozenset({"", "worker", "operator", "hermes", "system", "unknown"})
+# profile pin posts as ``worker`` (``tools.kanban_tools._persisted_identity``). For
+# those the card's own run window decides.
+_GUARD_ANON_AUTHORS = frozenset({"", "worker", "unknown"})
+
+# Authors that act FOR someone else on purpose: an operator note (the CLI writes
+# ``operator``), or an app/system write. A PR URL they post says what must be
+# worked, not what this worker opened, so it is never the worker's own — even
+# inside the worker's own run.
+_GUARD_FOREIGN_AUTHORS = frozenset({"operator", "hermes", "system", "hermes-system"})
 
 
 def _same_profile(a: Any, b: Any) -> bool:
@@ -1692,22 +1714,28 @@ def _same_profile(a: Any, b: Any) -> bool:
 def _guard_worker_owner(conn: sqlite3.Connection, task_id: str, assignee: Any) -> str:
     """The profile an ``active_pr`` comment is attributed to: the card's own worker.
 
-    The current assignee; when the card is UNASSIGNED the last profile it was
-    assigned to — an unassign records an ``assigned`` event but no owner, and it
-    must not lift the guard for the implementer that opened the PR.
+    The current assignee; when the card is UNASSIGNED, the last profile that owned
+    it. ``create_task`` records the assignee in the ``created`` event
+    (``kanban_db.create_task``) and an unassign writes
+    ``{'assignee': None, 'from': <previous owner>}`` (``kanban_db.assign_task``),
+    so neither an unassign nor a card that was never re-assigned lifts the guard
+    for the implementer that opened the PR.
     """
     owner = (_kb._lossy_text(assignee) or "").strip()
     if owner:
         return owner
     for row in conn.execute(
-            "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'assigned' "
+            "SELECT payload FROM task_events WHERE task_id = ? "
+            "AND kind IN ('assigned', 'created') "
             "ORDER BY created_at DESC, id DESC LIMIT 20", (task_id,)):
         data = _kb._json_or(row["payload"], {})
         if not isinstance(data, dict):
             continue
-        prev = (_kb._lossy_text(data.get("assignee")) or "").strip()
-        if prev:
-            return prev
+        # ``assignee`` for an assign/create; ``from`` for an unassign.
+        for key in ("assignee", "from"):
+            prev = (_kb._lossy_text(data.get(key)) or "").strip()
+            if prev:
+                return prev
     return ""
 
 
@@ -1742,19 +1770,23 @@ def _comment_is_own_worker(conn: sqlite3.Connection, task_id: str, assignee: str
     Counts as the worker's own when
 
     * the comment's ``author`` is the card's assignee, or
-    * the comment carries no identity of its own (``worker``, ``operator``,
-      blank — ``_GUARD_ANON_AUTHORS``) and lands inside one of the card's own
-      runs for that assignee, or
+    * the comment carries no identity of its own (``worker``, blank, ``unknown``
+      — ``_GUARD_ANON_AUTHORS``) and lands inside one of the card's own runs for
+      that assignee, or
     * nothing is readable at all (anonymous author AND an unreadable timestamp):
       fail closed, exactly like the rest of the window.
 
-    A DIFFERENT named identity never counts — a builder or operator comment is
-    not the worker's own even inside the worker's run.
+    A DIFFERENT named identity never counts — a builder comment is not the
+    worker's own even inside the worker's run — and neither does an operator or
+    app comment (``operator``, ``hermes``, ``system`` — ``_GUARD_FOREIGN_AUTHORS``),
+    which acts for someone else on purpose.
     """
     owner = (_kb._lossy_text(assignee) or "").strip()
     who = (_kb._lossy_text(author) or "").strip()
     if _same_profile(who, owner):
         return True
+    if who.casefold() in _GUARD_FOREIGN_AUTHORS:
+        return False
     if who.casefold() not in _GUARD_ANON_AUTHORS:
         return False
     ts = _kb._to_epoch(stamp)
