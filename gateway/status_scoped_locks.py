@@ -47,7 +47,7 @@ def release_all_scoped_locks(
 ) -> int:
     """Remove scoped lock files (--replace cleanup); returns the count removed. With ``owner_pid``
     only that gateway's records go (``owner_start_time`` narrows against PID reuse)."""
-    lock_dir = _status._get_lock_dir()
+    lock_dir = _status.machine_lock_dir()
     if not lock_dir.exists():
         return 0
     removed = 0

@@ -541,3 +541,39 @@ class WakeFeedResult(WakeOwnerResult):
 
 method("wake.feed", params=WakeFeedParams, result=WakeFeedResult,
        doc="Push client-captured PCM into the armed detector (mic-less remote backends).")
+
+
+# ── voice hub ─────────────────────────────────────────────────────────────────────────────────
+
+
+class VoiceHubStatus(WireEnum):
+    """The Hub's whole state machine: idle at boot, armed by a person, stopped when released."""
+
+    armed = "armed"
+    idle = "idle"
+    stopped = "stopped"
+
+
+class VoiceHubStateParams(Params):
+    profile: str | None = None
+
+
+class VoiceHubStateResult(Result):
+    """``tui_gateway/voice_hub.py::VoiceHub.state`` — the listening light's ONLY input.
+
+    Exactly four fields, and the contract stays closed (``Result`` forbids extras) so a fifth
+    one fails here instead of drifting into a client that renders the mic.
+    ``status`` is the state machine; ``owner_surface`` the surface holding the claim (null when
+    nothing does); ``since`` the epoch seconds of the last transition; ``stop_reason`` why
+    capture is not open (``user_stop`` / ``paused`` / ``detected`` / ``reclaimed`` /
+    ``start_failed``), null while armed.
+    """
+
+    status: VoiceHubStatus
+    owner_surface: str | None = None
+    since: float | None = None
+    stop_reason: str | None = None
+
+
+method("voice_hub.state", params=VoiceHubStateParams, result=VoiceHubStateResult,
+       doc="Who owns the microphone right now: status, owner surface, since, stop reason.")

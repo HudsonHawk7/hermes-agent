@@ -9,7 +9,7 @@ their own flock and none of them ever sees the others. This module adds the miss
 * a **rendezvous record** the winner publishes so a second invocation can find it, prove it
   is the same live process, and ATTACH instead of binding a second port.
 
-Both live in :func:`gateway.status._get_lock_dir` — the only cross-profile lock root already
+Both live in :func:`gateway.status.machine_lock_dir` — the only cross-profile lock root already
 in the tree (``$HERMES_GATEWAY_LOCK_DIR`` else ``$XDG_STATE_HOME/hermes/gateway-locks``),
 which scopes to the **OS user**. That is the correct granularity: separate OS users have
 separate ``$HOME``s, separate ``~/.hermes`` profile roots, separate ports-by-convention and
@@ -162,9 +162,9 @@ class HostRecord:
 
 def host_state_dir() -> Path:
     """Per-OS-USER rendezvous dir (shared by every profile of this user)."""
-    from gateway.status import _get_lock_dir
+    from gateway.status import machine_lock_dir
 
-    return _get_lock_dir()
+    return machine_lock_dir()
 
 
 def ensure_host_state_dir() -> Path:
