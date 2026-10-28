@@ -92,9 +92,17 @@ async function closeDrawer(page: Page) {
     const bar = page.getByTestId('needs-you-drawer-bar')
     const dialog = page.getByRole('dialog')
 
-    if ((await bar.count()) === 0 && (await dialog.count()) === 0) {return}
+    if ((await bar.count()) === 0 && (await dialog.count()) === 0) {break}
     await page.keyboard.press('Escape')
     await page.waitForTimeout(300)
+  }
+  // Completion-notify toasts (e.g. "Task blocked — needs your input") sit center-screen
+  // and hide cards under them — dismiss so pixel proof can see the board.
+  for (let i = 0; i < 5; i++) {
+    const dismiss = page.getByRole('button', { name: /Dismiss notification/i }).first()
+    if ((await dismiss.count()) === 0 || !(await dismiss.isVisible().catch(() => false))) {break}
+    await dismiss.click({ force: true }).catch(() => undefined)
+    await page.waitForTimeout(150)
   }
 }
 
@@ -303,12 +311,16 @@ with kbc.connect_closing(board="alpha") as conn:
   test('(f) legacy needs_input card renders', async () => {
     const page = fixture!.page
     await closeDrawer(page)
+    // After (b–e) the Needs you column scrolls; legacy is often below the fold
+    // under Fail path + Beta. Scroll it on-screen so the PNG proves AC5.
     const card = page.getByTestId('needs-you-card').filter({ hasText: 'Legacy free-text block' })
     await expect(card).toBeVisible()
+    await card.scrollIntoViewIfNeeded()
     await expect(card.getByText(/Which branch should this land on/i)).toBeVisible()
     await expect(card.getByText(/No buttons: ask the agent to re-ask with options/i)).toBeVisible()
     await expect(card.getByRole('button', { name: /Send back with a note/i })).toBeVisible()
-    await page.screenshot({ path: path.join(shots, 'f-legacy-card.png') })
+    // Card-scoped shot so title/reason/hint/Send back stay readable (not cropped).
+    await card.screenshot({ path: path.join(shots, 'f-legacy-card.png') })
   })
 
   test('(g) POST fail → rollback', async () => {
