@@ -679,12 +679,40 @@ def _rule_block_unblock_cycling(task, events, runs, now, cfg) -> list[Diagnostic
     )]
 
 
+def _lane_has_this_card_queued(cfg, assignee: str) -> bool:
+    """True when the card's OWN lane is at its per-profile cap.
+
+    The dispatcher serialises a profile (``kanban.max_in_progress_per_profile``)
+    and spawns the queued card when its running card finishes, so a queued card
+    is not stranded. The lane block comes from ``kb.task_graph_contexts``; a
+    block describing a different assignee (a caller bug) never silences this
+    card. The genuinely jammed shape — the running card itself dead — stays
+    visible because ``_rule_stale_running`` owns that card and reaches error+
+    on its own.
+    """
+    graph = cfg.get("_graph")
+    lane = graph.get("lane") if isinstance(graph, dict) else None
+    if not isinstance(lane, dict):
+        return False
+    if str(lane.get("assignee") or "").strip() != assignee.strip():
+        return False
+    cap, running = lane.get("cap"), lane.get("running")
+    if isinstance(cap, bool) or not isinstance(cap, int) or cap <= 0:
+        return False
+    if isinstance(running, bool) or not isinstance(running, int):
+        return False
+    return running >= cap
+
+
 def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
     """Assigned, unclaimed, ``ready`` for >= cfg["stranded_threshold_seconds"]
     (default 30 min). Deliberately age-based and identity-agnostic so it
     catches typo'd assignees, deleted profiles, and down external worker
     pools alike without a registry to curate. Unassigned tasks are excluded —
-    the dispatcher's ``skipped_unassigned`` already covers them."""
+    the dispatcher's ``skipped_unassigned`` already covers them.
+
+    A card queued behind its own lane's per-profile cap is NOT stranded: see
+    ``_lane_has_this_card_queued``."""
     threshold_seconds = float(cfg.get("stranded_threshold_seconds", 30 * 60))
     if _task_field(task, "status") != "ready":
         return []
@@ -693,6 +721,11 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
         return []
     assignee = _task_field(task, "assignee") or ""
     if not assignee.strip():
+        return []
+    # Queued behind its own lane's cap is waiting its turn, not stranded. Age
+    # alone would shout error at 1h and invite an operator (or the sweep) to
+    # park it — and `scheduled` has no automatic exit.
+    if _lane_has_this_card_queued(cfg, assignee):
         return []
 
     # Most recent event that put the task into ready; with none (old task /

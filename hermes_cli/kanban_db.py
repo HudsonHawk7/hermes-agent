@@ -1640,14 +1640,124 @@ def child_ids(conn: sqlite3.Connection, task_id: str) -> list[str]:
     return _linked_ids(conn, "child_id", "parent_id", task_id)
 
 
-def task_graph_contexts(conn: sqlite3.Connection, task_ids: Iterable[str]) -> dict[str, dict]:
-    """Bulk-load compact direct graph state for graph-aware diagnostics."""
+# Sentinel for "no explicit cap passed": read ``kanban.max_in_progress_per_profile``.
+_READ_CONFIG_CAP = object()
+
+
+def _empty_lane() -> dict:
+    return {"assignee": None, "cap": None, "running": 0, "running_ids": []}
+
+
+def _resolve_lane_cap(per_profile_cap) -> Optional[int]:
+    """A positive int cap, else None. ``_READ_CONFIG_CAP`` reads the config."""
+    raw = (
+        _configured_per_profile_cap()
+        if per_profile_cap is _READ_CONFIG_CAP
+        else per_profile_cap
+    )
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        return None
+    return raw
+
+
+def _running_ids_by_assignee(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    """``status='running'`` task ids grouped by assignee (first 10 kept per lane
+    by the caller), ordered by id so the block is stable.
+
+    Same rows the dispatcher's per-profile cap counts
+    (``kanban_db_dispatch.configured_max_in_progress_per_profile``): a lane is
+    "at cap" on its running rows, not on live claims."""
+    grouped: dict[str, list[str]] = {}
+    for row in conn.execute(
+        "SELECT id, assignee FROM tasks WHERE status = 'running' "
+        "AND assignee IS NOT NULL ORDER BY assignee, id"
+    ).fetchall():
+        assignee = str(row["assignee"] or "").strip()
+        if assignee:
+            grouped.setdefault(assignee, []).append(str(row["id"]))
+    return grouped
+
+
+def _positive_cap(value) -> Optional[int]:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
+def _configured_per_profile_cap() -> Optional[int]:
+    """``kanban.max_in_progress_per_profile`` as the dispatcher sees it.
+
+    Read through the dispatcher's own reader first so a diagnostic can never
+    drift from the cap it enforces. That reader reads the ACTIVE home's config;
+    the cap itself is a host-level setting that lives in the root (pre-profile)
+    ``config.yaml``, so a CLI running under a named profile would otherwise see
+    None and disagree with the gateway about how many workers a lane may have.
+    Fall back to the root config for that case.
+    """
+    try:
+        from hermes_cli.kanban_db_dispatch import configured_max_in_progress_per_profile
+        cap = _positive_cap(configured_max_in_progress_per_profile())
+    except Exception:  # a diagnostics read must never raise on a config problem
+        cap = None
+    if cap is not None:
+        return cap
+    try:
+        from hermes_cli.config_effective import load_user_config_effective
+        from hermes_constants import get_default_hermes_root
+        raw = (load_user_config_effective(get_default_hermes_root() / "config.yaml") or {})
+        kanban = raw.get("kanban") if isinstance(raw, dict) else None
+        if not isinstance(kanban, dict):
+            return None
+        return _positive_cap(kanban.get("max_in_progress_per_profile"))
+    except Exception:
+        return None
+
+
+def task_graph_contexts(
+    conn: sqlite3.Connection,
+    task_ids: Iterable[str],
+    *,
+    per_profile_cap=_READ_CONFIG_CAP,
+) -> dict[str, dict]:
+    """Bulk-load compact direct graph state for graph-aware diagnostics.
+
+    Each context carries ``parents``/``children`` plus a ``lane`` block —
+    ``{"assignee", "cap", "running", "running_ids"}`` — describing the card's
+    own assignee's queue. A ``ready`` card whose lane is at its cap is waiting
+    its turn, not stranded; ``stranded_in_ready`` reads this block to tell the
+    two apart.
+
+    ``per_profile_cap`` defaults to reading config; pass an int (or None for
+    "no cap") to pin it — tests do, so they never depend on a machine's
+    ``config.yaml``.
+    """
     ordered_ids = list(dict.fromkeys(str(task_id) for task_id in task_ids if task_id))
-    contexts = {task_id: {"parents": [], "children": []} for task_id in ordered_ids}
+    contexts = {
+        task_id: {"parents": [], "children": [], "lane": _empty_lane()}
+        for task_id in ordered_ids
+    }
     if not ordered_ids:
         return contexts
 
     placeholders = ",".join("?" for _ in ordered_ids)
+    cap = _resolve_lane_cap(per_profile_cap)
+    assignees = {
+        str(row["id"]): str(row["assignee"] or "").strip()
+        for row in conn.execute(
+            f"SELECT id, assignee FROM tasks WHERE id IN ({placeholders})",
+            tuple(ordered_ids),
+        ).fetchall()
+    }
+    running_by_assignee = _running_ids_by_assignee(conn)
+    for task_id, context in contexts.items():
+        assignee = assignees.get(task_id, "")
+        running_ids = running_by_assignee.get(assignee, []) if assignee else []
+        context["lane"] = {
+            "assignee": assignee or None,
+            "cap": cap,
+            "running": len(running_ids),
+            "running_ids": running_ids[:10],
+        }
     for bucket, own, other in (("parents", "child_id", "parent_id"), ("children", "parent_id", "child_id")):
         for row in conn.execute(
             f"SELECT l.{own} AS owner_id, t.id, t.title, t.status "
