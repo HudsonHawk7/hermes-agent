@@ -19,7 +19,6 @@ import textwrap
 import threading
 import types
 
-import numpy as np
 import pytest
 from pydantic import ValidationError
 
@@ -49,6 +48,30 @@ class _FakeEngine:
         pass
 
 
+class _Frames:
+    """A silent device block, numpy-free.
+
+    These tests run in the core test environment, where the ``[voice]`` extra (and therefore numpy)
+    is not installed — a bare ``import numpy`` at module scope errored the whole file there. The
+    capture loop asks a block only for ``ndim``, ``len``, ``abs`` and ``max``, and the fake engine
+    never reads a sample, so this is all a fake device has to be.
+    """
+
+    ndim = 1
+
+    def __init__(self, frames: int) -> None:
+        self._frames = frames
+
+    def __len__(self) -> int:
+        return self._frames
+
+    def __abs__(self) -> _Frames:
+        return self
+
+    def max(self) -> int:
+        return 0
+
+
 class _FakeStream:
     """One PortAudio input stream. Building it IS opening the device — that is what we count."""
 
@@ -71,7 +94,7 @@ class _FakeStream:
 
     def read(self, frames: int, **kwargs):
         threading.Event().wait(0.005)  # health: allow HX013 -- fake device frame cadence
-        return np.zeros((frames, 1), dtype="int16"), False
+        return _Frames(frames), False
 
 
 @pytest.fixture
@@ -81,7 +104,7 @@ def mic(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_GATEWAY_LOCK_DIR", str(tmp_path / "machine-locks"))
     monkeypatch.setattr(
         wake_word, "_import_audio",
-        lambda: (types.SimpleNamespace(InputStream=lambda **kw: _FakeStream(opens, **kw)), np))
+        lambda: (types.SimpleNamespace(InputStream=lambda **kw: _FakeStream(opens, **kw)), None))
     monkeypatch.setattr(wake_word, "_describe_input_device", lambda *a, **k: {"name": "fake-mic"})
     monkeypatch.setattr(wake_word, "_build_engine", lambda cfg: _FakeEngine())
     monkeypatch.setattr(wake_word, "load_wake_word_config",
@@ -286,10 +309,16 @@ def test_second_gateway_on_a_scratch_hermes_home_is_refused_with_one_device_open
     child = textwrap.dedent(
         """
         import json, types
-        import numpy as np
         import tools.wake_word as ww
 
         opens = []
+
+        class _Frames:
+            ndim = 1
+            def __init__(self, n): self._n = n
+            def __len__(self): return self._n
+            def __abs__(self): return self
+            def max(self): return 0
 
         class _Engine:
             frame_length = 1280
@@ -304,9 +333,9 @@ def test_second_gateway_on_a_scratch_hermes_home_is_refused_with_one_device_open
             def stop(self): pass
             def abort(self): pass
             def close(self): pass
-            def read(self, frames, **kw): return np.zeros((frames, 1), dtype="int16"), False
+            def read(self, frames, **kw): return _Frames(frames), False
 
-        ww._import_audio = lambda: (types.SimpleNamespace(InputStream=_Stream), np)
+        ww._import_audio = lambda: (types.SimpleNamespace(InputStream=_Stream), None)
         ww._describe_input_device = lambda *a, **k: {"name": "fake-mic"}
         ww._build_engine = lambda cfg: _Engine()
         ww.load_wake_word_config = lambda: {"enabled": True, "capture": "local"}
