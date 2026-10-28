@@ -27,6 +27,7 @@ import {
   gatewayActivationEpoch,
   host,
   Input,
+  ListeningLight,
   queryClient,
   relativeTime,
   RowButton,
@@ -37,8 +38,6 @@ import {
 } from '@hermes/plugin-sdk'
 import type { ClipboardEvent, DragEvent, ReactNode } from 'react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-
-import { ListeningLight } from '@/app/chat/listening-light'
 
 import { avatarColor, botAppearance, BotFace } from './avatar'
 import { isBackfilledFacePng } from './avatar-image'

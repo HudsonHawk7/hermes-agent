@@ -25,16 +25,23 @@ const LISTENING_GLOW =
 const FAILURE_TONE = 'bg-destructive/10 text-destructive border border-destructive/30'
 
 function reasonLabel(reason: string | null): string {
-  if (!reason) return 'stopped'
+  if (!reason) {
+    return 'stopped'
+  }
+
   switch (reason) {
     case 'start_failed':
       return 'start failed'
+
     case 'capture_failed':
       return 'capture failed'
+
     case 'reclaimed':
       return 'reclaimed'
+
     case 'stop_failed':
       return 'stop failed'
+
     default:
       return reason.replace(/_/g, ' ')
   }
@@ -45,10 +52,13 @@ export function ListeningLight({ className }: { className?: string }) {
   const listening = isVoiceHubListening(hub)
   const failed = isVoiceHubFailure(hub)
 
-  if (!listening && !failed) return null
+  if (!listening && !failed) {
+    return null
+  }
 
   if (failed) {
     const label = `Mic: ${reasonLabel(hub.stopReason)}`
+
     return (
       <div
         aria-live="polite"
@@ -57,9 +67,9 @@ export function ListeningLight({ className }: { className?: string }) {
           FAILURE_TONE,
           className
         )}
-        data-testid="listening-light"
         data-state="failed"
         data-stop-reason={hub.stopReason ?? ''}
+        data-testid="listening-light"
         role="status"
         title={label}
       >
@@ -70,6 +80,7 @@ export function ListeningLight({ className }: { className?: string }) {
   }
 
   const label = 'Listening'
+
   return (
     <div
       aria-live="polite"
@@ -78,9 +89,9 @@ export function ListeningLight({ className }: { className?: string }) {
         LISTENING_GLOW,
         className
       )}
-      data-testid="listening-light"
-      data-state="listening"
       data-hub-status={hub.status}
+      data-state="listening"
+      data-testid="listening-light"
       role="status"
       title={label}
     >

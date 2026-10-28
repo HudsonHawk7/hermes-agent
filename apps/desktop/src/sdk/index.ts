@@ -1627,6 +1627,10 @@ export {
   type ComposerModelPillContext,
   type ComposerModelPillProvider
 } from '@/app/chat/composer/contrib'
+/** VH8 listening light — Hub-driven LISTENING indicator + one-click stop. One
+ *  canonical component for 1:1 chat header and group-chat header; plugins must
+ *  import it from here (never `@/app/chat/listening-light`). */
+export { ListeningLight } from '@/app/chat/listening-light'
 /** THE session status dot — the one primitive the sidebar row, the pane tabs
  *  and the session switcher render, so a session's status can never disagree
  *  between surfaces. Pass the STORED session id and it resolves the rest
