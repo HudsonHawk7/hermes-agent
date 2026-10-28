@@ -605,6 +605,197 @@ def test_active_pr_guard_lifts_for_implementer_after_changes_requested(
         assert kbd.check_respawn_guard(conn, done_id) == "recent_success"
 
 
+def test_active_pr_guard_ignores_pr_url_posted_by_another_profile(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A builder's PR URL must not park a conductor card for 24 hours.
+
+    On a gate/review/merge card the PR URL is the SUBJECT of the work: the
+    builder cards post the new head back, operators post handoffs. Only the
+    card's own worker having opened a PR means "re-running risks a duplicate",
+    so another profile's URL does not guard — not even mid-run.
+    """
+    import hermes_cli.config as cfgmod
+    import hermes_cli.profiles as profmod
+
+    monkeypatch.setattr(profmod, "profile_exists", lambda name: True)
+    monkeypatch.setattr(
+        cfgmod, "load_config", lambda *a, **k: {"kanban": {"review_dispatch": True}},
+    )
+    pr_comment = "New head https://github.com/example/repo/pull/184 — gate this."
+
+    with kbc.connect() as conn:
+        gate = kb.create_task(conn, title="gate run 2", assignee="gatekeeper")
+        kb.add_comment(conn, gate, author="builder", body=pr_comment)
+        kb.add_comment(conn, gate, author="operator", body="Ready for the gate.")
+
+        assert kbd.check_respawn_guard(conn, gate) is None
+        res = kbd.dispatch_once(conn, dry_run=True)
+        assert gate in [s[0] for s in res.spawned]
+        assert dict(res.respawn_guarded).get(gate) is None
+
+        # Still not the worker's own when another profile posts it DURING the
+        # card's own run — the common conductor-card shape.
+        assert kb.claim_task(conn, gate) is not None
+        kb.add_comment(
+            conn, gate, author="builder-b",
+            body=pr_comment + " (posted while the gate worker ran)",
+        )
+        assert kbd.check_respawn_guard(conn, gate) is None
+
+
+def test_active_pr_guard_still_holds_on_the_workers_own_pr_url(kanban_home: Path) -> None:
+    """The duplicate-PR protection survives: the worker's OWN URL still guards,
+    including through an anonymous author inside that worker's own run and an
+    unreadable comment row (both stay fail-closed)."""
+    pr_comment = "Opened https://github.com/example/repo/pull/44 for review."
+
+    with kbc.connect() as conn:
+        own = kb.create_task(conn, title="implementer own pr", assignee="dev")
+        kb.add_comment(conn, own, author="dev", body=pr_comment)
+        assert kbd.check_respawn_guard(conn, own) == "active_pr"
+
+        # No profile identity on the comment, but it landed inside the card's
+        # own run for the assignee: still the worker's own PR.
+        anon = kb.create_task(conn, title="anonymous author", assignee="dev")
+        assert kb.claim_task(conn, anon) is not None
+        kb.add_comment(conn, anon, author="worker", body=pr_comment)
+        assert kbd.check_respawn_guard(conn, anon) == "active_pr"
+
+        # Unreadable timestamp + no author identity: fail closed.
+        garbled = kb.create_task(conn, title="garbled stamp", assignee="dev")
+        with kb.write_txn(conn):
+            conn.execute(
+                "INSERT INTO task_comments (task_id, author, body, created_at) "
+                "VALUES (?, 'worker', ?, 'soon')",
+                (garbled, pr_comment),
+            )
+        assert kbd.check_respawn_guard(conn, garbled) == "active_pr"
+
+
+def test_active_pr_guard_handoff_still_lifts_with_a_newer_builder_comment(
+    kanban_home: Path,
+) -> None:
+    """``changes_requested`` routes the card back to the implementer who owns the
+    PR. The handoff exemption is measured against the worker's OWN PR comment,
+    so a newer builder comment cannot swallow it."""
+    pr_comment = "Opened https://github.com/example/repo/pull/44 for review."
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="fix the same pr", assignee="dev")
+        claimed = kb.claim_task(conn, tid)
+        assert claimed is not None
+        kb.add_comment(conn, tid, author="dev", body=pr_comment)
+        _backdate_comments(conn, tid)
+        assert kbd.check_respawn_guard(conn, tid) == "active_pr"
+
+        assert kb.request_review(
+            conn, tid, summary="PR ready", reviewer="reviewer",
+            expected_run_id=claimed.current_run_id,
+        )
+        rclaim = kb.claim_review_task(conn, tid)
+        assert rclaim is not None
+        ok, implementer = kb.request_changes(
+            conn, tid, reason="fix tests", expected_run_id=rclaim.current_run_id,
+        )
+        assert (ok, implementer) == (True, "dev")
+        # A newer PR URL from a builder must not hide the handoff behind it.
+        kb.add_comment(conn, tid, author="builder", body=pr_comment)
+        assert kbd.check_respawn_guard(conn, tid) is None
+
+
+def test_active_pr_guard_lifts_when_the_worker_parked_the_card_on_a_dependency(
+    kanban_home: Path,
+) -> None:
+    """A conductor card's own run report must not park it for 24 h.
+
+    The recorded incident: a gate worker reported the PR it was GATING from its
+    own run (``author == assignee``), then handed the card back to the builder
+    card that owns that PR (``kanban_block(kind='dependency')`` ->
+    ``dependency_wait``). When the builder finishes, ``recompute_ready`` promotes
+    the gate back to ``ready`` — a fresh dispatch on the parent's new work. The
+    PR URL in the gate's own notes is the subject of the gate, not a PR the gate
+    worker opened, so step 4 must not park it (a real gate card sat ready for
+    24 h this way, logging ``respawn_guarded {'reason': 'active_pr'}``).
+    """
+    pr_comment = (
+        "Gate run 11 stopped on "
+        "https://github.com/example/repo/pull/184#issuecomment-1 — not gateable yet."
+    )
+
+    with kbc.connect() as conn:
+        builder = kb.create_task(conn, title="builder", assignee="builder")
+        gate = kb.create_task(conn, title="gate run 2", assignee="gateworker")
+        claimed = kb.claim_task(conn, gate)
+        assert claimed is not None
+        kb.add_comment(conn, gate, author="gateworker", body=pr_comment)
+        # The note goes out ~5 s before the hand-back (same-second ties stay
+        # guarded, fail closed — see the guard's strict comparison).
+        _backdate_comments(conn, gate, seconds=5)
+        # Before any hand-back the worker's own URL still guards.
+        assert kbd.check_respawn_guard(conn, gate) == "active_pr"
+
+        # The worker parks the gate on the builder card that owns the PR.
+        kb.link_tasks(conn, builder, gate, expected_child_run_id=claimed.current_run_id)
+        assert kb.block_task(
+            conn, gate, reason="waiting on builder", kind="dependency",
+            expected_run_id=claimed.current_run_id,
+        ) is True
+        gate_row = kb.get_task(conn, gate)
+        assert gate_row is not None and gate_row.status == "todo"
+        # The dependency hand-back lifts it: this card waits on another card's work.
+        assert kbd.check_respawn_guard(conn, gate) is None
+
+        # The builder lands -> recompute_ready promotes the gate -> it respawns.
+        assert kb.claim_task(conn, builder) is not None
+        assert kb.complete_task(conn, builder, summary="builder done") is True
+        kb.recompute_ready(conn)  # complete_task already promotes; idempotent
+        gate_row = kb.get_task(conn, gate)
+        assert gate_row is not None and gate_row.status == "ready"
+        assert kbd.check_respawn_guard(conn, gate) is None
+        assert kb.claim_task(conn, gate) is not None
+
+
+def test_active_pr_guard_ignores_an_operator_posted_pr_url(kanban_home: Path) -> None:
+    """An operator note is a deliberate act by someone else, never the worker's
+    own PR — even inside the worker's own run (``_GUARD_FOREIGN_AUTHORS``)."""
+    pr_comment = "New head https://github.com/example/repo/pull/184 — gate this."
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="gate", assignee="dev")
+        assert kb.claim_task(conn, tid) is not None
+        kb.add_comment(conn, tid, author="operator", body=pr_comment)
+        assert kbd.check_respawn_guard(conn, tid) is None
+
+        # The worker's own URL still guards.
+        kb.add_comment(
+            conn, tid, author="dev",
+            body="Opened https://github.com/example/repo/pull/45 for review.",
+        )
+        assert kbd.check_respawn_guard(conn, tid) == "active_pr"
+
+
+def test_active_pr_guard_holds_after_an_unassign_of_a_created_card(
+    kanban_home: Path,
+) -> None:
+    """An unassign must not release the implementer that opened the PR.
+
+    ``create_task`` records the assignee in the ``created`` event, not in an
+    ``assigned`` one, and an unassign writes ``{'assignee': None, 'from': dev}``.
+    The owner fallback has to read both or the guard stops counting the worker's
+    own URL the moment the card is unassigned.
+    """
+    pr_comment = "Opened https://github.com/example/repo/pull/44 for review."
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="dev own pr", assignee="dev")
+        kb.add_comment(conn, tid, author="dev", body=pr_comment)
+        assert kb.assign_task(conn, tid, None) is True  # unassign, no prior re-assign
+        row = kb.get_task(conn, tid)
+        assert row is not None and not (row.assignee or "")
+        assert kbd.check_respawn_guard(conn, tid) == "active_pr"
+
+
 def test_dispatch_json_exposes_suppression_reasons(
     kanban_home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

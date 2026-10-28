@@ -3094,6 +3094,50 @@ export interface WakeFeedResult {
   reason?: string | null
   fed: boolean
 }
+export interface VoiceHubStateParams {
+  profile?: string | null
+}
+/** ``tui_gateway/voice_hub.py::VoiceHub.state`` — the listening light's ONLY input. Exactly four fields, and the contract stays closed (``Result`` forbids extras) so a fifth one fails here instead of drifting into a client that renders the mic. ``status`` is the state machine; ``owner_surface`` the surface holding the claim (null when nothing does); ``since`` the epoch seconds of the last transition; ``stop_reason`` why capture is not open (``user_stop`` / ``paused`` / ``detected`` / ``reclaimed`` / ``start_failed``), null while armed. */
+export interface VoiceHubStateResult {
+  status: VoiceHubStatus
+  owner_surface?: string | null
+  since?: number | null
+  stop_reason?: string | null
+}
+/** The Hub's whole state machine: idle at boot, armed by a person, stopped when released. */
+export type VoiceHubStatus = 'armed' | 'idle' | 'stopped'
+export interface VoiceHubGuardParams {
+  profile?: string | null
+}
+/** ``tui_gateway/voice_hub.py::VoiceHub.guard_state`` — a doctor read, not the light. ``guard`` is null when no guard is in force, which is exactly what a restarted gateway must look like (VH1 AC1/AC3). */
+export interface VoiceHubGuardResult {
+  guard?: VoiceGuardState | null
+}
+/** What the guard *did*, read from ``tools/voice_guard.py::VoiceGuard.state``. ``frames`` seen, ``speech_frames`` after cancellation, ``cancelled_frames`` where the far end changed the sample, ``utterances`` emitted, ``dropped_short`` discarded for length, ``late_reference_frames`` mic frames with no far end, ``max_reference_lag_ms`` the worst far-end staleness seen, ``degraded`` once the far end stopped being causally early (or went missing past its limit). ``reference`` / ``reference_pump`` say whether the loopback tap is actually running, and ``settings`` is the value line the guard prints at arm, so a doctor read can never show a guard whose tap is silent. */
+export interface VoiceGuardState {
+  frames?: number
+  speech_frames?: number
+  cancelled_frames?: number
+  utterances?: number
+  dropped_short?: number
+  late_reference_frames?: number
+  max_reference_lag_ms?: number
+  degraded?: boolean
+  reference?: string | null
+  reference_pump?: VoiceGuardReferencePump | null
+  dropped_reference_frames?: number
+  echo_cancel?: string | null
+  vad?: string | null
+  settings?: string | null
+}
+/** The far-end tap's own thread: whether it runs, and what it has pulled. */
+export interface VoiceGuardReferencePump {
+  running: boolean
+  frames?: number
+  errors?: number
+  last_error?: string | null
+  [key: string]: unknown
+}
 export interface SessionCreateParams {
   profile?: string | null
   cols?: number | null
@@ -6559,6 +6603,10 @@ export interface RpcMethods {
   'voice.toggle': { params: VoiceToggleParams; result: VoiceToggleResult }
   /** Speak text through the backend TTS engine (barge-in aware). */
   'voice.tts': { params: VoiceTtsParams; result: VoiceTtsResult }
+  /** The armed listening guard's counters (null when no guard is in force). */
+  'voice_hub.guard': { params: VoiceHubGuardParams; result: VoiceHubGuardResult }
+  /** Who owns the microphone right now: status, owner surface, since, stop reason. */
+  'voice_hub.state': { params: VoiceHubStateParams; result: VoiceHubStateResult }
   /** Push client-captured PCM into the armed detector (mic-less remote backends). */
   'wake.feed': { params: WakeFeedParams; result: WakeFeedResult }
   /** Release the mic (e.g. while the desktop's browser captures audio). */
@@ -6826,6 +6874,8 @@ export const RPC_METHODS = [
   'voice.record',
   'voice.toggle',
   'voice.tts',
+  'voice_hub.guard',
+  'voice_hub.state',
   'wake.feed',
   'wake.pause',
   'wake.resume',

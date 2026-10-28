@@ -763,8 +763,16 @@ _detector_lock = threading.Lock()
 
 
 def _lock_path() -> Path:
-    from hermes_constants import get_default_hermes_root
-    return get_default_hermes_root() / "runtime" / "wake-word.lock"
+    """The mic lease file — one per OS user, deliberately independent of ``HERMES_HOME``.
+
+    Under the home, a second gateway started with another ``HERMES_HOME`` (a different profile,
+    a scratch install, an update's staging home) took a *different* lease file for the *same*
+    microphone: two live listeners, which is the 10/25 failure in its second form. The machine
+    lock dir is the cross-profile rendezvous the gateway already uses (``$HERMES_GATEWAY_LOCK_DIR``
+    else ``$XDG_STATE_HOME/hermes/gateway-locks``), so the mic has exactly one lease per box.
+    """
+    from gateway.status import machine_lock_dir
+    return machine_lock_dir() / "wake-word.lock"
 
 
 def _flock(handle, acquire: bool) -> None:

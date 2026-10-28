@@ -333,8 +333,8 @@ def test_relative_xdg_state_home_is_ignored(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_STATE_HOME", "relative/state")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
 
-    assert status._get_lock_dir().is_absolute()
-    assert status._get_lock_dir() == tmp_path / ".local" / "state" / "hermes" / status._LOCKS_DIRNAME
+    assert status.machine_lock_dir().is_absolute()
+    assert status.machine_lock_dir() == tmp_path / ".local" / "state" / "hermes" / status._LOCKS_DIRNAME
 
 
 def _gateway_record(*, pid: int, create_time, start_time, home: str) -> hr.HostRecord:

@@ -541,3 +541,95 @@ class WakeFeedResult(WakeOwnerResult):
 
 method("wake.feed", params=WakeFeedParams, result=WakeFeedResult,
        doc="Push client-captured PCM into the armed detector (mic-less remote backends).")
+
+
+# ── voice hub ─────────────────────────────────────────────────────────────────────────────────
+
+
+class VoiceHubStatus(WireEnum):
+    """The Hub's whole state machine: idle at boot, armed by a person, stopped when released."""
+
+    armed = "armed"
+    idle = "idle"
+    stopped = "stopped"
+
+
+class VoiceHubStateParams(Params):
+    profile: str | None = None
+
+
+class VoiceHubStateResult(Result):
+    """``tui_gateway/voice_hub.py::VoiceHub.state`` — the listening light's ONLY input.
+
+    Exactly four fields, and the contract stays closed (``Result`` forbids extras) so a fifth
+    one fails here instead of drifting into a client that renders the mic.
+    ``status`` is the state machine; ``owner_surface`` the surface holding the claim (null when
+    nothing does); ``since`` the epoch seconds of the last transition; ``stop_reason`` why
+    capture is not open (``user_stop`` / ``paused`` / ``detected`` / ``reclaimed`` /
+    ``start_failed``), null while armed.
+    """
+
+    status: VoiceHubStatus
+    owner_surface: str | None = None
+    since: float | None = None
+    stop_reason: str | None = None
+
+
+method("voice_hub.state", params=VoiceHubStateParams, result=VoiceHubStateResult,
+       doc="Who owns the microphone right now: status, owner surface, since, stop reason.")
+
+
+class VoiceHubGuardParams(Params):
+    profile: str | None = None
+
+
+class VoiceGuardReferencePump(OpenModel):
+    """The far-end tap's own thread: whether it runs, and what it has pulled."""
+
+    running: bool
+    frames: int = 0
+    errors: int = 0
+    last_error: str | None = None
+
+
+class VoiceGuardState(Result):
+    """What the guard *did*, read from ``tools/voice_guard.py::VoiceGuard.state``.
+
+    ``frames`` seen, ``speech_frames`` after cancellation, ``cancelled_frames`` where the far end
+    changed the sample, ``utterances`` emitted, ``dropped_short`` discarded for length,
+    ``late_reference_frames`` mic frames with no far end, ``max_reference_lag_ms`` the worst far-end
+    staleness seen, ``degraded`` once the far end stopped being causally early (or went missing past
+    its limit). ``reference`` / ``reference_pump`` say whether the loopback tap is actually running,
+    and ``settings`` is the value line the guard prints at arm, so a doctor read can never show a
+    guard whose tap is silent.
+    """
+
+    frames: int = 0
+    speech_frames: int = 0
+    cancelled_frames: int = 0
+    utterances: int = 0
+    dropped_short: int = 0
+    late_reference_frames: int = 0
+    max_reference_lag_ms: float = 0.0
+    degraded: bool = False
+    reference: str | None = None
+    reference_pump: VoiceGuardReferencePump | None = None
+    dropped_reference_frames: int = 0
+    echo_cancel: str | None = None
+    vad: str | None = None
+    settings: str | None = None
+
+
+class VoiceHubGuardResult(Result):
+    """``tui_gateway/voice_hub.py::VoiceHub.guard_state`` — a doctor read, not the light.
+
+    ``guard`` is null when no guard is in force, which is exactly what a restarted gateway must
+    look like (VH1 AC1/AC3).
+    """
+
+    guard: VoiceGuardState | None = None
+
+
+method("voice_hub.guard", params=VoiceHubGuardParams, result=VoiceHubGuardResult,
+       doc="The armed listening guard's counters (null when no guard is in force).")
+

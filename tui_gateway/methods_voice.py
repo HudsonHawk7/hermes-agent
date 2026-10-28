@@ -263,23 +263,55 @@ def _full_duplex_listener() -> None:
             tripped.set()
             _fd_trip(phase)
         mult, grace_ms = _fd_barge_params(_voice_cfg_dict())
-        wav_path = full_duplex_listen(_should_stop, is_playing=is_audio_output_active,
-                                      on_trigger=_on_trigger, multiplier=mult or None,
-                                      grace_ms=grace_ms)
-        if not (wav_path and tripped.is_set()):
-            return
+        # VH3: with the guard armed the trip is a real utterance after echo cancellation, not a
+        # loudness threshold — the television and her own reply are subtracted before VAD decides.
+        # Off (the default) keeps the loudness path exactly as it was.
+        guard = _build_listening_guard()
+        hub = _wake_hub()
+        hub.attach_guard(guard)
         try:
-            result = transcribe_recording(wav_path)
-            if result.get("success") and (result.get("transcript") or "").strip():
-                _deliver_fd_transcript(result["transcript"].strip())
+            wav_path = full_duplex_listen(_should_stop, is_playing=is_audio_output_active,
+                                          on_trigger=_on_trigger, multiplier=mult or None,
+                                          grace_ms=grace_ms, guard=guard)
+            if not (wav_path and tripped.is_set()):
+                return
+            try:
+                result = transcribe_recording(wav_path)
+                if result.get("success") and (result.get("transcript") or "").strip():
+                    _deliver_fd_transcript(result["transcript"].strip())
+            finally:
+                with contextlib.suppress(OSError):
+                    os.unlink(wav_path)
         finally:
-            with contextlib.suppress(OSError):
-                os.unlink(wav_path)
+            # The listener owns the guard: stop reporting it, then release its backends so the
+            # loopback recorder and ONNX session do not outlive the capture (VH3).
+            hub.attach_guard(None)
+            if guard is not None:
+                guard.close()
     except Exception as e:
         logger.debug("full-duplex listener failed: %s", e)
     finally:
         with _fd_listener_lock:
             _fd_listener_active = False
+
+
+def _build_listening_guard():
+    """The listening guard this config asks for, or ``None`` (build_guard names the reason).
+
+    Built at capture time, never at import or boot: a restarted gateway has no guard until a
+    surface asks for the mic, which is VH1 AC1/AC3 still holding (VH3).
+    """
+    try:
+        from tools.voice_guard import GuardError, build_guard
+    except ImportError as e:
+        logger.warning("listening guard unavailable: %s", e)
+        return None
+    try:
+        return build_guard()
+    except (GuardError, ImportError, OSError, RuntimeError) as e:
+        # A broken guard must not take barge-in down with it — but it says why, loudly.
+        logger.warning("listening guard unavailable: %s", e)
+        return None
 
 
 def _fd_barge_params(cfg: dict) -> tuple[float, int]:
@@ -385,27 +417,26 @@ def _voice_status_payload(**extra) -> dict:
     return {"enabled": _voice_mode_enabled(), "record_key": record_key, "tts": _voice_tts_enabled(), **extra}
 
 
-# ── Wake word ("Hey Hermes"): process-global detector (one mic). The first eligible transport
-# to call wake.start owns it until stop, disconnect, or stream failure; on detection we emit
-# wake.detected and the client opens a session + its own capture. The detector yields the mic
-# to voice.record (pause/resume) and to the desktop's browser mic (wake.pause/resume RPCs).
-_wake_lock = threading.Lock()
-_wake_owner_transport: Optional[Transport] = None
-_wake_owner_surface = ""
+# ── Wake word ("Hey Hermes"): the gateway's Voice Hub (``voice_hub.py``) is the one owner of
+# the mic. The first surface to call wake.start takes the claim until stop, disconnect, or
+# stream failure; a second surface is refused with the detector's typed WakeWordInUse. On
+# detection we emit wake.detected and the client opens a session + its own capture. The Hub
+# yields the mic to voice.record (pause/resume) and to the desktop's browser mic
+# (wake.pause/resume RPCs). The Hub, not this module, remembers who holds it.
+def _wake_hub():
+    """The process Hub — also the answer to "which surface owns the mic" for every profile."""
+    from . import voice_hub
+    return voice_hub.hub()
 
 
 def _wake_owner_snapshot():
-    with _wake_lock:
-        return _wake_owner_transport, _wake_owner_surface
+    return _wake_hub().snapshot()
 
 
-def _release_wake_for_transport(transport: Transport) -> bool:
+def _release_wake_for_transport(transport: Transport, *, reason: str = "user_stop") -> bool:
     """Release the wake lease iff ``transport`` is the current gateway owner."""
-    global _wake_owner_transport, _wake_owner_surface
-    with _wake_lock:
-        if _wake_owner_transport is not transport:
-            return False
-        _wake_owner_transport, _wake_owner_surface = None, ""
+    if not _wake_hub().release(transport, reason):
+        return False
     try:
         from tools.wake_word import stop_listening
         stop_listening(owner=transport)
@@ -431,9 +462,15 @@ def _wake_resume_if_owner(owner: Transport, *, retry_seconds: float = 15.0,
     or ``retry_seconds`` elapses. ``False`` (lease gone / other owner) is final — never retried."""
     from tools.wake_word import resume_listening
     try:
-        return resume_listening(owner=owner)
+        resumed = resume_listening(owner=owner)
     except Exception as e:
         logger.debug("wake resume failed (will retry): %s", e)
+    else:
+        if resumed:
+            # Capture is open again, so the published state must say so — the retry path below
+            # does this too; without it the light stays idle while the mic is live.
+            _wake_hub().resume(owner)
+        return resumed
     global _wake_resume_retry_active
     with _wake_resume_retry_lock:
         if _wake_resume_retry_active:
@@ -448,6 +485,7 @@ def _wake_resume_if_owner(owner: Transport, *, retry_seconds: float = 15.0,
                 time.sleep(retry_interval)
                 with contextlib.suppress(Exception):
                     if resume_listening(owner=owner):
+                        _wake_hub().resume(owner)
                         logger.info("wake: detector resumed after retry")
                     return  # False — detector gone or lease moved: stop, don't fight it.
             logger.warning("wake: could not resume detector after voice turn "
@@ -493,6 +531,7 @@ def _wake_detect_handler(transport, sid: str, phrase: str, new_session: bool):
         from tools.wake_word import get_last_match, owns_listener, pause_listening
         if not pause_listening(owner=transport) or not owns_listener(transport):
             return
+        _wake_hub().pause(transport, "detected")
         if _transport_is_dead(transport):
             _release_wake_for_transport(transport)
             return
@@ -551,9 +590,9 @@ def _(rid, params: dict) -> dict:
     """Arm the wake-word listener for the calling surface ("tui" | "gui"); ``{started: False,
     reason}`` when disabled/owned/not ready. ``persist: true`` (explicit gesture) also flips
     ``wake_word.enabled`` on; auto-arm callers omit it."""
-    global _wake_owner_transport, _wake_owner_surface
     surface = str(params.get("surface") or "auto").strip().lower()
     transport = _caller_transport()
+    hub = _wake_hub()
 
     def refused(reason, **extra):
         return _ok(rid, {"started": False, "reason": reason, **extra})
@@ -582,22 +621,29 @@ def _(rid, params: dict) -> dict:
         return refused(reason)
     existing_owner, existing_surface = _wake_owner_snapshot()
     if existing_owner is not None and (_transport_is_dead(existing_owner) or not owns_listener(existing_owner)):
-        _release_wake_for_transport(existing_owner)
+        _release_wake_for_transport(existing_owner, reason="reclaimed")
         existing_owner, existing_surface = None, ""
     if existing_owner is not None and existing_owner is not transport:
         return refused("owned", owner_surface=existing_surface)
     try:
+        # The Hub is the one owner: it raises the same typed refusal the detector does, before
+        # the device is ever opened, so a second surface can't take the mic or open it twice.
+        hub.claim(surface, transport)
         on_detect = _wake_detect_handler(transport, str(params.get("session_id") or ""),
                                          wake_phrase(cfg), bool(cfg.get("start_new_session", True)))
         start_listening(on_detect, owner=transport, config=cfg,
                         external_audio=capture_mode == "client")
     except WakeWordInUse:
+        # claim() raising leaves the other surface's claim alone; start_listening raising
+        # (another PROCESS holds the machine lock) leaves OUR claim behind, so drop it rather
+        # than publish an armed Hub with no detector under it.
+        hub.release(transport, "start_failed")
         return refused("owned", owner_surface=existing_surface or None)
     except Exception as e:
+        hub.release(transport, "start_failed")  # don't leave a claim with no detector behind it
         logger.warning("wake.start(%s): failed to start listener: %s", surface, e)
         return _err(rid, 5026, str(e))
-    with _wake_lock:
-        _wake_owner_transport, _wake_owner_surface = transport, surface
+    hub.armed(surface, transport)
     frame = detector_frame_info()
     logger.info("wake.start(%s): listening for %r (%s) capture=%s frame=%s",
                 surface, reqs["phrase"], reqs["provider"], capture_mode, frame.get("frame_length"))
@@ -610,7 +656,7 @@ def _(rid, params: dict) -> dict:
 @method("wake.stop")
 def _(rid, params: dict) -> dict:
     """Stop this surface's listener; ``persist: true`` also writes ``wake_word.enabled: false``."""
-    stopped = _release_wake_for_transport(_caller_transport())
+    stopped = _release_wake_for_transport(_caller_transport(), reason="user_stop")
     disabled_persisted = False
     if params.get("persist"):
         try:
@@ -625,9 +671,12 @@ def _(rid, params: dict) -> dict:
 @method("wake.pause")
 def _(rid, params: dict) -> dict:
     """Release the mic (e.g. while the desktop's browser captures audio)."""
+    transport = _caller_transport()
     try:
         from tools.wake_word import pause_listening
-        paused = pause_listening(owner=_caller_transport())
+        paused = pause_listening(owner=transport)
+        if paused:
+            _wake_hub().pause(transport, "paused")
         logger.info("wake.pause: detector paused=%s", paused)
     except Exception as e:
         logger.debug("wake.pause failed: %s", e)
@@ -638,7 +687,8 @@ def _(rid, params: dict) -> dict:
 @method("wake.resume")
 def _(rid, params: dict) -> dict:
     """Reclaim the mic after a pause; no-op if the listener isn't armed."""
-    resumed = _wake_resume_if_owner(_caller_transport())
+    transport = _caller_transport()
+    resumed = _wake_resume_if_owner(transport)  # resumes the Hub as well, on success
     logger.info("wake.resume: detector resumed=%s", resumed)
     return _owner_result(rid, "resumed", resumed)
 
@@ -680,6 +730,24 @@ def _(rid, params: dict) -> dict:
             "local_input_available": bool(reqs.get("local_input_available")), **_frame_fields(frame)})
     except Exception as e:
         return _err(rid, 5026, str(e))
+
+
+@method("voice_hub.state")
+def _(rid, params: dict) -> dict:
+    """The listening light's only input — the Hub's four fields (VH1 AC4). No session, no probe:
+    it answers from memory, so a client can poll it while every agent is mid-turn."""
+    return _ok(rid, _wake_hub().state())
+
+
+@method("voice_hub.guard")
+def _(rid, params: dict) -> dict:
+    """The listening guard's counters, or ``null`` when no guard is in force (VH3).
+
+    A doctor read, deliberately separate from ``voice_hub.state``: clients pin that four-field
+    contract, and this one tells an operator whether the reference is keeping up
+    (``degraded``, ``max_reference_lag_ms``) and what is actually in force.
+    """
+    return _ok(rid, {"guard": _wake_hub().guard_state()})
 
 
 @method("wake.feed")
@@ -856,6 +924,9 @@ def _(rid, params: dict) -> dict:
             from tools.wake_word import pause_listening
             wake_paused = pause_listening(owner=transport)
         if wake_paused:
+            # The mic just changed hands to STT: publish that, or the listening light keeps
+            # drawing "armed" for a detector that is no longer capturing (VH1 AC4).
+            _wake_hub().pause(transport, "paused")
             with _voice_sid_lock:
                 _voice_wake_owner = transport
         live = _voice_capture_callback
