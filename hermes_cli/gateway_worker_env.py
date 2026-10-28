@@ -31,6 +31,14 @@ WORKER_ENV_MARKERS: tuple[str, ...] = (
     "HERMES_KANBAN_WORKSPACE",
     "HERMES_KANBAN_RUN_ID",
     "HERMES_KANBAN_CLAIM_LOCK",
+    # Root pins, not just the DB file. The dispatcher writes ``HERMES_KANBAN_WORKSPACES_ROOT``
+    # into EVERY worker it spawns (``kanban_db_dispatch``), so a shell under a worker carries it;
+    # the gateway's machine flows (notifier, watcher, dispatcher ticks) resolve every enumerated
+    # board slug through these pins (``kanban_db._board_path``), and ``gateway.platforms.base``
+    # reads the attachments pin when it serves a file. Inherited, every board's workspaces and
+    # attachments land in another board's root while the board slug is ignored.
+    "HERMES_KANBAN_WORKSPACES_ROOT",
+    "HERMES_KANBAN_ATTACHMENTS_ROOT",
 )
 
 _log = logging.getLogger(__name__)

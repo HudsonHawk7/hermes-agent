@@ -31,6 +31,9 @@ def clean_worker_env(monkeypatch):
     """Start from no inherited worker markers (the test process may itself be a worker)."""
     for key in WORKER_ENV_MARKERS:
         monkeypatch.delenv(key, raising=False)
+    # Deliberately inheritable for real workers (kanban_worker_client keeps it), but a test that
+    # asserts paths under its OWN HERMES_HOME must not resolve through this box's real kanban home.
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
     return monkeypatch
 
 
@@ -194,3 +197,86 @@ def test_run_gateway_strips_the_markers_before_its_first_guard(monkeypatch, clea
     # ...and the operator gets one line naming what was dropped.
     messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any("HERMES_DELEGATED_CHILD_CONTEXT" in m and "HERMES_KANBAN_TASK" in m for m in messages), messages
+
+
+#: Kanban path resolvers and the pin each one honors. Every resolver names its pin when it calls
+#: ``kanban_db._board_path``, so the drift test below learns the list by RUNNING them — a new pin
+#: cannot be added without reddening it.
+_KANBAN_PIN_RESOLVERS = (
+    "kanban_db_path",
+    "workspaces_root",
+    "attachments_root",
+)
+
+
+def test_an_inherited_root_pin_retargets_every_board_until_the_gateway_strips_it(
+    board_home, clean_worker_env,
+):
+    """The bug, then the fix: an inherited workspaces/attachments root outranks the board slug.
+
+    The dispatcher pins ``HERMES_KANBAN_WORKSPACES_ROOT`` into EVERY worker (and
+    ``HERMES_KANBAN_DB`` beside it), so a gateway started from a worker's shell carries it.
+    Machine flows — gateway notifier, watcher, dispatcher ticks — resolve each board slug
+    through that pin (``kanban_db.pin_first_board_resolution``), so every board's workspaces
+    and attachments land in another board's directory, and ``gateway.platforms.base`` reads
+    the same pin for attachment serving.
+    """
+    another_board = board_home.parent / "another-board"
+    pinned_workspaces = another_board / "kanban" / "workspaces"
+    pinned_attachments = another_board / "kanban" / "attachments"
+    clean_worker_env.setenv("HERMES_KANBAN_WORKSPACES_ROOT", str(pinned_workspaces))
+    clean_worker_env.setenv("HERMES_KANBAN_ATTACHMENTS_ROOT", str(pinned_attachments))
+
+    # The bug, first: the inherited pins win over `default`, so this gateway would own the
+    # OTHER board's roots while reporting on its own.
+    with kb.pin_first_board_resolution():
+        assert kb.workspaces_root(board="default") == pinned_workspaces
+        assert kb.attachments_root(board="default") == pinned_attachments
+
+    stripped = strip_worker_markers()
+    assert "HERMES_KANBAN_WORKSPACES_ROOT" in stripped
+    assert "HERMES_KANBAN_ATTACHMENTS_ROOT" in stripped
+
+    # The fix: the same machine flow now roots every board under this gateway's own home.
+    with kb.pin_first_board_resolution():
+        assert kb.workspaces_root(board="default") == board_home / "kanban" / "workspaces"
+        assert kb.attachments_root(board="default") == board_home / "kanban" / "attachments"
+
+
+def test_every_kanban_pin_a_resolver_honors_is_stripped_by_both_layers(monkeypatch):
+    """Both directions of the drift: a pin a resolver honors appears in BOTH strip lists.
+
+    ``WORKER_ENV_MARKERS`` (in-process strip) and ``DAEMON_STRIPPED_ENV`` (spawned daemon) must
+    agree about Kanban pins. They did not: the daemon stripped ``HERMES_KANBAN_WORKSPACES_ROOT``
+    while the in-process strip let it through, and neither list had
+    ``HERMES_KANBAN_ATTACHMENTS_ROOT``. The names below are not written here — they are recorded
+    from the resolvers' own calls into ``kanban_db._board_path``.
+    """
+    from hermes_cli.gateway_runtime_start import DAEMON_STRIPPED_ENV
+
+    recorded: list[str] = []
+    real_board_path = kb._board_path
+
+    def _recording_board_path(env_var, board, default_parts, leaf):
+        if env_var:
+            recorded.append(env_var)
+        return real_board_path(env_var, board, default_parts, leaf)
+
+    monkeypatch.setattr(kb, "_board_path", _recording_board_path)
+    for resolver in _KANBAN_PIN_RESOLVERS:
+        getattr(kb, resolver)(board="default")
+
+    assert len(recorded) == len(_KANBAN_PIN_RESOLVERS), (
+        "the recorder did not sit on the resolvers' real path — recorded "
+        f"{recorded}, expected one pin name per resolver in {_KANBAN_PIN_RESOLVERS}"
+    )
+    missing_markers = [name for name in recorded if name not in WORKER_ENV_MARKERS]
+    missing_daemon = [name for name in recorded if name not in DAEMON_STRIPPED_ENV]
+    assert not missing_markers, (
+        f"the in-process gateway strip cannot see the pin(s) {missing_markers}: WORKER_ENV_MARKERS "
+        "leaves them inherited, so every board resolves through another board's root"
+    )
+    assert not missing_daemon, (
+        f"the spawned-daemon spawn env keeps handing {missing_daemon} to the daemon, so the two "
+        "strip layers disagree about which Kanban pins a gateway must own"
+    )
