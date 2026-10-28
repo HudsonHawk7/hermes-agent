@@ -3094,6 +3094,18 @@ export interface WakeFeedResult {
   reason?: string | null
   fed: boolean
 }
+export interface VoiceHubStateParams {
+  profile?: string | null
+}
+/** ``tui_gateway/voice_hub.py::VoiceHub.state`` — the listening light's ONLY input. Exactly four fields, and the contract stays closed (``Result`` forbids extras) so a fifth one fails here instead of drifting into a client that renders the mic. ``status`` is the state machine; ``owner_surface`` the surface holding the claim (null when nothing does); ``since`` the epoch seconds of the last transition; ``stop_reason`` why capture is not open (``user_stop`` / ``paused`` / ``detected`` / ``reclaimed`` / ``start_failed``), null while armed. */
+export interface VoiceHubStateResult {
+  status: VoiceHubStatus
+  owner_surface?: string | null
+  since?: number | null
+  stop_reason?: string | null
+}
+/** The Hub's whole state machine: idle at boot, armed by a person, stopped when released. */
+export type VoiceHubStatus = 'armed' | 'idle' | 'stopped'
 export interface SessionCreateParams {
   profile?: string | null
   cols?: number | null
@@ -6559,6 +6571,8 @@ export interface RpcMethods {
   'voice.toggle': { params: VoiceToggleParams; result: VoiceToggleResult }
   /** Speak text through the backend TTS engine (barge-in aware). */
   'voice.tts': { params: VoiceTtsParams; result: VoiceTtsResult }
+  /** Who owns the microphone right now: status, owner surface, since, stop reason. */
+  'voice_hub.state': { params: VoiceHubStateParams; result: VoiceHubStateResult }
   /** Push client-captured PCM into the armed detector (mic-less remote backends). */
   'wake.feed': { params: WakeFeedParams; result: WakeFeedResult }
   /** Release the mic (e.g. while the desktop's browser captures audio). */
@@ -6826,6 +6840,7 @@ export const RPC_METHODS = [
   'voice.record',
   'voice.toggle',
   'voice.tts',
+  'voice_hub.state',
   'wake.feed',
   'wake.pause',
   'wake.resume',

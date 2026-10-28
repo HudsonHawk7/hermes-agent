@@ -1,0 +1,145 @@
+"""The Voice Hub — the gateway's one owner of the microphone.
+
+Every surface arms through the Hub: the TUI, the desktop, and — because one gateway serves
+every profile — a second profile's session inside this same process. The Hub is not a second
+detector. It is the lease and the state machine in front of ``tools.wake_word``, so "who holds
+the mic" has exactly one answer per box; the detector's own machine-wide file lock answers the
+same question across processes.
+
+Two rules it enforces (design t_e850e163, ratified after the 10/25 listening incident):
+
+* **One owner.** A second surface asking for the mic while it is armed is refused with the
+  detector's typed :class:`tools.wake_word.WakeWordInUse`, and the first owner keeps the
+  device open exactly once.
+* **A restart is not a person.** A Hub is born ``idle``, and nothing here reads
+  ``wake_word.enabled`` to arm itself. Arming is a call from a surface, never a value replayed
+  from disk or config at boot.
+
+:meth:`VoiceHub.state` is the whole published surface: exactly four fields (VH1 AC4). The owner
+transport rides along internally so pause/resume can find the caller, but it is never published
+— a client draws the light from four fields and nothing else.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+from typing import Callable, Optional
+
+# The three published statuses. ``idle`` is also "paused": capture is closed either way, and the
+# four-field contract has no room for a fifth value (see ``stop_reason`` for which one it was).
+ARMED = "armed"
+IDLE = "idle"
+STOPPED = "stopped"
+
+
+class VoiceHub:
+    """One owner, one state machine, one mic.
+
+    Thread-safe: RPC handlers arrive on the pool, detection callbacks on their own thread, and
+    the transport teardown path can release the lease from a third. Every transition moves
+    ``since``, so a client can tell a fresh arm from a stale one without a second timestamp.
+    """
+
+    def __init__(self, *, clock: Callable[[], float] = time.time) -> None:
+        self._lock = threading.RLock()
+        self._clock = clock
+        self._status = IDLE
+        self._surface: Optional[str] = None
+        self._transport: object = None
+        self._since = float(clock())
+        self._stop_reason: Optional[str] = None
+
+    # ── published surface ────────────────────────────────────────────────────────────────────
+
+    def state(self) -> dict:
+        """The four fields a listening light draws. Never add a fifth: clients pin this shape."""
+        with self._lock:
+            return {
+                "status": self._status,
+                "owner_surface": self._surface,
+                "since": self._since,
+                "stop_reason": self._stop_reason,
+            }
+
+    def snapshot(self) -> tuple[object, str]:
+        """``(owner_transport, owner_surface)``; ``(None, "")`` when no surface holds a claim.
+
+        The claim outlives a pause (resume needs to find its caller) and dies on release, so a
+        paused hub still names its surface here while ``state()["status"]`` reads ``idle``.
+        """
+        with self._lock:
+            return self._transport, self._surface or ""
+
+    # ── transitions ──────────────────────────────────────────────────────────────────────────
+
+    def claim(self, surface: str, transport: object) -> None:
+        """Take the mic for ``surface``. Raises ``WakeWordInUse`` when another caller holds it."""
+        from tools.wake_word import WakeWordInUse
+
+        with self._lock:
+            if self._transport is not None and self._transport is not transport:
+                raise WakeWordInUse(
+                    f"Microphone is owned by the {self._surface or 'other'} surface.")
+            self._transport = transport
+            self._surface = surface or self._surface or "auto"
+
+    def armed(self, surface: str, transport: object) -> dict:
+        """Capture is open for ``surface`` — the arm succeeded, whatever the old state was."""
+        with self._lock:
+            self._transport = transport
+            self._surface = surface or self._surface or "auto"
+            self._status, self._stop_reason = ARMED, None
+            self._since = float(self._clock())
+            return self.state()
+
+    def pause(self, transport: object, reason: str = "paused") -> bool:
+        """Close capture but keep the claim (mic handed to a voice turn, phrase detected)."""
+        with self._lock:
+            return self._transition(transport, IDLE, reason)
+
+    def resume(self, transport: object) -> bool:
+        """Re-open capture for the caller that still holds the claim."""
+        with self._lock:
+            return self._transition(transport, ARMED, None)
+
+    def release(self, transport: object, reason: str = "user_stop") -> bool:
+        """Give the mic up entirely: the claim is gone, so another surface may arm."""
+        with self._lock:
+            if transport is None or transport is not self._transport:
+                return False
+            self._transport, self._surface = None, None
+            self._status, self._stop_reason = STOPPED, reason
+            self._since = float(self._clock())
+            return True
+
+    def reset(self) -> None:
+        """Forget every claim — the boot state of a fresh gateway (tests use it for a restart)."""
+        with self._lock:
+            self._transport, self._surface, self._stop_reason = None, None, None
+            self._status, self._since = IDLE, float(self._clock())
+
+    def _transition(self, transport: object, status: str, reason: Optional[str]) -> bool:
+        """Move to ``status`` iff ``transport`` holds the claim (caller holds the lock)."""
+        if transport is None or transport is not self._transport:
+            return False
+        self._status, self._stop_reason = status, reason
+        self._since = float(self._clock())
+        return True
+
+
+_hub_lock = threading.Lock()
+_hub: Optional[VoiceHub] = None
+
+
+def hub() -> VoiceHub:
+    """This process's Hub. One per gateway: the microphone is a machine resource, not a profile's.
+
+    Deliberately no config read and no arming here — a gateway that boots with
+    ``wake_word.enabled: true`` still starts ``idle`` until a surface asks (VH1 AC1/AC3).
+    """
+    global _hub
+    with _hub_lock:
+        if _hub is None:
+            _hub = VoiceHub()
+        return _hub
