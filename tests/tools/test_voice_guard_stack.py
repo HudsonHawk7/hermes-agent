@@ -139,7 +139,7 @@ def _settings(**overrides) -> GuardSettings:
     base: dict = dict(echo_cancel="aec3", vad="silero", silero_model=SILERO_MODEL, vad_threshold=0.1,
                       min_speech_ms=200, min_silence_ms=500, max_utterance_ms=30000,
                       stream_delay_ms=ECHO_DELAY_MS, max_late_reference_frames=5,
-                      max_reference_lag_ms=50)
+                      max_reference_lag_ms=50, reference="manual")
     base.update(overrides)
     return GuardSettings(**base)
 

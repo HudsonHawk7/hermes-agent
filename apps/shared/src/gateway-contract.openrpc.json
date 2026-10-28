@@ -4543,6 +4543,24 @@
       }
     },
     {
+      "name": "voice_hub.guard",
+      "summary": "The armed listening guard's counters (null when no guard is in force).",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/VoiceHubGuardParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/VoiceHubGuardResult"
+        }
+      }
+    },
+    {
       "name": "voice_hub.state",
       "summary": "Who owns the microphone right now: status, owner surface, since, stop reason.",
       "params": [
@@ -46438,6 +46456,193 @@
           "verification"
         ],
         "title": "VerificationStatusResult",
+        "type": "object"
+      },
+      "VoiceGuardReferencePump": {
+        "additionalProperties": true,
+        "description": "The far-end tap's own thread: whether it runs, and what it has pulled.",
+        "properties": {
+          "running": {
+            "title": "Running",
+            "type": "boolean"
+          },
+          "frames": {
+            "default": 0,
+            "title": "Frames",
+            "type": "integer"
+          },
+          "errors": {
+            "default": 0,
+            "title": "Errors",
+            "type": "integer"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Last Error"
+          }
+        },
+        "required": [
+          "running"
+        ],
+        "title": "VoiceGuardReferencePump",
+        "type": "object"
+      },
+      "VoiceGuardState": {
+        "additionalProperties": false,
+        "description": "What the guard *did*, read from ``tui_gateway/voice_guard.py::VoiceGuard.state``.\n\n``frames`` seen, ``speech_frames`` after cancellation, ``cancelled_frames`` where the far end\nchanged the sample, ``utterances`` emitted, ``dropped_short`` discarded for length,\n``late_reference_frames`` mic frames with no far end, ``max_reference_lag_ms`` the worst far-end\nstaleness seen, ``degraded`` once the far end stopped being causally early (or went missing past\nits limit). ``reference`` / ``reference_pump`` say whether the loopback tap is actually running,\nand ``settings`` is the value line the guard prints at arm, so a doctor read can never show a\nguard whose tap is silent.",
+        "properties": {
+          "frames": {
+            "default": 0,
+            "title": "Frames",
+            "type": "integer"
+          },
+          "speech_frames": {
+            "default": 0,
+            "title": "Speech Frames",
+            "type": "integer"
+          },
+          "cancelled_frames": {
+            "default": 0,
+            "title": "Cancelled Frames",
+            "type": "integer"
+          },
+          "utterances": {
+            "default": 0,
+            "title": "Utterances",
+            "type": "integer"
+          },
+          "dropped_short": {
+            "default": 0,
+            "title": "Dropped Short",
+            "type": "integer"
+          },
+          "late_reference_frames": {
+            "default": 0,
+            "title": "Late Reference Frames",
+            "type": "integer"
+          },
+          "max_reference_lag_ms": {
+            "default": 0.0,
+            "title": "Max Reference Lag Ms",
+            "type": "number"
+          },
+          "degraded": {
+            "default": false,
+            "title": "Degraded",
+            "type": "boolean"
+          },
+          "reference": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reference"
+          },
+          "reference_pump": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VoiceGuardReferencePump"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "dropped_reference_frames": {
+            "default": 0,
+            "title": "Dropped Reference Frames",
+            "type": "integer"
+          },
+          "echo_cancel": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Echo Cancel"
+          },
+          "vad": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Vad"
+          },
+          "settings": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Settings"
+          }
+        },
+        "title": "VoiceGuardState",
+        "type": "object"
+      },
+      "VoiceHubGuardParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          }
+        },
+        "title": "VoiceHubGuardParams",
+        "type": "object"
+      },
+      "VoiceHubGuardResult": {
+        "additionalProperties": false,
+        "description": "``tui_gateway/voice_hub.py::VoiceHub.guard_state`` \u2014 a doctor read, not the light.\n\n``guard`` is null when no guard is in force, which is exactly what a restarted gateway must\nlook like (VH1 AC1/AC3).",
+        "properties": {
+          "guard": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VoiceGuardState"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "title": "VoiceHubGuardResult",
         "type": "object"
       },
       "VoiceHubStateParams": {

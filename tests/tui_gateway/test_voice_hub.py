@@ -70,7 +70,7 @@ class _FakeStream:
         self.closed = True
 
     def read(self, frames: int, **kwargs):
-        threading.Event().wait(0.005)  # keep the reader loop cheap for the length of a test
+        threading.Event().wait(0.005)  # health: allow HX013 -- fake device frame cadence
         return np.zeros((frames, 1), dtype="int16"), False
 
 
@@ -340,3 +340,77 @@ def test_second_gateway_on_a_scratch_hermes_home_is_refused_with_one_device_open
     assert result["reason"] == "owned", output          # the detector's typed WakeWordInUse
     assert "OPENS 0" in output, output                  # refused before the device was touched
     assert len(mic) == 1                                # the first owner still holds the one open
+
+
+# ── VH3: the Hub carries the listening guard, and never owns one it did not create ─────────────
+
+
+class _FakeGuard:
+    """Stands in for ``tools.voice_guard.VoiceGuard``: counts closes, reports a doctor read."""
+
+    def __init__(self) -> None:
+        self.closed = 0
+        self.started = 0
+
+    def state(self) -> dict:
+        return {"frames": 30, "speech_frames": 10, "utterances": 1, "cancelled_frames": 0,
+                "dropped_short": 0, "late_reference_frames": 0, "max_reference_lag_ms": 0.0,
+                "degraded": False, "reference": "loopback",
+                "reference_pump": {"running": True, "frames": 30},
+                "settings": "echo_cancel=aec3 vad=silero vad_threshold=0.1"}
+
+    def start_reference(self) -> bool:
+        self.started += 1
+        return True
+
+    def stop_reference(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+def test_a_restarted_hub_has_no_guard_to_report(mic):
+    """The listener never starts on its own: a fresh gateway reports no guard until a claim."""
+    voice_hub.hub().reset()
+    assert voice_hub.hub().guard_state() is None
+
+
+def test_the_doctor_read_never_enters_the_four_field_light(mic):
+    """VH1 AC4 still pins the light: the guard's counters live behind ``voice_hub.guard``."""
+    guard = _FakeGuard()
+    voice_hub.hub().armed("tui", _transport(), guard=guard)
+    try:
+        assert set(_state()) == {"status", "owner_surface", "since", "stop_reason"}
+        report = _rpc({"id": "vh-guard", "method": "voice_hub.guard", "params": {}})["result"]["guard"]
+        assert report["frames"] == 30 and report["reference"] == "loopback"
+        assert report["reference_pump"]["running"] is True
+        assert report["settings"].startswith("echo_cancel=aec3")
+    finally:
+        voice_hub.hub().reset()
+
+
+def test_the_hub_closes_a_guard_it_created_and_never_one_it_was_handed(mic):
+    """Ownership: arming with a guard makes the Hub its owner; ``attach_guard`` does not.
+
+    A listener's guard outlives a Hub reset — closing it there would cut a live capture stream's
+    canceller out from under it, which is exactly the kind of silent breakage this card is about.
+    """
+    owned = _FakeGuard()
+    tui = _transport()
+    voice_hub.hub().armed("tui", tui, guard=owned)
+    assert voice_hub.hub().release(_transport()) is False, "a stranger cannot release the claim"
+    assert owned.closed == 0
+    assert voice_hub.hub().release(tui) is True
+    assert owned.closed == 1, "the Hub must close a guard it created"
+    assert voice_hub.hub().guard_state() is None
+
+    foreign = _FakeGuard()
+    voice_hub.hub().attach_guard(foreign)
+    assert voice_hub.hub().guard_state()["frames"] == 30
+    voice_hub.hub().reset()
+    assert foreign.closed == 0, "a listener's guard must survive a Hub reset"
+    assert voice_hub.hub().guard_state() is None
+
+    voice_hub.hub().attach_guard(None)  # a listener that has ended clears the read
+    assert voice_hub.hub().guard_state() is None

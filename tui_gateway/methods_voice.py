@@ -302,9 +302,14 @@ def _build_listening_guard():
     surface asks for the mic, which is VH1 AC1/AC3 still holding (VH3).
     """
     try:
-        from tools.voice_guard import build_guard
+        from tools.voice_guard import GuardError, build_guard
+    except ImportError as e:
+        logger.warning("listening guard unavailable: %s", e)
+        return None
+    try:
         return build_guard()
-    except Exception as e:  # a broken guard must not take barge-in down with it
+    except (GuardError, ImportError, OSError, RuntimeError) as e:
+        # A broken guard must not take barge-in down with it — but it says why, loudly.
         logger.warning("listening guard unavailable: %s", e)
         return None
 

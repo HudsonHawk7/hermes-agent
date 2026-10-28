@@ -49,6 +49,7 @@ SAMPLE_RATE = 16000
 FRAME_SAMPLES = 160
 SAMPLE_WIDTH = 2  # s16le
 FRAME_BYTES = FRAME_SAMPLES * SAMPLE_WIDTH
+_SILENCE = b"\x00" * FRAME_BYTES
 # Silero v6's fixed window at 16 kHz, and the 64 samples of history its ONNX graph expects prepended
 # (mirrors the package's own ``OnnxWrapper.__call__``; the graph input is 64 + 512 = 576 samples).
 VAD_WINDOW_SAMPLES = 512
@@ -84,6 +85,7 @@ class GuardSettings:
     onnx_threads: Optional[int] = None
     max_late_reference_frames: Optional[int] = None
     max_reference_lag_ms: Optional[int] = None
+    max_pending_reference_frames: Optional[int] = None
     reference: Optional[str] = None
 
     def missing(self) -> list[str]:
@@ -104,7 +106,8 @@ class GuardSettings:
         parts = []
         for key in ("echo_cancel", "vad", "silero_model", "vad_threshold", "min_speech_ms",
                     "min_silence_ms", "max_utterance_ms", "stream_delay_ms", "onnx_threads",
-                    "max_late_reference_frames", "max_reference_lag_ms", "reference"):
+                    "max_late_reference_frames", "max_reference_lag_ms",
+                    "max_pending_reference_frames", "reference"):
             value = getattr(self, key)
             parts.append(f"{key}={value if value not in (None, '') else 'off'}")
         return " ".join(parts)
@@ -140,7 +143,10 @@ def settings_from_config(cfg: Optional[dict] = None) -> GuardSettings:
         try:
             from hermes_cli.config import load_config_readonly
             cfg = load_config_readonly()
-        except Exception:  # config unreadable: nothing is configured, so the guard is off
+        except (ImportError, OSError, TypeError, ValueError) as exc:
+            # Config unreadable: nothing is configured, so the guard is off — and the reason is
+            # in the log with its traceback, because a silent all-off guard looks like config.
+            logger.debug("voice guard: config unreadable (%s); nothing configured", exc, exc_info=True)
             cfg = {}
     voice = cfg.get("voice") if isinstance(cfg, dict) else None
     block = voice.get("listening_guard") if isinstance(voice, dict) else None
@@ -158,6 +164,7 @@ def settings_from_config(cfg: Optional[dict] = None) -> GuardSettings:
         onnx_threads=_number(block.get("onnx_threads"), int),
         max_late_reference_frames=_number(block.get("max_late_reference_frames"), int),
         max_reference_lag_ms=_number(block.get("max_reference_lag_ms"), int),
+        max_pending_reference_frames=_number(block.get("max_pending_reference_frames"), int),
         reference=_text(block.get("reference")),
     )
 
@@ -168,7 +175,8 @@ def wants_guard(cfg: Optional[dict] = None) -> bool:
         try:
             from hermes_cli.config import load_config_readonly
             cfg = load_config_readonly()
-        except Exception:
+        except (ImportError, OSError, TypeError, ValueError) as exc:
+            logger.debug("voice guard: config unreadable (%s); guard off", exc, exc_info=True)
             return False
     voice = cfg.get("voice") if isinstance(cfg, dict) else None
     block = voice.get("listening_guard") if isinstance(voice, dict) else None
@@ -328,6 +336,23 @@ class SilentReference:
         pass
 
 
+class ManualReference:
+    """A far end the caller pushes itself, frame by frame (``push_reference``).
+
+    For callers that already hold the loopback audio — a test fixture, or a host that taps the
+    speaker in its own capture callback. Named ``manual`` so a config that says ``reference: manual``
+    is honest about who supplies the audio, and so the arm log still tells the truth.
+    """
+
+    name = "manual"
+
+    def pull(self, samples: int) -> bytes:
+        return b""
+
+    def close(self) -> None:
+        pass
+
+
 class LoopbackReference:
     """The default speaker's own output, captured with WASAPI loopback (``soundcard``).
 
@@ -335,7 +360,11 @@ class LoopbackReference:
     reply ``:8790`` is playing, because both leave through the same device — and it hears them
     **before** the microphone hears the room, which is the only arrangement in which AEC3 can
     cancel (VH2 condition 1). ``soundcard`` is not a Hermes dependency; without it the guard
-    refuses to pretend, and ``PullError`` says which package to install.
+    refuses to pretend, and the refusal names the package to install.
+
+    The device is *resolved* here (at arm time, so a missing speaker is a named refusal) but the
+    recorder is *opened on first pull*, i.e. on the pump thread: WASAPI wants the stream opened
+    and read by the same thread, and the pump is the thread that reads it.
     """
 
     name = "loopback"
@@ -343,17 +372,25 @@ class LoopbackReference:
     def __init__(self, device: Optional[str] = None) -> None:
         try:
             import soundcard
-        except Exception as exc:
+        except ImportError as exc:
             raise GuardError(f"reference: loopback needs the 'soundcard' package ({exc})") from exc
-        speaker = soundcard.default_speaker()
-        self._mic = soundcard.get_microphone(str(speaker.name), include_loopback=True)
-        self._recorder = self._mic.recorder(samplerate=SAMPLE_RATE, channels=1, blocksize=FRAME_SAMPLES)
-        self._recorder.__enter__()
+        self._sc = soundcard
+        try:
+            speaker = soundcard.default_speaker()
+            self._mic = (soundcard.get_microphone(str(device), include_loopback=True)
+                         if device else soundcard.get_microphone(str(speaker.name), include_loopback=True))
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise GuardError(f"reference: loopback device unavailable ({exc})") from exc
+        self._recorder = None
         self._pending = b""
 
     def pull(self, samples: int) -> bytes:
         """Return exactly ``samples`` of s16le mono; short reads are topped up with silence."""
         need = samples * SAMPLE_WIDTH
+        if self._recorder is None:  # first pull: open on this thread, the one that will read it
+            self._recorder = self._mic.recorder(samplerate=SAMPLE_RATE, channels=1,
+                                                blocksize=FRAME_SAMPLES)
+            self._recorder.__enter__()
         while len(self._pending) < need:
             chunk = self._recorder.record(numframes=samples)
             self._pending += _to_s16le(chunk)
@@ -361,21 +398,94 @@ class LoopbackReference:
         return out
 
     def close(self) -> None:
-        with suppress(Exception):
-            self._recorder.__exit__(None, None, None)
+        recorder, self._recorder = self._recorder, None
+        if recorder is not None:
+            with suppress(RuntimeError, OSError):
+                recorder.__exit__(None, None, None)
 
 
 def _to_s16le(chunk: Any) -> bytes:
     """``soundcard`` hands back float32 in [-1, 1]; the guard works in s16le."""
     try:
         import numpy as np
-    except Exception as exc:  # pragma: no cover - numpy ships with the audio extras
+    except ImportError as exc:  # pragma: no cover - numpy ships with the audio extras
         raise GuardError(f"reference: loopback needs numpy ({exc})") from exc
     data = np.asarray(chunk, dtype="float32").reshape(-1)
     return np.clip(data * 32767.0, -32768, 32767).astype("<i2").tobytes()
 
 
-_SILENCE = b"\x00" * (FRAME_SAMPLES * SAMPLE_WIDTH)
+class ReferencePump:
+    """Read the far end on its own thread and stamp every frame when it was captured.
+
+    Why a thread and not "pull one frame per mic frame": the tap is a real-time device, so pulling
+    it inside the mic loop (a) blocks the reader for another 10 ms per 10 ms frame, which makes the
+    mic drift behind realtime, and (b) leaves the far end carrying the *mic's* clock, so
+    ``max_reference_lag_ms`` could never fire — a buffered reference looked exactly like an early
+    one. Here the timestamp is taken at capture and compared with the mic frame that consumes it:
+    a tap that falls behind shows up as lag, not as silence.
+
+    ``pull`` may block (WASAPI) or return at once (a file, a test source); the loop paces itself
+    to one frame per 10 ms either way, so a fast source cannot flood the queue.
+    """
+
+    def __init__(self, source: ReferenceSource, guard: VoiceGuard,
+                 *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._source, self._guard, self._clock = source, guard, clock
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self.frames = 0
+        self.errors = 0
+        self.last_error: Optional[str] = None
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and not self._stop.is_set()
+
+    def start(self) -> bool:
+        """Begin pumping. False when there is nothing to pump (``reference: off``)."""
+        if (getattr(self._source, "name", "off") or "off") == "off":
+            logger.debug("voice guard: reference is off — no far end to pump, AEC gets silence")
+            return False
+        if self._thread is not None:
+            return True
+        # Context-bound (never a bare Thread): the tap outlives the RPC that armed it, and a
+        # profile-scoped read from the wrong scope is a silent default-profile leak.
+        from agent.memory_provider import spawn_context_thread
+
+        self._thread = spawn_context_thread(self._run, name="voice-guard-reference", daemon=True)
+        self._thread.start()
+        return True
+
+    def _run(self) -> None:
+        next_due = self._clock()
+        while not self._stop.is_set():
+            try:
+                frame = self._source.pull(FRAME_SAMPLES)
+            except (GuardError, OSError, RuntimeError, ValueError) as exc:
+                self.errors += 1
+                self.last_error = str(exc)
+                logger.warning("voice guard: reference tap failed (%s) — the guard will report "
+                               "every frame as a missing reference", exc)
+                self._stop.set()  # the tap is gone; missing-reference counting takes over
+                return
+            self._guard.push_reference(frame, captured_at=self._clock())
+            self.frames += 1
+            next_due += FRAME_SAMPLES / SAMPLE_RATE
+            delay = next_due - self._clock()
+            if delay > 0:
+                self._stop.wait(delay)
+            else:
+                next_due = self._clock()  # fell behind by more than a frame: re-base, never burst
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread, self._thread = self._thread, None
+        if thread is not None:
+            thread.join(timeout=1.0)
+
+    def state(self) -> dict:
+        return {"running": self.running, "frames": self.frames, "errors": self.errors,
+                "last_error": self.last_error}
 
 
 # ── utterances ──────────────────────────────────────────────────────────────────────────────────
@@ -420,17 +530,26 @@ class VoiceGuard:
         self.settings = settings
         self._clock = clock
         self._lock = threading.RLock()
-        self._echo = echo if echo is not None else _make_echo(settings)
-        self._vad = vad if vad is not None else _make_vad(settings)
-        # The far end the canceller subtracts. Without it AEC3 has nothing to subtract and the
-        # guard is only a VAD, which VH2 measured as useless in this room (66-77% of TV silence
-        # frames called speech), so the refusal is named at arm time rather than discovered later.
+        # The far end the canceller subtracts. Resolved before the canceller is built so a
+        # canceller with nothing to subtract is refused at arm time, by name, instead of arming,
+        # holding the loopback device open and subtracting silence — which VH2 measured as useless
+        # in this room (66-77% of TV silence frames called speech).
         self.reference: ReferenceSource = (reference if reference is not None
                                            else _make_reference(settings))
+        real_canceller = (echo is None
+                          and (settings.echo_cancel or "").lower() not in ("", "off", "none"))
+        if real_canceller and (getattr(self.reference, "name", "") or "off") == "off":
+            raise GuardError(
+                f"a canceller with no far end is not a guard: set {SETTINGS_PATH}.reference "
+                "(loopback) or turn echo_cancel off")
+        self._echo = echo if echo is not None else _make_echo(settings)
+        self._vad = vad if vad is not None else _make_vad(settings)
+        self._pump: Optional[ReferencePump] = None
         self._refs: deque[bytes] = deque()
         self._ref_times: deque[Optional[float]] = deque()
         self._mic_index = 0
         self._late_reference_frames = 0
+        self._dropped_reference_frames = 0
         self._max_reference_lag_ms = 0.0
         self._degraded = False
         self._frames = 0
@@ -448,23 +567,62 @@ class VoiceGuard:
 
     # ── reference side ──────────────────────────────────────────────────────────────────────
 
+    def start_reference(self) -> bool:
+        """Start the far-end tap. The listener calls this when capture opens; idempotent.
+
+        Returns False when the guard has no tap (``reference: off`` or a test double) — the
+        canceller then runs on silence and every frame is counted as a *missing* reference, which
+        is what ``degraded`` is for. Nothing here decides to run on its own.
+        """
+        with self._lock:
+            if self._closed:
+                return False
+            if self._pump is None:
+                self._pump = ReferencePump(self.reference, self, clock=self._clock)
+            pump = self._pump
+        started = pump.start()
+        logger.debug("voice guard reference tap %s: %s", "started" if started else "off",
+                     pump.state())
+        return started
+
+    def stop_reference(self) -> None:
+        """Stop the tap (capture closed). Safe to call twice, and after :meth:`close`."""
+        with self._lock:
+            pump, self._pump = self._pump, None
+        if pump is not None:
+            pump.stop()
+
     def push_reference(self, frame: bytes, captured_at: Optional[float] = None) -> None:
         """Hand over one 10 ms frame of the system-audio loopback (the far-end, causally early).
 
         ``captured_at`` is when that audio reached the tap, on the same clock as the ``captured_at``
         passed to :meth:`process`. Supply it and the guard can notice a *buffered* reference — the
         case VH2 measured at 2.9 dB ERLE — not just a missing one.
+
+        ``max_pending_reference_frames`` (optional) trims the queue to that depth, oldest first: a
+        backlog deeper than that is audio the canceller can no longer use, and keeping it would
+        only grow for the life of the arm.
         """
         with self._lock:
+            if self._closed:
+                return
             self._refs.append(bytes(frame[:FRAME_BYTES]))
             self._ref_times.append(captured_at)
+            cap = self.settings.max_pending_reference_frames
+            while cap is not None and len(self._refs) > cap:
+                self._refs.popleft()
+                self._ref_times.popleft()
+                self._dropped_reference_frames += 1
 
     def reference_state(self) -> dict:
         """Whether the reference is arriving in time (VH2 condition 1)."""
         with self._lock:
+            pump = self._pump.state() if self._pump is not None else {"running": False}
             return {"late_frames": self._late_reference_frames, "degraded": self._degraded,
                     "max_lag_ms": round(self._max_reference_lag_ms, 1),
-                    "pending_frames": len(self._refs)}
+                    "pending_frames": len(self._refs),
+                    "dropped_frames": self._dropped_reference_frames,
+                    "tap": getattr(self.reference, "name", "?"), "pump": pump}
 
     # ── mic side ────────────────────────────────────────────────────────────────────────────
 
@@ -491,6 +649,7 @@ class VoiceGuard:
     def state(self) -> dict:
         """Counters for the doctor/log: what the guard actually did, not what it was told to do."""
         with self._lock:
+            pump = self._pump.state() if self._pump is not None else {"running": False}
             return {
                 "frames": self._frames,
                 "speech_frames": self._speech_frames,
@@ -500,19 +659,25 @@ class VoiceGuard:
                 "late_reference_frames": self._late_reference_frames,
                 "max_reference_lag_ms": round(self._max_reference_lag_ms, 1),
                 "degraded": self._degraded,
+                "reference": getattr(self.reference, "name", "?"),
+                "reference_pump": pump,
+                "dropped_reference_frames": self._dropped_reference_frames,
                 "echo_cancel": getattr(self._echo, "name", "?"),
                 "vad": getattr(self._vad, "name", "?"),
                 "settings": self.settings.describe(),
             }
 
     def close(self) -> None:
+        """Stop the tap, then release every backend. Never raises: the mic thread owns this."""
+        self.stop_reference()
         with self._lock:
             self._closed = True
-            for backend in (self._echo, self._vad, self.reference):
-                try:
-                    backend.close()
-                except Exception as exc:  # a backend must never take the mic thread down
-                    logger.debug("voice guard backend close failed: %s", exc)
+            backends = (self._echo, self._vad, self.reference)
+        for backend in backends:
+            try:
+                backend.close()
+            except (OSError, RuntimeError, ValueError) as exc:
+                logger.warning("voice guard backend close failed: %s", exc, exc_info=True)
 
     # ── internals ───────────────────────────────────────────────────────────────────────────
 
@@ -634,7 +799,10 @@ def _make_reference(settings: GuardSettings) -> ReferenceSource:
         return SilentReference()
     if name == "loopback":
         return LoopbackReference()
-    raise GuardError(f"unknown {SETTINGS_PATH}.reference={settings.reference!r} (known: loopback)")
+    if name == "manual":
+        return ManualReference()
+    raise GuardError(
+        f"unknown {SETTINGS_PATH}.reference={settings.reference!r} (known: loopback, manual, off)")
 
 
 def build_guard(cfg: Optional[dict] = None) -> Optional[VoiceGuard]:

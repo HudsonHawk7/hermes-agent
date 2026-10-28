@@ -39,6 +39,7 @@ FULL_CONFIG = {
             "echo_cancel": "aec3",
             "vad": "silero",
             "silero_model": "S:/models/silero_vad.onnx",
+            "reference": "loopback",
             "vad_threshold": 0.1,
             "min_speech_ms": 200,
             "min_silence_ms": 500,
@@ -135,6 +136,12 @@ def test_enabled_with_empty_keys_is_off_and_names_every_missing_key(caplog):
 def test_every_value_in_force_is_logged_at_arm(caplog, monkeypatch):
     monkeypatch.setattr(voice_guard, "_make_echo", lambda settings: _RecordingEcho())
     monkeypatch.setattr(voice_guard, "_make_vad", lambda settings: _EnergyVad())
+    # The real tap is WASAPI (needs `soundcard`); the arm log is what is under test here, so the
+    # double still *names itself* loopback — an unnamed far end is a refusal, by design.
+    monkeypatch.setattr(voice_guard, "_make_reference", lambda settings: type(
+        "FarEnd", (), {"name": "loopback", "pull": lambda self, n: SILENCE,
+                       "close": lambda self: None})())
+
     caplog.set_level(logging.INFO, logger="tools.voice_guard")
     guard = build_guard(FULL_CONFIG)
     assert guard is not None
@@ -149,11 +156,39 @@ def test_every_value_in_force_is_logged_at_arm(caplog, monkeypatch):
 
 def test_optional_keys_are_off_not_defaulted():
     settings = settings_from_config({"voice": {"listening_guard": {
-        "echo_cancel": "aec3", "vad": "silero", "silero_model": "m.onnx",
+        "echo_cancel": "aec3", "vad": "silero", "silero_model": "m.onnx", "reference": "loopback",
         "vad_threshold": 0.1, "min_speech_ms": 200, "min_silence_ms": 500}}})
     assert settings.complete
     assert settings.max_utterance_ms is None and settings.onnx_threads is None
     assert "max_utterance_ms=off" in settings.describe()
+
+
+def test_a_canceller_with_no_far_end_is_refused_by_name():
+    """AC4: no silent half-guard. AEC3 with nothing to subtract is *named*, never defaulted.
+
+    The canceller cannot do anything without a reference, and a guard that arms anyway is worse
+    than no guard: it holds the loopback device open, subtracts silence, and the detector hears the
+    television as speech (VH2: 66-77% of TV silence frames). So arming without one is a refusal that
+    names the key — and only a *canceller* needs a far end; ``echo_cancel: off`` does not.
+    """
+    settings = settings_from_config({"voice": {"listening_guard": {
+        "enabled": True, "echo_cancel": "aec3", "vad": "silero", "silero_model": "m.onnx",
+        "vad_threshold": 0.1, "min_speech_ms": 200, "min_silence_ms": 500}}})
+    assert not settings.reference, "an unset reference is empty, not a default"
+    with pytest.raises(voice_guard.GuardError) as raised:
+        # No canceller double: this is the real arm-time path, which must refuse before it builds
+        # AEC3 (and before it opens the loopback device it would have nothing to do with).
+        voice_guard.VoiceGuard(settings)
+    assert "voice.listening_guard.reference" in str(raised.value)
+
+    # A detector-only guard needs no far end: VAD alone is a legitimate configuration.
+    detector_only = settings_from_config({"voice": {"listening_guard": {
+        "enabled": True, "echo_cancel": "off", "vad": "silero", "silero_model": "m.onnx",
+        "vad_threshold": 0.1, "min_speech_ms": 200, "min_silence_ms": 500}}})
+    assert detector_only.complete, detector_only.missing()
+    detector = voice_guard.VoiceGuard(detector_only, echo=_RecordingEcho(), vad=_EnergyVad())
+    assert detector.start_reference() is False, "echo_cancel: off means no tap to start"
+    detector.close()
 
 
 def test_malformed_shapes_are_off_not_crashes():

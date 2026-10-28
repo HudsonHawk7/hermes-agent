@@ -20,7 +20,7 @@ import tempfile
 import threading
 import time
 import wave
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, cast
 
 logger = logging.getLogger(__name__)
 
@@ -1407,7 +1407,7 @@ class _BargeDetector:
         return phase
 
 
-def _write_wav_frames_to_temp(pcm: bytes) -> Optional[str]:
+def _write_wav_frames_to_temp(pcm: bytes) -> str:
     """Write a just-captured utterance to a temp WAV and return its path."""
     fd, path = tempfile.mkstemp(prefix="hermes-utterance-", suffix=".wav")
     os.close(fd)
@@ -1415,24 +1415,36 @@ def _write_wav_frames_to_temp(pcm: bytes) -> Optional[str]:
     return path
 
 
-def _guard_feed(guard, reference, data: bytes) -> list:
+def _as_pcm_bytes(data: Any) -> bytes:
+    """``sounddevice`` hands back an int16 array; everything below wants 16-bit-mono bytes."""
+    to_bytes = getattr(data, "tobytes", None)
+    if callable(to_bytes):
+        return cast(bytes, to_bytes())
+    return bytes(data)
+
+
+def _guard_feed(guard, data: Any) -> list:
     """Run one 30 ms capture block through the listening guard, 10 ms at a time.
 
-    The reference is pulled for the same instant *before* the mic frame is processed, which is
-    what makes it causally early: a loopback tap that hands over audio later than the mic means
-    AEC3 cannot cancel it (VH2 measured 33.8 dB → 2.9 dB), and the guard reports that instead of
-    passing the television through as speech.
+    The far end is *not* pulled here: the guard's own tap thread reads the loopback
+    (``VoiceGuard.start_reference``) and stamps each frame when it was captured, so the mic never
+    blocks on the system-audio device and ``max_reference_lag_ms`` compares two real capture times
+    instead of the mic clock with itself. Pulling it from this loop was the VH3 review's finding:
+    the reference arrived with the mic's timestamp, so a buffered tap was indistinguishable from an
+    early one, and a listener that simply forgot to pass a source fed AEC3 silence.
     """
+    from tools.voice_guard import FRAME_BYTES
+
+    # ``sd.InputStream(dtype="int16")`` hands back an int16 array, not bytes: slicing *that* with a
+    # byte count would feed the canceller 20 ms and call it 10 ms. Normalise once, per block.
+    to_bytes = getattr(data, "tobytes", None)
+    raw = to_bytes() if callable(to_bytes) else bytes(data)
+    pcm: bytes = bytes(raw)
     utterances: list = []
-    frame_bytes = 320  # 160 samples of s16le = 10 ms at 16 kHz
     now = time.monotonic()
-    for offset in range(0, len(data) - frame_bytes + 1, frame_bytes):
-        if reference is not None:
-            far = reference.pull(160)
-            if far:
-                guard.push_reference(far, captured_at=now + offset / SAMPLE_RATE)
-        utterances.extend(guard.process(data[offset:offset + frame_bytes],
-                                        captured_at=now + offset / SAMPLE_RATE))
+    for offset in range(0, len(pcm) - FRAME_BYTES + 1, FRAME_BYTES):
+        captured_at = now + offset / (FRAME_BYTES * 2)  # 16-bit mono: bytes → seconds
+        utterances.extend(guard.process(pcm[offset:offset + FRAME_BYTES], captured_at=captured_at))
     return utterances
 
 
@@ -1441,7 +1453,7 @@ def full_duplex_listen(
     on_trigger: Optional[Callable[[str], None]] = None, multiplier: Optional[float] = None,
     sustained_ms: int = 300, calibration_ms: int = 450, grace_ms: int = 500, pre_roll_ms: int = 1200,
     endpoint_silence_ms: int = 1250, max_utterance_ms: int = 30_000,
-    guard: Any = None, reference: Any = None,
+    guard: Any = None,
 ) -> Optional[str]:
     """Listen across an ENTIRE agent turn; return the captured interruption WAV path.
 
@@ -1455,12 +1467,13 @@ def full_duplex_listen(
     when *should_stop* ends the turn without speech.
 
     Pass *guard* (``tools.voice_guard.VoiceGuard``) to decide the trip with echo cancellation
-    and voice activity detection instead of loudness: each 10 ms sub-frame runs through the guard
-    with *reference* (a ``ReferenceSource``) as the far end, and the trip is the first completed
-    **utterance** — the TV and her own voice are cancelled before anything counts as speech
-    (VH3). The guard owns the endpointing in that mode, so *multiplier*, *sustained_ms*,
+    and voice activity detection instead of loudness: each 10 ms sub-frame runs through the guard,
+    whose own tap thread reads the system-audio loopback as the far end, and the trip is the first
+    completed **utterance** — the TV and her own voice are cancelled before anything counts as
+    speech (VH3). The guard owns the endpointing in that mode, so *multiplier*, *sustained_ms*,
     *calibration_ms*, *grace_ms* and *endpoint_silence_ms* are unused; ``None`` (the default)
-    keeps the loudness path byte-identical.
+    keeps the loudness path byte-identical. The tap is started here and stopped in ``finally``, so
+    it lives exactly as long as capture does.
     """
     try:
         sd, np = _import_audio()
@@ -1473,6 +1486,8 @@ def full_duplex_listen(
         calib_blocks=max(1, calibration_ms // 30), trip_blocks=max(1, sustained_ms // 30),
         grace_blocks=max(0, grace_ms // 30))
     pre_roll: deque = deque(maxlen=max(1, pre_roll_ms // 30))
+    if guard is not None:
+        guard.start_reference()
     try:
         with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16", blocksize=block) as stream:
             while not should_stop():
@@ -1480,14 +1495,14 @@ def full_duplex_listen(
                 pre_roll.append(data.copy())
                 playing = bool(is_playing()) if is_playing is not None else False
                 if guard is not None:
-                    utterances = _guard_feed(guard, reference, data)
+                    utterances = _guard_feed(guard, data)
                     if not utterances:
                         continue
                     if on_trigger:
                         try:
                             on_trigger("playback" if playing else "generation")
-                        except Exception as e:
-                            logger.debug("full-duplex trigger callback failed: %s", e)
+                        except (RuntimeError, TypeError, ValueError) as e:
+                            logger.debug("full-duplex trigger callback failed: %s", e, exc_info=True)
                     return _write_wav_frames_to_temp(utterances[-1].pcm)
                 phase = detector.feed(_rms(np, data), playing)
                 if phase is None:
@@ -1495,12 +1510,17 @@ def full_duplex_listen(
                 if on_trigger:
                     try:
                         on_trigger(phase)
-                    except Exception as e:
-                        logger.debug("full-duplex trigger callback failed: %s", e)
+                    except (RuntimeError, TypeError, ValueError) as e:
+                        logger.debug("full-duplex trigger callback failed: %s", e, exc_info=True)
                 return _capture_until_quiet(stream, np, block, pre_roll, endpoint_blocks=endpoint_blocks,
                                             max_blocks=max(1, max_utterance_ms // 30))
-    except Exception as e:
-        logger.debug("Full-duplex listener failed: %s", e)
+    except (OSError, RuntimeError, TypeError, ValueError) as e:
+        # The whole point of this loop is to survive a device hiccup: log it with the traceback and
+        # report "no interruption" rather than killing the caller's turn.
+        logger.debug("Full-duplex listener failed: %s", e, exc_info=True)
+    finally:
+        if guard is not None:
+            guard.stop_reference()
     return None
 
 

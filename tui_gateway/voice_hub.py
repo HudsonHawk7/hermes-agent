@@ -22,10 +22,13 @@ transport rides along internally so pause/resume can find the caller, but it is 
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from contextlib import suppress
 from typing import Any, Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 # The three published statuses. ``idle`` is also "paused": capture is closed either way, and the
 # four-field contract has no room for a fifth value (see ``stop_reason`` for which one it was).
@@ -49,7 +52,7 @@ class VoiceHub:
         self._surface: Optional[str] = None
         self._transport: object = None
         self._guard: Optional[Any] = None
-        self._listening_guard: Optional[Any] = None
+        self._owns_guard = False
         self._since = float(clock())
         self._stop_reason: Optional[str] = None
 
@@ -98,33 +101,38 @@ class VoiceHub:
         with self._lock:
             self._transport = transport
             self._surface = surface or self._surface or "auto"
-            self._guard = guard
+            # The Hub owns a guard it was handed at arm time, so release/reset must close it.
+            self._guard, self._owns_guard = guard, guard is not None
             self._status, self._stop_reason = ARMED, None
             self._since = float(self._clock())
             return self.state()
 
     def attach_guard(self, guard: Any) -> None:
-        """Publish the armed listener's guard for the doctor read. Reporting only.
+        """Publish an already-running listener's guard for the doctor read. Reporting only.
 
         The listener owns this guard's lifetime; the Hub must never close it out from under a live
-        capture stream, which is why a claim's :meth:`release`/:meth:`reset` does not touch it.
+        capture stream, so ``attach_guard`` clears the ownership flag a claim may have set. ``None``
+        clears the read — after that :meth:`guard_state` reports nothing rather than the counters of
+        a guard that is already gone, which is what a restarted gateway has to look like.
         """
         with self._lock:
-            self._listening_guard = guard
+            self._guard, self._owns_guard = guard, False
 
     def guard_state(self) -> Optional[dict]:
         """The armed guard's counters, or ``None`` when no guard is in force.
 
         Deliberately NOT part of :meth:`state`: clients pin the four-field contract (VH1 AC4),
-        and this is a doctor/log read.
+        and this is a doctor/log read (``voice_hub.guard``).
         """
         with self._lock:
-            guard = self._guard if self._guard is not None else self._listening_guard
+            guard = self._guard
         if guard is None:
             return None
         try:
             return guard.state()
-        except Exception:  # a closed/partial backend must not take a status read down
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            # A closed/partial backend must not take a status read down — but say so in the log.
+            logger.warning("voice_hub.guard: guard state unavailable: %s", exc, exc_info=True)
             return None
 
     def pause(self, transport: object, reason: str = "paused") -> bool:
@@ -156,10 +164,11 @@ class VoiceHub:
             self._drop_guard()
 
     def _drop_guard(self) -> None:
-        """Release the armed guard's backends (caller holds the lock)."""
-        guard, self._guard = self._guard, None
-        if guard is not None:
-            with suppress(Exception):
+        """Forget the guard; close it only when the Hub owns it (caller holds the lock)."""
+        guard, owns = self._guard, self._owns_guard
+        self._guard, self._owns_guard = None, False
+        if guard is not None and owns:
+            with suppress(OSError, RuntimeError, ValueError):
                 guard.close()
 
     def _transition(self, transport: object, status: str, reason: Optional[str]) -> bool:

@@ -292,9 +292,10 @@ means off, and the guard logs the values it is actually using when it arms.
 ```yaml
 voice:
   listening_guard:
+    enabled: true                     # master switch; empty/false = the guard never arms
     echo_cancel: aec3                 # aec3; empty = no canceller
     vad: silero                       # silero; empty = no detector
-    reference: loopback               # loopback = capture the system audio; empty = no far end
+    reference: loopback               # loopback = capture the system audio; required when echo_cancel is on
     silero_model: /path/to/silero_vad.onnx
     vad_threshold: 0.05               # Silero speech probability that counts as speech
     min_speech_ms: 200                # shorter blips are dropped
@@ -304,17 +305,30 @@ voice:
     onnx_threads: 1                   # 0 lets onnxruntime decide
     max_late_reference_frames: 5      # frames with no reference before the guard says it is degraded
     max_reference_lag_ms: 50          # reference older than this cannot cancel anything
+    max_pending_reference_frames: 5   # queue depth the tap may build up before it drops the oldest
 ```
 
-`reference: loopback` needs the optional `soundcard` package (WASAPI loopback on Windows). Without
-it the guard refuses to arm and says so instead of silently behaving like a plain detector.
+`enabled: true` is the master switch — without it nothing below is read. `reference: loopback` needs
+the optional `soundcard` package (WASAPI loopback on Windows). The known values are `loopback`
+(capture the system audio yourself), `manual` (the caller pushes the far end with
+`push_reference`, for a host that already taps the speaker in its own callback) and empty/`off`
+(no far end). Without `soundcard`, or with a canceller named and no `reference` while the guard
+would have to supply the far end itself, the guard refuses to arm and says which key or package is
+missing instead of silently behaving like a plain detector.
+
+**The tap runs on its own thread.** The loopback is read by a `ReferencePump` thread that stamps
+every frame at the moment it was captured, so the mic loop never blocks on the audio device and a
+far end that falls behind shows up as *lag* instead of as silence. `max_pending_reference_frames`
+bounds that queue: past it the oldest frame — audio the canceller can no longer use — is dropped and
+counted.
 
 **A late reference cancels nothing.** If the loopback is buffered, the canceller has nothing to
 subtract at the moment the echo arrives; the guard counts those frames and, past
 `max_late_reference_frames` or `max_reference_lag_ms`, logs `DEGRADED` rather than passing the
 television through as speech. `voice_hub.guard` returns the live counters
 (`frames`, `speech_frames`, `utterances`, `late_reference_frames`, `max_reference_lag_ms`,
-`degraded`) for a doctor read; the listening light's four-field contract is unchanged.
+`degraded`, `reference_pump`) for a doctor read; the listening light's four-field contract is
+unchanged.
 
 ### Hallucination Filter
 
@@ -548,9 +562,10 @@ voice:
   # Listening guard: echo cancellation + VAD in front of barge-in (see "Listening guard" above).
   # Entirely opt-in: omit the block, or leave a key empty, and that stage is off.
   listening_guard:
+    enabled: true                   # master switch; empty/false = never arms
     echo_cancel: aec3               # aec3 | empty (off)
     vad: silero                     # silero | empty (off)
-    reference: loopback             # loopback (capture system audio) | empty (no far end)
+    reference: loopback             # loopback (capture system audio) | required when echo_cancel is on
     silero_model: ""                # path to silero_vad.onnx; required when vad: silero
     vad_threshold: 0.05             # speech probability that counts as speech
     min_speech_ms: 200              # drop shorter blips
@@ -560,6 +575,7 @@ voice:
     onnx_threads: 1                 # 0 = let onnxruntime decide
     max_late_reference_frames: 5    # frames without a reference before DEGRADED
     max_reference_lag_ms: 50        # reference older than this cancels nothing
+    max_pending_reference_frames: 5 # tap queue depth before the oldest frame is dropped
 
 # Speech-to-Text
 stt:
