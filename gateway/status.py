@@ -318,7 +318,7 @@ def _get_runtime_status_path() -> Path:
     return _get_process_hermes_home() / _RUNTIME_STATUS_FILE
 
 
-def _get_lock_dir() -> Path:
+def machine_lock_dir() -> Path:
     """Cross-profile rendezvous dir for machine-local locks; ``HERMES_GATEWAY_LOCK_DIR`` overrides.
 
     Scope is the **OS user**, not the kernel host: separate users have separate ``$HOME``s,
@@ -466,7 +466,7 @@ def _scope_hash(identity: str) -> str:
 
 
 def _get_scope_lock_path(scope: str, identity: str) -> Path:
-    return _get_lock_dir() / f"{scope}-{_scope_hash(identity)}.lock"
+    return machine_lock_dir() / f"{scope}-{_scope_hash(identity)}.lock"
 
 
 def _get_process_start_time(pid: int) -> Optional[int]:

@@ -2021,8 +2021,7 @@ def test_wake_owner_is_sticky_and_routes_detection_to_first_transport(monkeypatc
             (event, sid, payload, server.current_transport())
         ),
     )
-    server._wake_owner_transport = None
-    server._wake_owner_surface = ""
+    server._wake_hub().reset()
     try:
         started = _dispatch_sync({
             "id": "wake-1",
@@ -2117,8 +2116,7 @@ def test_wake_owner_is_sticky_and_routes_detection_to_first_transport(monkeypatc
             "disabled_persisted": False,
         }
     finally:
-        server._wake_owner_transport = None
-        server._wake_owner_surface = ""
+        server._wake_hub().reset()
 
 
 def test_wake_toggle_persists_enabled_flag_only_on_explicit_gesture(monkeypatch):
@@ -2156,8 +2154,7 @@ def test_wake_toggle_persists_enabled_flag_only_on_explicit_gesture(monkeypatch)
     monkeypatch.setattr(wake_word, "owns_listener", lambda owner: listener["owner"] is owner)
 
     transport = types.SimpleNamespace(_closed=False)
-    server._wake_owner_transport = None
-    server._wake_owner_surface = ""
+    server._wake_hub().reset()
     try:
         # Passive auto-arm (no persist): refused, config untouched.
         passive = _dispatch_sync({
@@ -2198,8 +2195,7 @@ def test_wake_toggle_persists_enabled_flag_only_on_explicit_gesture(monkeypatch)
         assert scoped["result"] == {"started": False, "reason": "disabled_for_surface"}
         assert persisted == [True, False]
     finally:
-        server._wake_owner_transport = None
-        server._wake_owner_surface = ""
+        server._wake_hub().reset()
 
 
 def test_voice_record_start_forwards_max_recording_seconds(monkeypatch):
