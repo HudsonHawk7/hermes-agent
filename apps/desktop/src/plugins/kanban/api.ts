@@ -29,6 +29,7 @@ import {
 
 // Native completion notification.
 import { bindCompletionNotify, type CompletionEvent, onKanbanEventsFrame } from './completion-notify'
+import type { NeedsYouResponse } from './needs-you-logic'
 import type {
   BoardExportResult,
   BoardImportResult,
@@ -176,6 +177,8 @@ function onEventsFrame(scope: string, slug: string, data: unknown, selectedSlug 
   void queryClient.invalidateQueries({ queryKey: boardKeyPrefix(scope) })
   // Any event can change a board's card count — keep the switcher badge honest.
   void queryClient.invalidateQueries({ queryKey: boardsKey(scope) })
+  // Cross-board Needs you list (blocked/gm_ask/gm_decision) must refresh live.
+  void queryClient.invalidateQueries({ queryKey: needsYouKey(scope) })
 
   for (const taskId of new Set(events.map(event => event.task_id).filter(Boolean))) {
     void queryClient.invalidateQueries({ queryKey: taskKey(scope, slug, taskId!) })
@@ -355,10 +358,11 @@ function call<T>(path: string, opts?: PluginRestOptions): Promise<T> {
   return rest ? rest<T>(path, opts) : Promise.reject(new Error('kanban api not ready'))
 }
 
-/** Append the selected board (and other params) to a path. */
-function withBoard(path: string, params: Record<string, string> = {}): string {
+/** Append the selected board (and other params) to a path. Pass `board` to
+ *  target a specific board (Needs you cards can live off the active slug). */
+function withBoard(path: string, params: Record<string, string> = {}, board?: string): string {
   const search = new URLSearchParams(params)
-  const slug = $boardSlug.get()
+  const slug = board !== undefined ? board : $boardSlug.get()
 
   if (slug) {
     search.set('board', slug)
@@ -382,11 +386,16 @@ export const boardsKey = (scope: string) => ['kanban', 'boards', scope] as const
 export const profilesKey = (scope: string) => ['kanban', 'profiles', scope] as const
 export const projectsKey = (scope: string) => ['kanban', 'projects', scope] as const
 export const orchestrationKey = (scope: string) => ['kanban', 'orchestration', scope] as const
+/** Cross-board open asks — not board-scoped; one list for every board. */
+export const needsYouKey = (scope: string) => ['kanban', 'needs-you', scope] as const
 
 // ── reads ─────────────────────────────────────────────────────────────────────
 
 export const fetchBoard = (archived: boolean) =>
   call<KanbanBoard>(withBoard('/board', archived ? { include_archived: 'true' } : {}))
+
+/** Open GM asks + legacy needs_input across every board (part-1 HTTP surface). */
+export const fetchNeedsYou = () => call<NeedsYouResponse>('/needs-you')
 
 export const fetchTask = async (id: string) => {
   const downloadAttachment = captureGatewayFileDownload()
@@ -463,6 +472,29 @@ export const reassignTask = (id: string, profile: string) =>
   nudged(call(withBoard(`/tasks/${id}/reassign`), { method: 'POST', body: { profile, reclaim_first: true } }))
 
 export const reclaimTask = (id: string) => nudged(call(withBoard(`/tasks/${id}/reclaim`), { method: 'POST', body: {} }))
+
+/** One-tap GM answer (part-1 POST /tasks/{id}/answer). `board` when the card
+ *  lives off the active switcher slug. */
+export const answerTask = (
+  id: string,
+  body: { key?: string; note?: string; sent_back?: boolean; by?: string },
+  board?: string
+) =>
+  nudged(
+    call<{ ok: boolean; comment?: string; decision?: unknown; status?: string }>(withBoard(`/tasks/${id}/answer`, {}, board), {
+      method: 'POST',
+      body: { by: 'gm', via: 'button', ...body }
+    })
+  )
+
+/** Undo the last GM decision while the card is still free (POST /undo). */
+export const undoAnswer = (id: string, board?: string) =>
+  nudged(
+    call<{ ok: boolean; status?: string }>(withBoard(`/tasks/${id}/undo`, {}, board), {
+      method: 'POST',
+      body: { by: 'gm' }
+    })
+  )
 
 export const uploadAttachment = (id: string, upload: { filename: string; contentType?: string; bytes: ArrayBuffer }) =>
   call(withBoard(`/tasks/${id}/attachments`), { method: 'POST', upload })

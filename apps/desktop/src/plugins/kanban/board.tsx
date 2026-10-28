@@ -84,6 +84,9 @@ import {
 import { BoardSwitcher } from './board-switcher'
 import { TaskDrawer } from './drawer'
 import { EMPTY_OVERRIDE, ModelOverrideField, overrideCreateFields, type TaskModelOverride } from './model-override'
+import { NeedsYouColumn, useRecentDecision } from './needs-you'
+import type { NeedsYouItem } from './needs-you-logic'
+import { stripNeedsYouFromBoard } from './needs-you-logic'
 import { OrchestrationPanel } from './orchestration'
 import { columnMeta, type KanbanBoard, type KanbanTask, type TaskEstimate } from './types'
 import {
@@ -270,6 +273,7 @@ function Card({
   const summary = task.latest_summary || task.body
   const fallback = useDefaultAssignee()
   const arc = arcState(task, fallback)
+  const recent = useRecentDecision(task.id)
 
   return (
     <ContextMenu>
@@ -310,6 +314,14 @@ function Card({
           {summary && (
             <span className="line-clamp-2 text-[0.6875rem] leading-snug text-(--ui-text-tertiary)">{summary}</span>
           )}
+          {recent ? (
+            <span
+              className="text-[0.6875rem] font-medium text-amber-700 dark:text-amber-400"
+              data-testid="needs-you-you-said"
+            >
+              {k.needsYouDecisionBadge(recent.label)}
+            </span>
+          ) : null}
           <CardFooter arc={arc} task={task} />
         </div>
       </ContextMenuTrigger>
@@ -1181,6 +1193,7 @@ export function KanbanBoardPage() {
   )
 
   // Client-side filters, mirroring the dashboard (search over title/body/id).
+  // needs_input cards leave Blocked — they live only in the amber Needs you column.
   const filtered = useMemo(() => {
     if (!board) {
       return null
@@ -1193,7 +1206,9 @@ export function KanbanBoardPage() {
       (!tenant || task.tenant === tenant) &&
       (!assignee || task.assignee === assignee)
 
-    return { ...board, columns: board.columns.map(col => ({ ...col, tasks: col.tasks.filter(keep) })) }
+    const searched = { ...board, columns: board.columns.map(col => ({ ...col, tasks: col.tasks.filter(keep) })) }
+
+    return stripNeedsYouFromBoard(searched)
   }, [board, search, tenant, assignee])
 
   const total = filtered?.columns.reduce((sum, col) => sum + col.tasks.length, 0) ?? 0
@@ -1388,43 +1403,62 @@ export function KanbanBoardPage() {
         <div className="grid flex-1 place-items-center">
           <Loader type="lemniscate-bloom" />
         </div>
-      ) : total === 0 ? (
-        <div className="grid flex-1 place-items-center px-4 text-center">
-          <div className="flex flex-col items-center gap-2">
-            <Codicon className="text-(--ui-text-quaternary)" name="project" size="1.25rem" />
-            <p className="text-xs text-(--ui-text-tertiary)">{search || tenant || assignee ? k.noMatch : k.noTasks}</p>
-            <Button className="mt-0.5" onClick={() => setAddStatus('triage')} size="sm" variant="outline">
-              <Codicon name="add" size="0.75rem" />
-              {k.newTask}
-            </Button>
-          </div>
-        </div>
       ) : (
         <div
           className={cn('flex flex-1 gap-2 overflow-x-auto px-4 pt-1 pb-3', grabbing && 'cursor-grabbing')}
           onMouseDown={onMouseDown}
           ref={lanesRef}
         >
-          {filtered.columns.map(col => {
-            const auto = boardHasWork && col.tasks.length === 0
+          <NeedsYouColumn
+            collapsed={laneOverrides.needs_you ?? false}
+            onOpen={(item: NeedsYouItem) => {
+              // Cross-board: switch to the card's board so the drawer loads it.
+              const target = item.board || 'default'
+              const current = slug || 'default'
 
-            return (
-              <Column
-                collapsed={laneOverrides[col.name] ?? auto}
-                column={col}
-                columns={columnNames}
-                key={col.name}
-                onAdd={setAddStatus}
-                onDelete={id => deleteMut.mutate(id)}
-                onDropTask={onMove}
-                onMove={onMove}
-                onOpen={setOpenId}
-                onToggle={() => toggleLane(col.name, auto)}
-                onToggleSelect={toggleSelect}
-                selected={selected}
-              />
-            )
-          })}
+              if (target !== current) {
+                $boardSlug.set(target === 'default' ? '' : target)
+              }
+
+              setOpenId(item.task_id)
+            }}
+            onToggle={() => toggleLane('needs_you', false)}
+          />
+          {total === 0 ? (
+            <div className="grid min-w-[12rem] flex-1 place-items-center px-4 text-center">
+              <div className="flex flex-col items-center gap-2">
+                <Codicon className="text-(--ui-text-quaternary)" name="project" size="1.25rem" />
+                <p className="text-xs text-(--ui-text-tertiary)">
+                  {search || tenant || assignee ? k.noMatch : k.noTasks}
+                </p>
+                <Button className="mt-0.5" onClick={() => setAddStatus('triage')} size="sm" variant="outline">
+                  <Codicon name="add" size="0.75rem" />
+                  {k.newTask}
+                </Button>
+              </div>
+            </div>
+          ) : (
+            filtered.columns.map(col => {
+              const auto = boardHasWork && col.tasks.length === 0
+
+              return (
+                <Column
+                  collapsed={laneOverrides[col.name] ?? auto}
+                  column={col}
+                  columns={columnNames}
+                  key={col.name}
+                  onAdd={setAddStatus}
+                  onDelete={id => deleteMut.mutate(id)}
+                  onDropTask={onMove}
+                  onMove={onMove}
+                  onOpen={setOpenId}
+                  onToggle={() => toggleLane(col.name, auto)}
+                  onToggleSelect={toggleSelect}
+                  selected={selected}
+                />
+              )
+            })
+          )}
         </div>
       )}
 

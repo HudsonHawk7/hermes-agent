@@ -44,9 +44,11 @@ import {
   deleteTask,
   estimateTask,
   fetchLog,
+  fetchNeedsYou,
   fetchProfiles,
   fetchTask,
   logKey,
+  needsYouKey,
   patchTask,
   profilesKey,
   reassignTask,
@@ -57,6 +59,8 @@ import {
   useKanbanScope
 } from './api'
 import { ModelOverrideField, overridePatch } from './model-override'
+import { DecisionPanel, useRecentDecision } from './needs-you'
+import type { GmAsk } from './needs-you-logic'
 import {
   type Diagnostic,
   type DiagnosticAction,
@@ -858,6 +862,43 @@ export function TaskDrawer({
   const running = task?.status === 'running'
   const defaultAssignee = useDefaultAssignee()
 
+  // Open ask for this card (Needs you decision bar) — live list + session stamp.
+  const { data: needsYou } = useQuery({
+    enabled: query => !!id && routedToScope(query),
+    queryFn: fetchNeedsYou,
+    queryKey: needsYouKey(scope),
+    staleTime: 5_000
+  })
+
+  const needsItem = id ? needsYou?.items.find(item => item.task_id === id) : undefined
+  const recentDecision = useRecentDecision(id)
+
+  // Drawer-local sticky decision so Undo survives needs-you list invalidation even
+  // if the shared stamp store misses a remount (React compiler / dual-copy edge).
+  const [localDecision, setLocalDecision] = useState<{
+    ask: GmAsk | null
+    board: string
+    label: string
+  } | null>(null)
+
+  // Clear sticky when the open card changes.
+  useEffect(() => {
+    setLocalDecision(null)
+  }, [id])
+
+  const sticky = localDecision || (recentDecision
+    ? { ask: recentDecision.ask, board: recentDecision.board, label: recentDecision.label }
+    : null)
+
+  const showDecisionBar = Boolean(
+    id &&
+      (needsItem ||
+        sticky ||
+        (task != null && task.status === 'blocked' && task.block_kind === 'needs_input')),
+  )
+
+  const decisionStampKey = sticky ? sticky.label : 'none'
+
   const { data: log } = useQuery({
     enabled: query => !!id && routedToScope(query),
     queryFn: () => fetchLog(id!),
@@ -1035,6 +1076,30 @@ export function TaskDrawer({
           <DialogTitle className="leading-snug" data-selectable-text="true">
             {task ? task.title || task.id : shortId(id)}
           </DialogTitle>
+          {showDecisionBar && (
+            <div
+              className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3"
+              data-decision-stamp={decisionStampKey}
+              data-testid="needs-you-drawer-bar"
+            >
+              <DecisionPanel
+                answeredLabel={sticky?.label ?? null}
+                ask={needsItem?.ask ?? sticky?.ask ?? null}
+                board={needsItem?.board ?? sticky?.board ?? (slug || 'default')}
+                legacyReason={needsItem?.legacy_reason || needsItem?.block_reason || null}
+                onAnswered={label => {
+                  setLocalDecision({
+                    ask: needsItem?.ask ?? sticky?.ask ?? null,
+                    board: needsItem?.board ?? sticky?.board ?? (slug || 'default'),
+                    label
+                  })
+                }}
+                onUndone={() => setLocalDecision(null)}
+                size="drawer"
+                taskId={id!}
+              />
+            </div>
+          )}
         </header>
 
         <div className="flex min-h-0 flex-1 flex-col" data-selectable-text="true">
