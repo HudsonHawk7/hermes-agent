@@ -4561,6 +4561,24 @@
       }
     },
     {
+      "name": "voice_hub.speaker",
+      "summary": "Who the speaker gate will accept, what it has dropped, and its named refusal.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/VoiceHubSpeakerParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/VoiceHubSpeakerResult"
+        }
+      }
+    },
+    {
       "name": "voice_hub.state",
       "summary": "Who owns the microphone right now: status, owner surface, since, stop reason.",
       "params": [
@@ -46645,6 +46663,49 @@
         "title": "VoiceHubGuardResult",
         "type": "object"
       },
+      "VoiceHubSpeakerParams": {
+        "additionalProperties": false,
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          }
+        },
+        "title": "VoiceHubSpeakerParams",
+        "type": "object"
+      },
+      "VoiceHubSpeakerResult": {
+        "additionalProperties": false,
+        "description": "``tui_gateway/voice_hub.py::VoiceHub.speaker_state`` \u2014 a doctor read, not the light.\n\n``speaker`` is null when speaker ID is off, which is how a restarted gateway must look\n(VH1 AC1/AC3). ``gate`` is the Hub's own answer to \"may capture open at all\", so a client can\nshow a refusal without re-deriving it from ``voice_hub.state``.",
+        "properties": {
+          "speaker": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VoiceSpeakerState"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "gate": {
+            "default": true,
+            "title": "Gate",
+            "type": "boolean"
+          }
+        },
+        "title": "VoiceHubSpeakerResult",
+        "type": "object"
+      },
       "VoiceHubStateParams": {
         "additionalProperties": false,
         "properties": {
@@ -46815,6 +46876,151 @@
         ],
         "title": "VoiceRecordStatus",
         "type": "string"
+      },
+      "VoiceSpeakerDropped": {
+        "additionalProperties": true,
+        "description": "Utterances refused, by reason \u2014 ``too_short``, ``low_score``, ``not_trusted``,\n``embedding_failed``.",
+        "properties": {
+          "too_short": {
+            "default": 0,
+            "title": "Too Short",
+            "type": "integer"
+          },
+          "low_score": {
+            "default": 0,
+            "title": "Low Score",
+            "type": "integer"
+          },
+          "not_trusted": {
+            "default": 0,
+            "title": "Not Trusted",
+            "type": "integer"
+          },
+          "embedding_failed": {
+            "default": 0,
+            "title": "Embedding Failed",
+            "type": "integer"
+          }
+        },
+        "title": "VoiceSpeakerDropped",
+        "type": "object"
+      },
+      "VoiceSpeakerState": {
+        "additionalProperties": false,
+        "description": "What the speaker gate *is*, read from ``tools/voice_speaker.py::SpeakerGate.state``.\n\n``available`` false means the gate refused and the Hub is not listening; ``state`` is then\n``speaker_id_unavailable`` and ``reason`` is one of the named refusals the VH4 spec fixed\n(``model_missing`` \u2026 ``speaker_backend_unavailable``) \u2014 never a guess. ``detail`` is the one\nline the operator needs to fix it. Counters are per-arm: ``utterances`` judged, ``trusted``\naccepted as ``judson``, ``dropped`` refused before anything downstream saw them.",
+        "properties": {
+          "available": {
+            "default": false,
+            "title": "Available",
+            "type": "boolean"
+          },
+          "state": {
+            "default": "off",
+            "title": "State",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reason"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Detail"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Model"
+          },
+          "threshold": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Threshold"
+          },
+          "identities": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Identities"
+          },
+          "trusted_identities": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Trusted Identities"
+          },
+          "utterances": {
+            "default": 0,
+            "title": "Utterances",
+            "type": "integer"
+          },
+          "trusted": {
+            "default": 0,
+            "title": "Trusted",
+            "type": "integer"
+          },
+          "dropped": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VoiceSpeakerDropped"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "title": "VoiceSpeakerState",
+        "type": "object"
       },
       "VoiceStatusPayload": {
         "additionalProperties": false,

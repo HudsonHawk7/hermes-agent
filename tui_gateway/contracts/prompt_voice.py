@@ -633,3 +633,57 @@ class VoiceHubGuardResult(Result):
 method("voice_hub.guard", params=VoiceHubGuardParams, result=VoiceHubGuardResult,
        doc="The armed listening guard's counters (null when no guard is in force).")
 
+
+class VoiceHubSpeakerParams(Params):
+    profile: str | None = None
+
+
+class VoiceSpeakerDropped(OpenModel):
+    """Utterances refused, by reason — ``too_short``, ``low_score``, ``not_trusted``,
+    ``embedding_failed``."""
+
+    too_short: int = 0
+    low_score: int = 0
+    not_trusted: int = 0
+    embedding_failed: int = 0
+
+
+class VoiceSpeakerState(Result):
+    """What the speaker gate *is*, read from ``tools/voice_speaker.py::SpeakerGate.state``.
+
+    ``available`` false means the gate refused and the Hub is not listening; ``state`` is then
+    ``speaker_id_unavailable`` and ``reason`` is one of the named refusals the VH4 spec fixed
+    (``model_missing`` … ``speaker_backend_unavailable``) — never a guess. ``detail`` is the one
+    line the operator needs to fix it. Counters are per-arm: ``utterances`` judged, ``trusted``
+    accepted as ``judson``, ``dropped`` refused before anything downstream saw them.
+    """
+
+    available: bool = False
+    state: str = "off"
+    reason: str | None = None
+    detail: str | None = None
+    model: str | None = None
+    threshold: float | None = None
+    identities: list[str] | None = None
+    trusted_identities: list[str] | None = None
+    utterances: int = 0
+    trusted: int = 0
+    dropped: VoiceSpeakerDropped | None = None
+
+
+class VoiceHubSpeakerResult(Result):
+    """``tui_gateway/voice_hub.py::VoiceHub.speaker_state`` — a doctor read, not the light.
+
+    ``speaker`` is null when speaker ID is off, which is how a restarted gateway must look
+    (VH1 AC1/AC3). ``gate`` is the Hub's own answer to "may capture open at all", so a client can
+    show a refusal without re-deriving it from ``voice_hub.state``.
+    """
+
+    speaker: VoiceSpeakerState | None = None
+    gate: bool = True
+
+
+method("voice_hub.speaker", params=VoiceHubSpeakerParams, result=VoiceHubSpeakerResult,
+       doc="Who the speaker gate will accept, what it has dropped, and its named refusal.")
+
+

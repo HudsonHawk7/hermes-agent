@@ -1455,7 +1455,7 @@ def full_duplex_listen(
     on_trigger: Optional[Callable[[str], None]] = None, multiplier: Optional[float] = None,
     sustained_ms: int = 300, calibration_ms: int = 450, grace_ms: int = 500, pre_roll_ms: int = 1200,
     endpoint_silence_ms: int = 1250, max_utterance_ms: int = 30_000,
-    guard: Any = None,
+    guard: Any = None, speaker: Any = None,
 ) -> Optional[str]:
     """Listen across an ENTIRE agent turn; return the captured interruption WAV path.
 
@@ -1476,6 +1476,12 @@ def full_duplex_listen(
     *calibration_ms*, *grace_ms* and *endpoint_silence_ms* are unused; ``None`` (the default)
     keeps the loudness path byte-identical. The tap is started here and stopped in ``finally``, so
     it lives exactly as long as capture does.
+
+    Pass *speaker* (``tools.voice_speaker.SpeakerGate``) to also decide **who** spoke: every
+    completed utterance is judged, and one judged ``unknown`` — the TV, a guest — is dropped right
+    here and listening simply continues. That drop happens before the trigger callback, before a
+    WAV is written and before anything is transcribed, so a non-GM voice cannot become a message.
+    Without *speaker* nothing about identity is checked (VH5).
     """
     try:
         sd, np = _import_audio()
@@ -1500,12 +1506,22 @@ def full_duplex_listen(
                     utterances = _guard_feed(guard, data)
                     if not utterances:
                         continue
+                    utterance = utterances[-1]
+                    if speaker is not None:
+                        verdict = speaker.judge(utterance.pcm)
+                        if not verdict.trusted:
+                            # Not the owner of this machine: the TV, a guest, an empty room. Drop
+                            # it here — before the trigger, before a WAV, before transcription —
+                            # and keep listening, exactly as if nobody had spoken (VH5).
+                            logger.info("full-duplex: dropped utterance (%s)", verdict.describe())
+                            continue
+                        logger.info("full-duplex: utterance is %s", verdict.describe())
                     if on_trigger:
                         try:
                             on_trigger("playback" if playing else "generation")
                         except (RuntimeError, TypeError, ValueError) as e:
                             logger.debug("full-duplex trigger callback failed: %s", e, exc_info=True)
-                    return _write_wav_frames_to_temp(utterances[-1].pcm)
+                    return _write_wav_frames_to_temp(utterance.pcm)
                 phase = detector.feed(_rms(np, data), playing)
                 if phase is None:
                     continue
