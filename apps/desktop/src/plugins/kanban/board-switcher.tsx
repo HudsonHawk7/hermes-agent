@@ -48,6 +48,7 @@ import {
   updateBoard,
   useKanbanScope
 } from './api'
+import { NeedsYouBadge, useNeedsYouCounts } from './needs-you'
 import { runExportBoardFlow, runImportBoardFlow } from './transfer'
 import type { BoardMeta } from './types'
 import { errText, FIELD_LABEL, useKanban } from './ui'
@@ -291,6 +292,7 @@ export function BoardSwitcher() {
   const scope = useKanbanScope()
   const slug = useValue($boardSlug)
   const { data: boards } = useQuery({ queryFn: fetchBoards, queryKey: boardsKey(scope), staleTime: 30_000 })
+  const askCounts = useNeedsYouCounts()
   const [adding, setAdding] = useState(false)
   const [settingsFor, setSettingsFor] = useState<BoardMeta | null>(null)
   const [renameFor, setRenameFor] = useState<BoardMeta | null>(null)
@@ -353,6 +355,7 @@ export function BoardSwitcher() {
               <Codicon className="shrink-0 text-(--ui-text-tertiary)" name="project" size="0.8125rem" />
               <span className="shrink-0 text-[0.6875rem] font-medium text-(--ui-text-tertiary)">{k.board}</span>
               <span className="min-w-0 flex-1 truncate text-[0.75rem] font-medium leading-none">{label}</span>
+              <NeedsYouBadge count={askCounts[currentSlug] ?? 0} />
               {typeof current?.total === 'number' && (
                 <span className="text-[0.6875rem] tabular-nums text-(--ui-text-quaternary)">{current.total}</span>
               )}
@@ -367,6 +370,7 @@ export function BoardSwitcher() {
               onSelect={() => $boardSlug.set(meta.slug === boards.current ? '' : meta.slug)}
             >
               {meta.name || meta.slug}
+              <NeedsYouBadge count={askCounts[meta.slug] ?? 0} />
               {typeof meta.total === 'number' && (
                 <span className="text-[0.625rem] tabular-nums text-(--ui-text-quaternary)">{meta.total}</span>
               )}
