@@ -566,12 +566,15 @@ export function NeedsYouColumn({
     )
   }
 
+  // Use a plain div for chrome (not <header>): a bare header is role=banner and
+  // collides with the board header in board-switcher placement tests. jsdom also
+  // still maps <header> inside <section> as banner in some cases.
   return (
     <div
       className="kanban-needs-you-col group/col flex h-full w-72 shrink-0 flex-col rounded-lg border border-amber-500/40 bg-amber-500/5 p-2"
       data-testid="needs-you-column"
     >
-      <header className="mb-1.5 flex h-5 items-center gap-1.5 px-1">
+      <div className="mb-1.5 flex h-5 items-center gap-1.5 px-1">
         <span className="size-1.5 rounded-full" style={{ backgroundColor: NEEDS_YOU_TONE }} />
         <Tip label={k.needsYouHelp}>
           <span className="cursor-help text-[0.6875rem] font-medium uppercase tracking-wide text-amber-800 dark:text-amber-300">
@@ -592,7 +595,7 @@ export function NeedsYouColumn({
         >
           <Codicon name="chevron-left" size="0.75rem" />
         </button>
-      </header>
+      </div>
       <div className="relative flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto">
         {isLoading && items.length === 0 && (
           <div className="grid flex-1 place-items-center text-[0.6875rem] text-(--ui-text-quaternary)">…</div>

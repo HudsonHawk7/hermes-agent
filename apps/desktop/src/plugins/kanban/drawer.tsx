@@ -853,6 +853,7 @@ export function TaskDrawer({
   // Socket-invalidated (bindApi); the interval is only the socketless heartbeat.
   const { data: detail, error } = useQuery({
     enabled: query => !!id && routedToScope(query),
+    // Board comes from $boardSlug (Needs you pins an explicit slug, incl. default).
     queryFn: () => fetchTask(id!),
     queryKey: taskKey(scope, slug, id ?? ''),
     refetchInterval: 30_000

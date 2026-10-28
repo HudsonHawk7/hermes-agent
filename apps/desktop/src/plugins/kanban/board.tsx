@@ -1412,12 +1412,15 @@ export function KanbanBoardPage() {
           <NeedsYouColumn
             collapsed={laneOverrides.needs_you ?? false}
             onOpen={(item: NeedsYouItem) => {
-              // Cross-board: switch to the card's board so the drawer loads it.
+              // Always pin the card's real board slug (incl. "default"). The
+              // '' alias means server-active board to the backend, which can
+              // differ from default after a switch/import — that 404s the
+              // drawer's board-less detail fetch on a default-board ask.
               const target = item.board || 'default'
               const current = slug || 'default'
 
-              if (target !== current) {
-                $boardSlug.set(target === 'default' ? '' : target)
+              if (target !== current || slug === '') {
+                $boardSlug.set(target)
               }
 
               setOpenId(item.task_id)

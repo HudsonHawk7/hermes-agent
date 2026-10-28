@@ -397,15 +397,16 @@ export const fetchBoard = (archived: boolean) =>
 /** Open GM asks + legacy needs_input across every board (part-1 HTTP surface). */
 export const fetchNeedsYou = () => call<NeedsYouResponse>('/needs-you')
 
-export const fetchTask = async (id: string) => {
+export const fetchTask = async (id: string, board?: string) => {
   const downloadAttachment = captureGatewayFileDownload()
-  const detail = await call<KanbanTaskDetail>(withBoard(`/tasks/${id}`))
+  const detail = await call<KanbanTaskDetail>(withBoard(`/tasks/${id}`, {}, board))
 
   return { ...detail, downloadAttachment }
 }
 
 /** Worker stdout/stderr tail (last 16 KiB — plenty for the drawer). */
-export const fetchLog = (id: string) => call<WorkerLog>(withBoard(`/tasks/${id}/log`, { tail: '16384' }))
+export const fetchLog = (id: string, board?: string) =>
+  call<WorkerLog>(withBoard(`/tasks/${id}/log`, { tail: '16384' }, board))
 
 export const fetchBoards = () => call<BoardsResponse>('/boards')
 
@@ -445,8 +446,8 @@ function nudged<T>(write: Promise<T>): Promise<T> {
   })
 }
 
-export const patchTask = (id: string, patch: Record<string, unknown>) =>
-  nudged(call(withBoard(`/tasks/${id}`), { method: 'PATCH', body: patch }))
+export const patchTask = (id: string, patch: Record<string, unknown>, board?: string) =>
+  nudged(call(withBoard(`/tasks/${id}`, {}, board), { method: 'PATCH', body: patch }))
 
 export const createTask = (body: Record<string, unknown>) =>
   nudged(call<{ task: KanbanTask | null; warning?: string }>(withBoard('/tasks'), { method: 'POST', body }))
@@ -465,8 +466,8 @@ export const bulkTasks = (ids: string[], patch: Record<string, unknown>) =>
     })
   )
 
-export const addComment = (id: string, body: string) =>
-  call(withBoard(`/tasks/${id}/comments`), { method: 'POST', body: { author: 'desktop', body } })
+export const addComment = (id: string, body: string, board?: string) =>
+  call(withBoard(`/tasks/${id}/comments`, {}, board), { method: 'POST', body: { author: 'desktop', body } })
 
 export const reassignTask = (id: string, profile: string) =>
   nudged(call(withBoard(`/tasks/${id}/reassign`), { method: 'POST', body: { profile, reclaim_first: true } }))
