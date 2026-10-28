@@ -20,7 +20,7 @@ import tempfile
 import threading
 import time
 import wave
-from typing import Any, Callable, Dict, List, Optional, cast
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -1415,12 +1415,11 @@ def _write_wav_frames_to_temp(pcm: bytes) -> str:
     return path
 
 
-def _as_pcm_bytes(data: Any) -> bytes:
-    """``sounddevice`` hands back an int16 array; everything below wants 16-bit-mono bytes."""
-    to_bytes = getattr(data, "tobytes", None)
-    if callable(to_bytes):
-        return cast(bytes, to_bytes())
-    return bytes(data)
+def _audio_error_types(sd) -> tuple:
+    """Errors the capture loop survives: ``PortAudioError`` is not an ``OSError`` subclass."""
+    port_audio = getattr(sd, "PortAudioError", None)
+    base = (OSError, RuntimeError, TypeError, ValueError)
+    return base + ((port_audio,) if isinstance(port_audio, type) else ())
 
 
 def _guard_feed(guard, data: Any) -> list:
@@ -1433,7 +1432,7 @@ def _guard_feed(guard, data: Any) -> list:
     the reference arrived with the mic's timestamp, so a buffered tap was indistinguishable from an
     early one, and a listener that simply forgot to pass a source fed AEC3 silence.
     """
-    from tools.voice_guard import FRAME_BYTES
+    from tools.voice_guard import FRAME_BYTES, SAMPLE_RATE
 
     # ``sd.InputStream(dtype="int16")`` hands back an int16 array, not bytes: slicing *that* with a
     # byte count would feed the canceller 20 ms and call it 10 ms. Normalise once, per block.
@@ -1443,7 +1442,10 @@ def _guard_feed(guard, data: Any) -> list:
     utterances: list = []
     now = time.monotonic()
     for offset in range(0, len(pcm) - FRAME_BYTES + 1, FRAME_BYTES):
-        captured_at = now + offset / (FRAME_BYTES * 2)  # 16-bit mono: bytes → seconds
+        # 16-bit mono: byte offset → seconds of audio at the guard's rate (``SAMPLE_RATE * 2``
+        # bytes per second). Not ``FRAME_BYTES * 2``: that is 50× too slow, which made every
+        # healthy reference look ~1.2 s late and latched ``degraded`` on a working tap.
+        captured_at = now + offset / (SAMPLE_RATE * 2)
         utterances.extend(guard.process(pcm[offset:offset + FRAME_BYTES], captured_at=captured_at))
     return utterances
 
@@ -1514,9 +1516,11 @@ def full_duplex_listen(
                         logger.debug("full-duplex trigger callback failed: %s", e, exc_info=True)
                 return _capture_until_quiet(stream, np, block, pre_roll, endpoint_blocks=endpoint_blocks,
                                             max_blocks=max(1, max_utterance_ms // 30))
-    except (OSError, RuntimeError, TypeError, ValueError) as e:
+    except _audio_error_types(sd) as e:
         # The whole point of this loop is to survive a device hiccup: log it with the traceback and
-        # report "no interruption" rather than killing the caller's turn.
+        # report "no interruption" rather than killing the caller's turn. ``PortAudioError`` (the
+        # class sounddevice actually raises on an unplugged/reconfigured device) is not an OSError,
+        # so it has to be named here or the comment above is false.
         logger.debug("Full-duplex listener failed: %s", e, exc_info=True)
     finally:
         if guard is not None:

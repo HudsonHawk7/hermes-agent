@@ -3113,7 +3113,7 @@ export interface VoiceHubGuardParams {
 export interface VoiceHubGuardResult {
   guard?: VoiceGuardState | null
 }
-/** What the guard *did*, read from ``tui_gateway/voice_guard.py::VoiceGuard.state``. ``frames`` seen, ``speech_frames`` after cancellation, ``cancelled_frames`` where the far end changed the sample, ``utterances`` emitted, ``dropped_short`` discarded for length, ``late_reference_frames`` mic frames with no far end, ``max_reference_lag_ms`` the worst far-end staleness seen, ``degraded`` once the far end stopped being causally early (or went missing past its limit). ``reference`` / ``reference_pump`` say whether the loopback tap is actually running, and ``settings`` is the value line the guard prints at arm, so a doctor read can never show a guard whose tap is silent. */
+/** What the guard *did*, read from ``tools/voice_guard.py::VoiceGuard.state``. ``frames`` seen, ``speech_frames`` after cancellation, ``cancelled_frames`` where the far end changed the sample, ``utterances`` emitted, ``dropped_short`` discarded for length, ``late_reference_frames`` mic frames with no far end, ``max_reference_lag_ms`` the worst far-end staleness seen, ``degraded`` once the far end stopped being causally early (or went missing past its limit). ``reference`` / ``reference_pump`` say whether the loopback tap is actually running, and ``settings`` is the value line the guard prints at arm, so a doctor read can never show a guard whose tap is silent. */
 export interface VoiceGuardState {
   frames?: number
   speech_frames?: number

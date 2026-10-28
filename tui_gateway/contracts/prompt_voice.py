@@ -593,7 +593,7 @@ class VoiceGuardReferencePump(OpenModel):
 
 
 class VoiceGuardState(Result):
-    """What the guard *did*, read from ``tui_gateway/voice_guard.py::VoiceGuard.state``.
+    """What the guard *did*, read from ``tools/voice_guard.py::VoiceGuard.state``.
 
     ``frames`` seen, ``speech_frames`` after cancellation, ``cancelled_frames`` where the far end
     changed the sample, ``utterances`` emitted, ``dropped_short`` discarded for length,

@@ -46497,7 +46497,7 @@
       },
       "VoiceGuardState": {
         "additionalProperties": false,
-        "description": "What the guard *did*, read from ``tui_gateway/voice_guard.py::VoiceGuard.state``.\n\n``frames`` seen, ``speech_frames`` after cancellation, ``cancelled_frames`` where the far end\nchanged the sample, ``utterances`` emitted, ``dropped_short`` discarded for length,\n``late_reference_frames`` mic frames with no far end, ``max_reference_lag_ms`` the worst far-end\nstaleness seen, ``degraded`` once the far end stopped being causally early (or went missing past\nits limit). ``reference`` / ``reference_pump`` say whether the loopback tap is actually running,\nand ``settings`` is the value line the guard prints at arm, so a doctor read can never show a\nguard whose tap is silent.",
+        "description": "What the guard *did*, read from ``tools/voice_guard.py::VoiceGuard.state``.\n\n``frames`` seen, ``speech_frames`` after cancellation, ``cancelled_frames`` where the far end\nchanged the sample, ``utterances`` emitted, ``dropped_short`` discarded for length,\n``late_reference_frames`` mic frames with no far end, ``max_reference_lag_ms`` the worst far-end\nstaleness seen, ``degraded`` once the far end stopped being causally early (or went missing past\nits limit). ``reference`` / ``reference_pump`` say whether the loopback tap is actually running,\nand ``settings`` is the value line the guard prints at arm, so a doctor read can never show a\nguard whose tap is silent.",
         "properties": {
           "frames": {
             "default": 0,

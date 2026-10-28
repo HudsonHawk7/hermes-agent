@@ -315,9 +315,15 @@ class PassThroughCanceller:
 
 
 class ReferenceSource(Protocol):
-    """Far-end audio for the canceller: ``pull(n)`` returns *n* samples of s16le, 16 kHz mono."""
+    """Far-end audio for the canceller: ``pull(n)`` returns *n* samples of s16le, 16 kHz mono.
+
+    ``pullable`` is what tells :class:`ReferencePump` whether there is a device to read at all:
+    ``off`` and ``manual`` have no tap (``manual`` is fed by the caller through
+    :meth:`VoiceGuard.push_reference`), and pumping them only floods the queue with silence.
+    """
 
     name: str
+    pullable: bool
 
     def pull(self, samples: int) -> bytes: ...
 
@@ -328,6 +334,7 @@ class SilentReference:
     """Off: nothing to cancel against, so the canceller is a pass-through in practice."""
 
     name = "off"
+    pullable = False
 
     def pull(self, samples: int) -> bytes:
         return _SILENCE[:samples * SAMPLE_WIDTH]
@@ -342,9 +349,14 @@ class ManualReference:
     For callers that already hold the loopback audio — a test fixture, or a host that taps the
     speaker in its own capture callback. Named ``manual`` so a config that says ``reference: manual``
     is honest about who supplies the audio, and so the arm log still tells the truth.
+
+    There is no tap behind it, so ``pullable`` is False and no pump starts: a pump here would pull
+    ``b""`` forever and push silence ahead of the caller's real far end (measured in review: 6 of 6
+    canceller frames empty, queue depth 19 over a limit of 5, real reference dropped).
     """
 
     name = "manual"
+    pullable = False
 
     def pull(self, samples: int) -> bytes:
         return b""
@@ -368,6 +380,7 @@ class LoopbackReference:
     """
 
     name = "loopback"
+    pullable = True
 
     def __init__(self, device: Optional[str] = None) -> None:
         try:
@@ -442,9 +455,10 @@ class ReferencePump:
         return self._thread is not None and not self._stop.is_set()
 
     def start(self) -> bool:
-        """Begin pumping. False when there is nothing to pump (``reference: off``)."""
-        if (getattr(self._source, "name", "off") or "off") == "off":
-            logger.debug("voice guard: reference is off — no far end to pump, AEC gets silence")
+        """Begin pumping. False when the source has no tap to read (``off``, ``manual``)."""
+        if not getattr(self._source, "pullable", True):
+            logger.debug("voice guard: reference %s has no tap to pump — the caller supplies the "
+                         "far end with push_reference", getattr(self._source, "name", "?"))
             return False
         if self._thread is not None:
             return True
@@ -570,9 +584,10 @@ class VoiceGuard:
     def start_reference(self) -> bool:
         """Start the far-end tap. The listener calls this when capture opens; idempotent.
 
-        Returns False when the guard has no tap (``reference: off`` or a test double) — the
-        canceller then runs on silence and every frame is counted as a *missing* reference, which
-        is what ``degraded`` is for. Nothing here decides to run on its own.
+        Returns False when there is no tap to start: ``reference: off`` (nothing to cancel
+        against) or ``reference: manual`` (the caller hands the far end over with
+        :meth:`push_reference`; a pump there would flood the queue with silence ahead of it).
+        Nothing here decides to run on its own.
         """
         with self._lock:
             if self._closed:
@@ -771,9 +786,6 @@ class VoiceGuard:
         self._emitted += 1
         return [Utterance(index=self._emitted, start_frame=start, end_frame=end,
                           speech_frames=speech, pcm=b"".join(keep))]
-
-
-_SILENCE = b"\x00" * FRAME_BYTES
 
 
 def _make_echo(settings: GuardSettings) -> EchoCanceller:

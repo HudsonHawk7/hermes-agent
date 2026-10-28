@@ -308,13 +308,16 @@ voice:
     max_pending_reference_frames: 5   # queue depth the tap may build up before it drops the oldest
 ```
 
-`enabled: true` is the master switch — without it nothing below is read. `reference: loopback` needs
-the optional `soundcard` package (WASAPI loopback on Windows). The known values are `loopback`
+`enabled: true` is the master switch — without it nothing below is read. The guard is a set of
+optional packages, not core dependencies: `livekit` (AEC3), `onnxruntime` plus a Silero v6 graph
+(`pip install livekit onnxruntime silero-vad`, or point `silero_model` at any `silero_vad.onnx`),
+and `soundcard` for the loopback (WASAPI on Windows). The known `reference` values are `loopback`
 (capture the system audio yourself), `manual` (the caller pushes the far end with
-`push_reference`, for a host that already taps the speaker in its own callback) and empty/`off`
-(no far end). Without `soundcard`, or with a canceller named and no `reference` while the guard
-would have to supply the far end itself, the guard refuses to arm and says which key or package is
-missing instead of silently behaving like a plain detector.
+`push_reference`, for a host that already taps the speaker in its own callback — no tap starts, so
+nothing dilutes the frames you push) and empty/`off` (no far end). Without `soundcard`, or with a
+canceller named and no `reference` while the guard would have to supply the far end itself, the
+guard refuses to arm and says which key or package is missing instead of silently behaving like a
+plain detector.
 
 **The tap runs on its own thread.** The loopback is read by a `ReferencePump` thread that stamps
 every frame at the moment it was captured, so the mic loop never blocks on the audio device and a

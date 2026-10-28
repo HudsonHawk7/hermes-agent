@@ -21,19 +21,27 @@ Reproduce the full measurement (the exact command this was run with, from a venv
 ``livekit onnxruntime numpy faster-whisper pytest`` and a Silero v6 ``silero_vad.onnx``)::
 
     PYTHONPATH=<repo> VOICE_GUARD_SILERO_MODEL=<path to silero_vad.onnx> \\
-        python -m pytest tests/tools/test_voice_guard_stack.py -q --noconftest
+        python -m pytest tests/tools/test_voice_guard_stack.py -q
+
+The graph is found without the env var too — ``pip install silero-vad`` puts ``silero_vad.onnx``
+in the package's own ``data/`` directory, and this file looks there — so the standard gate
+(``scripts/run_tests.sh tests/tools/test_voice_guard_stack.py``) measures the real stack instead
+of skipping.
 """
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import subprocess
 import sys
+import time
 import wave
 from pathlib import Path
 
 import pytest
 
+from tools import voice_mode
 from tools.voice_guard import GuardSettings, VoiceGuard, FRAME_BYTES, FRAME_SAMPLES, SAMPLE_RATE
 
 pytestmark = pytest.mark.platforms("windows")
@@ -42,9 +50,25 @@ np = pytest.importorskip("numpy")
 pytest.importorskip("livekit.rtc")
 pytest.importorskip("onnxruntime")
 
-SILERO_MODEL = os.environ.get("VOICE_GUARD_SILERO_MODEL", "")
-if not SILERO_MODEL or not os.path.isfile(SILERO_MODEL):
-    pytest.skip(f"set VOICE_GUARD_SILERO_MODEL to a silero_vad.onnx (got {SILERO_MODEL!r})",
+
+def _find_silero_model() -> str:
+    """An explicit path, else the ``silero_vad`` package's own graph; ``""`` when neither exists."""
+    configured = os.environ.get("VOICE_GUARD_SILERO_MODEL", "")
+    if configured:
+        return configured if os.path.isfile(configured) else ""
+    try:
+        spec = importlib.util.find_spec("silero_vad")
+    except (ImportError, ValueError):
+        return ""
+    if spec is None or not spec.origin:
+        return ""
+    candidate = Path(spec.origin).parent / "data" / "silero_vad.onnx"
+    return str(candidate) if candidate.is_file() else ""
+
+
+SILERO_MODEL = _find_silero_model()
+if not SILERO_MODEL:
+    pytest.skip("no silero_vad.onnx: set VOICE_GUARD_SILERO_MODEL or pip install silero-vad",
                 allow_module_level=True)
 
 # Distinct, unambiguous words: nothing the near-end says can be mistaken for the clip and vice versa.
@@ -67,10 +91,10 @@ REPLY_WORDS = ("lease", "microphone", "restart", "threshold")
 
 TRIALS = 10
 REPLY_TRIALS = 5
+BLOCK_FRAMES = 3         # 30 ms — the block sounddevice hands the listener
 ECHO_DELAY_MS = 60       # the echo path VH2's fixture used
 ECHO_GAIN = 0.5          # about −6 dB of clip leaking into the mic
 NOISE_DBFS = -55.0       # room floor, so the mic is never digital silence
-FRAME_MS = 1000.0 * FRAME_SAMPLES / SAMPLE_RATE
 
 
 # ── audio helpers ──────────────────────────────────────────────────────────────────────────────
@@ -148,26 +172,41 @@ def _guard(**overrides) -> VoiceGuard:
     return VoiceGuard(_settings(**overrides))
 
 
-def _run_guard(mic_pcm, ref_pcm, *, ref_lag_frames: int = 0, **overrides):
-    """Feed mic and reference frame by frame and return ``(utterances, state)``.
+def _drive(guard, mic_frames, ref_frames, *, ref_lag_frames: int = 0) -> list:
+    """Feed the guard exactly as the Hub does: push the far end, then hand over a 30 ms block.
+
+    ``voice_mode._guard_feed`` is the only path production uses, and both VH3 review rounds found
+    their bugs *there* (silence as the far end, then a 50× mic clock) rather than in the guard. So
+    the acceptance runs go through it too, in the same 30 ms blocks ``sounddevice`` delivers.
 
     ``ref_lag_frames = 0`` is the causal case: the loopback frame for an instant is in hand before
-    that mic frame is processed, exactly as a live loopback tap delivers it. A positive value
-    reproduces a *buffered* reference: the tap hands over audio that is that many 10 ms frames old,
-    which is VH2's 300 ms failure (33.8 dB → 2.9 dB). The reference is padded with silence to the
-    mic's length, so a short clip is never miscounted as a missing reference.
+    that mic frame is processed, exactly as the tap delivers it. A positive value reproduces a
+    *buffered* reference — the tap hands over audio that many 10 ms frames old, which is VH2's
+    300 ms failure (33.8 dB → 2.9 dB). Each pushed frame is stamped with the moment it is handed
+    over, like ``ReferencePump`` stamps a loopback frame.
+    """
+    utterances: list = []
+    for start in range(0, len(mic_frames), BLOCK_FRAMES):
+        chunk = mic_frames[start:start + BLOCK_FRAMES]
+        for index in range(start, start + len(chunk)):
+            available = index - ref_lag_frames
+            if 0 <= available < len(ref_frames):
+                guard.push_reference(ref_frames[available], captured_at=time.monotonic())
+        utterances.extend(voice_mode._guard_feed(guard, b"".join(chunk)))
+    utterances.extend(guard.flush())
+    return utterances
+
+
+def _run_guard(mic_pcm, ref_pcm, *, ref_lag_frames: int = 0, **overrides):
+    """Feed mic and reference through the product's own entry point; return ``(utterances, state)``.
+
+    The reference is padded with silence to the mic's length, so a short clip is never miscounted as
+    a missing reference.
     """
     guard = _guard(**overrides)
     if len(ref_pcm) < len(mic_pcm):
         ref_pcm = np.concatenate([ref_pcm, np.zeros(len(mic_pcm) - len(ref_pcm), dtype="<i2")])
-    mic_frames, ref_frames = _frames(mic_pcm), _frames(ref_pcm)
-    utterances = []
-    for index, mic in enumerate(mic_frames):
-        available = index - ref_lag_frames
-        if 0 <= available < len(ref_frames):
-            guard.push_reference(ref_frames[available], captured_at=available * FRAME_MS)
-        utterances.extend(guard.process(mic, captured_at=index * FRAME_MS))
-    utterances.extend(guard.flush())
+    utterances = _drive(guard, _frames(mic_pcm), _frames(ref_pcm), ref_lag_frames=ref_lag_frames)
     state = guard.state()
     guard.close()
     return utterances, state
@@ -272,14 +311,7 @@ def _run_with_tap(mic_pcm, ref_pcm, *, ref_lag_frames: int, **overrides):
     guard = VoiceGuard(_settings(**overrides), echo=tap)
     if len(ref_pcm) < len(mic_pcm):
         ref_pcm = np.concatenate([ref_pcm, np.zeros(len(mic_pcm) - len(ref_pcm), dtype="<i2")])
-    mic_frames, ref_frames = _frames(mic_pcm), _frames(ref_pcm)
-    utterances = []
-    for index, mic in enumerate(mic_frames):
-        available = index - ref_lag_frames
-        if 0 <= available < len(ref_frames):
-            guard.push_reference(ref_frames[available], captured_at=available * FRAME_MS)
-        utterances.extend(guard.process(mic, captured_at=index * FRAME_MS))
-    utterances.extend(guard.flush())
+    utterances = _drive(guard, _frames(mic_pcm), _frames(ref_pcm), ref_lag_frames=ref_lag_frames)
     state = guard.state()
     guard.close()
     return utterances, state, tap.pairs

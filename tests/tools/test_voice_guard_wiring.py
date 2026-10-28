@@ -81,6 +81,7 @@ class _Source:
     """A reference source that hands over a fixed frame, and counts what was asked for."""
 
     name = "loopback"
+    pullable = True
 
     def __init__(self, frame: bytes = FAR_END) -> None:
         self.frame = frame
@@ -92,6 +93,13 @@ class _Source:
 
     def close(self) -> None:
         pass
+
+
+class _NoTap(_Source):
+    """``reference: manual``: the caller pushes the far end, there is no device behind it."""
+
+    name = "manual"
+    pullable = False
 
 
 def _settings(**overrides) -> GuardSettings:
@@ -182,6 +190,97 @@ def test_int16_blocks_are_split_into_ten_millisecond_frames():
     utterances = voice_mode._guard_feed(guard, _Block(SILENCE, frames=2))
     assert len(utterances) == 1, "one 30 ms utterance, not three"
     guard.close()
+
+
+def test_the_mic_clock_advances_one_frame_per_ten_milliseconds():
+    """The three frames of one 30 ms block are stamped 0 / 10 / 20 ms apart.
+
+    Round 2 measured the old ``offset / (FRAME_BYTES * 2)`` (50× too slow) at 1167.8 ms of lag
+    against a reference that was perfectly on time, so ``max_reference_lag_ms`` latched ``degraded``
+    on a healthy tap and the documented signal was inverted.
+    """
+    stamps: list[float] = []
+
+    class _Recorder:
+        def process(self, frame: bytes, captured_at=None):
+            assert captured_at is not None, "the mic frame went to the guard with no capture time"
+            stamps.append(captured_at)
+            return []
+
+    voice_mode._guard_feed(_Recorder(), _Block(SILENCE, frames=3))
+    assert len(stamps) == 3, stamps
+    assert stamps[1] - stamps[0] == pytest.approx(0.010, abs=1e-9), stamps
+    assert stamps[2] - stamps[1] == pytest.approx(0.010, abs=1e-9), stamps
+    assert stamps[2] - stamps[0] == pytest.approx(0.020, abs=1e-9), stamps
+
+
+def test_a_reference_that_is_on_time_is_not_reported_late():
+    """A far end pushed now and consumed now is ~0 ms late: nothing degrades, nothing is counted."""
+    guard, _echo = _guard(max_reference_lag_ms=50, max_late_reference_frames=0)
+    try:
+        for _ in range(3):
+            guard.push_reference(FAR_END, captured_at=time.monotonic())
+        voice_mode._guard_feed(guard, _Block(SILENCE, frames=3))
+        state = guard.state()
+        assert state["late_reference_frames"] == 0, state
+        assert state["degraded"] is False, state
+        assert state["max_reference_lag_ms"] < 50, state["max_reference_lag_ms"]
+    finally:
+        guard.close()
+
+
+def test_manual_reference_starts_no_pump_and_uses_the_callers_frames():
+    """``reference: manual`` is a documented mode with no tap: no pump, and the caller's frame wins.
+
+    Round 2 measured the pump flooding the queue with silence in this mode — 6 of 6 canceller
+    frames empty, queue depth 19 over ``max_pending_reference_frames: 5``, so the caller's real far
+    end was dropped first.
+    """
+    echo = _Echo()
+    guard = VoiceGuard(_settings(reference="manual", max_pending_reference_frames=5),
+                       echo=echo, vad=_Vad())
+    try:
+        assert guard.reference.name == "manual"
+        assert guard.start_reference() is False, "manual has no device to pump"
+        state = guard.reference_state()
+        assert state["pending_frames"] == 0, state
+        assert state["pump"]["running"] is False, state
+        assert state["pump"]["frames"] == 0, state
+
+        guard.push_reference(FAR_END, captured_at=time.monotonic())
+        voice_mode._guard_feed(guard, _Block(SILENCE, frames=1))
+        assert [reference for _mic, reference in echo.calls] == [FAR_END]
+        assert guard.state()["late_reference_frames"] == 0
+    finally:
+        guard.stop_reference()
+        guard.close()
+
+
+def test_a_source_with_no_tap_is_never_pulled():
+    """The pump asks ``pullable``, not the name: a manual tap must not be read at all."""
+    source = _NoTap()
+    guard, _echo = _guard(source=source)
+    try:
+        assert guard.start_reference() is False
+        assert source.pulls == 0, f"pulled {source.pulls} frames from a source with no tap"
+        assert guard.reference_state()["pump"]["frames"] == 0
+    finally:
+        guard.close()
+
+
+def test_a_port_audio_error_is_a_hiccup_not_a_crash(monkeypatch):
+    """``sounddevice.PortAudioError`` is not an ``OSError``: the loop survives it, as documented."""
+    class PortAudioError(Exception):
+        """What sounddevice raises on an unplugged or reconfigured device."""
+
+    class _Exploding(_FakeStream):
+        def read(self, n: int):
+            raise PortAudioError("device unplugged")
+
+    monkeypatch.setattr(voice_mode, "_import_audio", lambda: (
+        type("FakeSd", (), {"InputStream": lambda **kw: _Exploding([], **kw),
+                            "PortAudioError": PortAudioError}), None))
+    assert voice_mode.full_duplex_listen(lambda: False) is None
 
 
 # ── the listener owns the tap's lifetime ───────────────────────────────────────────────────────
