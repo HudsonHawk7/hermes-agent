@@ -323,6 +323,29 @@ _SPECS = [
                   "Repeated same-kind re-blocks after unblock route the task to "
                   "triage to break unblock loops. Omit for a generic block."),
     ], help="Mark one or more tasks blocked"),
+    _cmd("ask", [
+        _TASK_ID,
+        _arg("--question", required=True, help="One-line question shown on the card"),
+        _arg("--context", required=True, help="At most two sentences of context"),
+        _arg("--option", action="append", required=True, dest="options",
+             help="Option as 'key|Label|effect' (repeat 2-4 times). "
+                  "Example: --option 'yes|Yes|BB-8 rebases it and proves it'"),
+        _arg("--pick", help="Recommended option key (must match one --option key)"),
+        _arg("--reason", help="Optional short block reason (defaults to --question)"),
+        _arg("--asked-by", help="Who filed the ask (defaults to current profile)"),
+        _json_flag(),
+    ], help="File a structured GM ask and block the card needs_input (one-tap answers)"),
+    _cmd("answer", [
+        _TASK_ID,
+        _arg("key", nargs="?", help="Option key to pick (omit with --send-back or --undo)"),
+        _arg("--send-back", action="store_true",
+             help="Reject the ask and send the card back with --note"),
+        _arg("--undo", action="store_true",
+             help="Re-open the last decision and re-block, only if no run has started since"),
+        _arg("--note", help="Optional note on a pick, or required note for --send-back"),
+        _arg("--by", help="Who is answering (defaults to current profile / gm)"),
+        _json_flag(),
+    ], help="Answer a structured GM ask (or --send-back / --undo)"),
     _cmd("schedule", [
         _TASK_ID,
         _arg("reason", nargs="*", help="Reason/timing note (also appended as a comment)"),

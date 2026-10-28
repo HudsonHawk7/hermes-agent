@@ -1006,6 +1006,82 @@ def _cmd_block(args: argparse.Namespace) -> int:
         return _bulk_apply(ids, op, ok_msg, lambda tid: f"cannot block {tid}")
 
 
+def _cmd_ask(args: argparse.Namespace) -> int:
+    """File a structured GM ask and park the card as needs_input."""
+    from hermes_cli import kanban_db_gm_asks as gm
+
+    tid = args.task_id
+    try:
+        options = [gm.parse_option_flag(raw) for raw in (args.options or [])]
+        ask = {
+            "question": args.question,
+            "context": args.context,
+            "options": options,
+            "pick": getattr(args, "pick", None),
+        }
+        author = (getattr(args, "asked_by", None) or _profile_author() or "cli").strip()
+        with kbc.connect_closing() as conn:
+            result = gm.record_gm_ask(
+                conn, tid, ask,
+                asked_by=author,
+                reason=_stripped_or_none(getattr(args, "reason", None)),
+                force_park=True,
+            )
+    except gm.GmAskError as exc:
+        return _err(str(exc))
+    except ValueError as exc:
+        return _err(str(exc))
+    if getattr(args, "json", False):
+        _print_json(result)
+    else:
+        keys = [o["key"] for o in result["ask"]["options"]]
+        print(
+            f"Asked on {tid} (event {result['ask_event_id']}): {result['ask']['question']} "
+            f"[{'/'.join(keys)}] → {result['status']}/{result['block_kind']}"
+        )
+    return 0
+
+
+def _cmd_answer(args: argparse.Namespace) -> int:
+    """Answer / send-back / undo a structured GM ask."""
+    from hermes_cli import kanban_db_gm_asks as gm
+
+    tid = args.task_id
+    by = (getattr(args, "by", None) or _profile_author() or "gm").strip()
+    note = _stripped_or_none(getattr(args, "note", None))
+    undo = bool(getattr(args, "undo", False))
+    send_back = bool(getattr(args, "send_back", False))
+    key = getattr(args, "key", None)
+    if undo and (send_back or key):
+        return _err("pass --undo alone (no key / --send-back)")
+    if send_back and key:
+        return _err("pass either an option key or --send-back, not both")
+    if not undo and not send_back and not key:
+        return _err("pass an option key, or --send-back / --undo")
+    try:
+        with kbc.connect_closing() as conn:
+            if undo:
+                result = gm.undo_gm_decision(conn, tid, by=by)
+            else:
+                result = gm.answer_gm_ask(
+                    conn, tid,
+                    key=None if send_back else key,
+                    sent_back=send_back,
+                    note=note,
+                    by=by,
+                    via="cli",
+                )
+    except gm.GmAskError as exc:
+        return _err(str(exc))
+    if getattr(args, "json", False):
+        _print_json(result)
+    elif undo:
+        print(f"Undid decision on {tid}; ask re-opened → {result.get('status')}")
+    else:
+        print(result.get("comment") or f"Answered {tid} → {result.get('status')}")
+    return 0
+
+
 def _cmd_schedule(args: argparse.Namespace) -> int:
     reason = _joined_words(args.reason)
     author = _profile_author()
@@ -1328,6 +1404,7 @@ _HANDLERS = {
     "comment": _cmd_comment, "attach": _cmd_attach,
     "attachments": _cmd_attachments, "attach-rm": _cmd_attach_rm,
     "complete": _cmd_complete, "edit": _cmd_edit, "block": _cmd_block,
+    "ask": _cmd_ask, "answer": _cmd_answer,
     "schedule": _cmd_schedule, "unblock": _cmd_unblock,
     "request-review": _cmd_request_review, "request-changes": _cmd_request_changes,
     "reopen-review": _cmd_reopen_review, "promote": _cmd_promote,
