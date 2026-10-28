@@ -815,6 +815,7 @@ def _handle_block(args: dict, **kw) -> str:
     reason = _redact(
         _require_text(args, "reason", "reason is required — explain what input you need"))
     kind = args.get("kind")
+    ask = args.get("ask")
     with _board(args.get("board")) as (kb, conn):
         _check(kind is None or kind in kb.VALID_BLOCK_KINDS,
                f"kind must be one of {sorted(kb.VALID_BLOCK_KINDS)} (or omit it)")
@@ -834,10 +835,32 @@ def _handle_block(args: dict, **kw) -> str:
                f"{sorted(_GOAL_MODE_BLOCK_ALLOWED_KINDS)} (got {kind!r}). If the task is actually "
                f"finished or cannot proceed for another reason, call kanban_complete instead — "
                f"the completion judge will evaluate it.")
+        # Structured GM ask is mandatory for needs_input so the human can
+        # one-tap from the card (Approvals 1/2). Other kinds stay free-text.
+        if kind == "needs_input":
+            from hermes_cli import kanban_db_gm_asks as gm
+
+            try:
+                result = gm.record_gm_ask(
+                    conn, tid, ask,
+                    asked_by=_persisted_identity(),
+                    reason=reason,
+                    expected_run_id=_worker_run_id(tid),
+                    force_park=False,
+                )
+            except gm.GmAskError as exc:
+                raise _Reject(str(exc)) from exc
+            extra: dict = {
+                "block_kind": result.get("block_kind") or "needs_input",
+                "ask_event_id": result.get("ask_event_id"),
+                "ask": result.get("ask"),
+            }
+            return _ok_landed(kb, conn, tid, "blocked", **extra)
+
         ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid))
         _check(ok, f"could not block {tid} (unknown id or not in running/ready)")
         landed_kind = kb.get_task(conn, tid).block_kind
-        extra: dict = {"block_kind": landed_kind}
+        extra = {"block_kind": landed_kind}
         if kind == "dependency" and landed_kind != kind:
             # block_task re-kinds a dependency wait that no open parent can satisfy.
             extra["requested_kind"] = kind
