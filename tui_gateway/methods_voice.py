@@ -430,9 +430,15 @@ def _wake_resume_if_owner(owner: Transport, *, retry_seconds: float = 15.0,
     or ``retry_seconds`` elapses. ``False`` (lease gone / other owner) is final — never retried."""
     from tools.wake_word import resume_listening
     try:
-        return resume_listening(owner=owner)
+        resumed = resume_listening(owner=owner)
     except Exception as e:
         logger.debug("wake resume failed (will retry): %s", e)
+    else:
+        if resumed:
+            # Capture is open again, so the published state must say so — the retry path below
+            # does this too; without it the light stays idle while the mic is live.
+            _wake_hub().resume(owner)
+        return resumed
     global _wake_resume_retry_active
     with _wake_resume_retry_lock:
         if _wake_resume_retry_active:
@@ -596,6 +602,10 @@ def _(rid, params: dict) -> dict:
         start_listening(on_detect, owner=transport, config=cfg,
                         external_audio=capture_mode == "client")
     except WakeWordInUse:
+        # claim() raising leaves the other surface's claim alone; start_listening raising
+        # (another PROCESS holds the machine lock) leaves OUR claim behind, so drop it rather
+        # than publish an armed Hub with no detector under it.
+        hub.release(transport, "start_failed")
         return refused("owned", owner_surface=existing_surface or None)
     except Exception as e:
         hub.release(transport, "start_failed")  # don't leave a claim with no detector behind it
@@ -646,9 +656,7 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     """Reclaim the mic after a pause; no-op if the listener isn't armed."""
     transport = _caller_transport()
-    resumed = _wake_resume_if_owner(transport)
-    if resumed:
-        _wake_hub().resume(transport)
+    resumed = _wake_resume_if_owner(transport)  # resumes the Hub as well, on success
     logger.info("wake.resume: detector resumed=%s", resumed)
     return _owner_result(rid, "resumed", resumed)
 
@@ -873,6 +881,9 @@ def _(rid, params: dict) -> dict:
             from tools.wake_word import pause_listening
             wake_paused = pause_listening(owner=transport)
         if wake_paused:
+            # The mic just changed hands to STT: publish that, or the listening light keeps
+            # drawing "armed" for a detector that is no longer capturing (VH1 AC4).
+            _wake_hub().pause(transport, "paused")
             with _voice_sid_lock:
                 _voice_wake_owner = transport
         live = _voice_capture_callback
