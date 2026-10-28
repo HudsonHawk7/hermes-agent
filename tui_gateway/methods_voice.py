@@ -263,23 +263,50 @@ def _full_duplex_listener() -> None:
             tripped.set()
             _fd_trip(phase)
         mult, grace_ms = _fd_barge_params(_voice_cfg_dict())
-        wav_path = full_duplex_listen(_should_stop, is_playing=is_audio_output_active,
-                                      on_trigger=_on_trigger, multiplier=mult or None,
-                                      grace_ms=grace_ms)
-        if not (wav_path and tripped.is_set()):
-            return
+        # VH3: with the guard armed the trip is a real utterance after echo cancellation, not a
+        # loudness threshold — the television and her own reply are subtracted before VAD decides.
+        # Off (the default) keeps the loudness path exactly as it was.
+        guard = _build_listening_guard()
+        hub = _wake_hub()
+        hub.attach_guard(guard)
         try:
-            result = transcribe_recording(wav_path)
-            if result.get("success") and (result.get("transcript") or "").strip():
-                _deliver_fd_transcript(result["transcript"].strip())
+            wav_path = full_duplex_listen(_should_stop, is_playing=is_audio_output_active,
+                                          on_trigger=_on_trigger, multiplier=mult or None,
+                                          grace_ms=grace_ms, guard=guard)
+            if not (wav_path and tripped.is_set()):
+                return
+            try:
+                result = transcribe_recording(wav_path)
+                if result.get("success") and (result.get("transcript") or "").strip():
+                    _deliver_fd_transcript(result["transcript"].strip())
+            finally:
+                with contextlib.suppress(OSError):
+                    os.unlink(wav_path)
         finally:
-            with contextlib.suppress(OSError):
-                os.unlink(wav_path)
+            # The listener owns the guard: stop reporting it, then release its backends so the
+            # loopback recorder and ONNX session do not outlive the capture (VH3).
+            hub.attach_guard(None)
+            if guard is not None:
+                guard.close()
     except Exception as e:
         logger.debug("full-duplex listener failed: %s", e)
     finally:
         with _fd_listener_lock:
             _fd_listener_active = False
+
+
+def _build_listening_guard():
+    """The listening guard this config asks for, or ``None`` (build_guard names the reason).
+
+    Built at capture time, never at import or boot: a restarted gateway has no guard until a
+    surface asks for the mic, which is VH1 AC1/AC3 still holding (VH3).
+    """
+    try:
+        from tools.voice_guard import build_guard
+        return build_guard()
+    except Exception as e:  # a broken guard must not take barge-in down with it
+        logger.warning("listening guard unavailable: %s", e)
+        return None
 
 
 def _fd_barge_params(cfg: dict) -> tuple[float, int]:
@@ -705,6 +732,17 @@ def _(rid, params: dict) -> dict:
     """The listening light's only input — the Hub's four fields (VH1 AC4). No session, no probe:
     it answers from memory, so a client can poll it while every agent is mid-turn."""
     return _ok(rid, _wake_hub().state())
+
+
+@method("voice_hub.guard")
+def _(rid, params: dict) -> dict:
+    """The listening guard's counters, or ``null`` when no guard is in force (VH3).
+
+    A doctor read, deliberately separate from ``voice_hub.state``: clients pin that four-field
+    contract, and this one tells an operator whether the reference is keeping up
+    (``degraded``, ``max_reference_lag_ms``) and what is actually in force.
+    """
+    return _ok(rid, {"guard": _wake_hub().guard_state()})
 
 
 @method("wake.feed")

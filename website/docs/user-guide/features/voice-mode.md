@@ -272,6 +272,50 @@ Tuning (config.yaml): `voice.barge_in: false` disables it; `voice.barge_in_thres
 
 The agent **knows** it was interrupted: the next message carries a short note telling the model its spoken reply was cut off, so it can react naturally ("rude!") or pick up where it left off instead of being oblivious.
 
+### Listening guard (echo cancellation + voice activity detection)
+
+The loudness detector above cannot tell your voice from a television in the same room or from the
+agent's own reply: both arrive through the microphone at speech-like level. The **listening guard**
+puts a real echo canceller and a neural voice-activity detector in front of that decision:
+
+```
+system audio (loopback) ─┐
+                         ├─▶ AEC3 (libwebrtc via livekit.rtc) ─▶ Silero VAD ─▶ utterance
+microphone ──────────────┘
+```
+
+The loopback tap hears everything the machine plays *before* the microphone hears the room, so the
+canceller can subtract the television and the agent's own voice, and only a genuine utterance ends
+the wait. It is **off unless you name it**, and every number comes from `config.yaml` — an empty key
+means off, and the guard logs the values it is actually using when it arms.
+
+```yaml
+voice:
+  listening_guard:
+    echo_cancel: aec3                 # aec3; empty = no canceller
+    vad: silero                       # silero; empty = no detector
+    reference: loopback               # loopback = capture the system audio; empty = no far end
+    silero_model: /path/to/silero_vad.onnx
+    vad_threshold: 0.05               # Silero speech probability that counts as speech
+    min_speech_ms: 200                # shorter blips are dropped
+    min_silence_ms: 500               # silence that ends an utterance
+    max_utterance_ms: 30000           # hard cut on a single utterance
+    stream_delay_ms: 60               # speaker → microphone delay the canceller compensates for
+    onnx_threads: 1                   # 0 lets onnxruntime decide
+    max_late_reference_frames: 5      # frames with no reference before the guard says it is degraded
+    max_reference_lag_ms: 50          # reference older than this cannot cancel anything
+```
+
+`reference: loopback` needs the optional `soundcard` package (WASAPI loopback on Windows). Without
+it the guard refuses to arm and says so instead of silently behaving like a plain detector.
+
+**A late reference cancels nothing.** If the loopback is buffered, the canceller has nothing to
+subtract at the moment the echo arrives; the guard counts those frames and, past
+`max_late_reference_frames` or `max_reference_lag_ms`, logs `DEGRADED` rather than passing the
+television through as speech. `voice_hub.guard` returns the live counters
+(`frames`, `speech_frames`, `utterances`, `late_reference_frames`, `max_reference_lag_ms`,
+`degraded`) for a doctor read; the listening light's four-field contract is unchanged.
+
 ### Hallucination Filter
 
 Whisper sometimes generates phantom text from silence or background noise ("Thank you for watching", "Subscribe", etc.). The agent filters these out using a set of 26 known hallucination phrases across multiple languages, plus a regex pattern that catches repetitive variations.
@@ -501,6 +545,21 @@ voice:
   silence_threshold: 200           # RMS level (0-32767) below which counts as silence
   silence_duration: 3.0            # Seconds of silence before auto-stop
   stop_phrases: ["stop"]           # Saying exactly one of these ends the voice chat; [] disables
+  # Listening guard: echo cancellation + VAD in front of barge-in (see "Listening guard" above).
+  # Entirely opt-in: omit the block, or leave a key empty, and that stage is off.
+  listening_guard:
+    echo_cancel: aec3               # aec3 | empty (off)
+    vad: silero                     # silero | empty (off)
+    reference: loopback             # loopback (capture system audio) | empty (no far end)
+    silero_model: ""                # path to silero_vad.onnx; required when vad: silero
+    vad_threshold: 0.05             # speech probability that counts as speech
+    min_speech_ms: 200              # drop shorter blips
+    min_silence_ms: 500             # silence that ends an utterance
+    max_utterance_ms: 30000         # hard cut on one utterance
+    stream_delay_ms: 60             # speaker -> mic delay the canceller compensates for
+    onnx_threads: 1                 # 0 = let onnxruntime decide
+    max_late_reference_frames: 5    # frames without a reference before DEGRADED
+    max_reference_lag_ms: 50        # reference older than this cancels nothing
 
 # Speech-to-Text
 stt:

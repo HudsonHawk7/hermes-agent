@@ -24,7 +24,8 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Callable, Optional
+from contextlib import suppress
+from typing import Any, Callable, Optional
 
 # The three published statuses. ``idle`` is also "paused": capture is closed either way, and the
 # four-field contract has no room for a fifth value (see ``stop_reason`` for which one it was).
@@ -47,6 +48,8 @@ class VoiceHub:
         self._status = IDLE
         self._surface: Optional[str] = None
         self._transport: object = None
+        self._guard: Optional[Any] = None
+        self._listening_guard: Optional[Any] = None
         self._since = float(clock())
         self._stop_reason: Optional[str] = None
 
@@ -84,14 +87,45 @@ class VoiceHub:
             self._transport = transport
             self._surface = surface or self._surface or "auto"
 
-    def armed(self, surface: str, transport: object) -> dict:
-        """Capture is open for ``surface`` — the arm succeeded, whatever the old state was."""
+    def armed(self, surface: str, transport: object, guard: Any = None) -> dict:
+        """Capture is open for ``surface`` — the arm succeeded, whatever the old state was.
+
+        ``guard`` is the listening guard (``tools.voice_guard``) built for this arm, or ``None``
+        when config does not ask for one. It lives exactly as long as the arm: the Hub never
+        builds one itself and never reads config to decide, so a restarted gateway has no guard
+        until a surface asks for the mic (VH1 AC1/AC3).
+        """
         with self._lock:
             self._transport = transport
             self._surface = surface or self._surface or "auto"
+            self._guard = guard
             self._status, self._stop_reason = ARMED, None
             self._since = float(self._clock())
             return self.state()
+
+    def attach_guard(self, guard: Any) -> None:
+        """Publish the armed listener's guard for the doctor read. Reporting only.
+
+        The listener owns this guard's lifetime; the Hub must never close it out from under a live
+        capture stream, which is why a claim's :meth:`release`/:meth:`reset` does not touch it.
+        """
+        with self._lock:
+            self._listening_guard = guard
+
+    def guard_state(self) -> Optional[dict]:
+        """The armed guard's counters, or ``None`` when no guard is in force.
+
+        Deliberately NOT part of :meth:`state`: clients pin the four-field contract (VH1 AC4),
+        and this is a doctor/log read.
+        """
+        with self._lock:
+            guard = self._guard if self._guard is not None else self._listening_guard
+        if guard is None:
+            return None
+        try:
+            return guard.state()
+        except Exception:  # a closed/partial backend must not take a status read down
+            return None
 
     def pause(self, transport: object, reason: str = "paused") -> bool:
         """Close capture but keep the claim (mic handed to a voice turn, phrase detected)."""
@@ -111,6 +145,7 @@ class VoiceHub:
             self._transport, self._surface = None, None
             self._status, self._stop_reason = STOPPED, reason
             self._since = float(self._clock())
+            self._drop_guard()
             return True
 
     def reset(self) -> None:
@@ -118,6 +153,14 @@ class VoiceHub:
         with self._lock:
             self._transport, self._surface, self._stop_reason = None, None, None
             self._status, self._since = IDLE, float(self._clock())
+            self._drop_guard()
+
+    def _drop_guard(self) -> None:
+        """Release the armed guard's backends (caller holds the lock)."""
+        guard, self._guard = self._guard, None
+        if guard is not None:
+            with suppress(Exception):
+                guard.close()
 
     def _transition(self, transport: object, status: str, reason: Optional[str]) -> bool:
         """Move to ``status`` iff ``transport`` holds the claim (caller holds the lock)."""
