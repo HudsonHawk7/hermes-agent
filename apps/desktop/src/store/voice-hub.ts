@@ -4,14 +4,14 @@
  * Source of truth is `voice_hub.state` on the gateway — not a second mic path.
  * One-click stop goes through `wake.stop` so the Hub lease is released.
  */
-import { atom } from 'nanostores'
-
 import type {
   VoiceHubStateParams,
   VoiceHubStateResult,
   WakeStopParams,
   WakeStopResult
 } from '@hermes/shared/gateway-contract.generated'
+import { atom } from 'nanostores'
+
 import { $gateway } from '@/store/gateway'
 
 export type VoiceHubRequester = (
@@ -52,7 +52,10 @@ export function resetVoiceHubState(): void {
 }
 
 export function applyVoiceHubState(result: VoiceHubStateResult | null | undefined): void {
-  if (!result) return
+  if (!result) {
+    return
+  }
+
   const status = normalizeStatus(result.status)
   $voiceHub.set({
     fetchedAt: Date.now(),
@@ -64,13 +67,20 @@ export function applyVoiceHubState(result: VoiceHubStateResult | null | undefine
 }
 
 function normalizeStatus(raw: string | null | undefined): VoiceHubStatus {
-  if (raw === 'armed' || raw === 'stopped' || raw === 'idle') return raw
+  if (raw === 'armed' || raw === 'stopped' || raw === 'idle') {
+    return raw
+  }
+
   return 'idle'
 }
 
 const gatewayRequester: VoiceHubRequester = (method, params = {}) => {
   const gw = $gateway.get()
-  if (!gw) return Promise.reject(new Error('gateway not connected'))
+
+  if (!gw) {
+    return Promise.reject(new Error('gateway not connected'))
+  }
+
   return gw.request(method, params)
 }
 
@@ -78,8 +88,12 @@ const gatewayRequester: VoiceHubRequester = (method, params = {}) => {
 export async function refreshVoiceHub(
   request: VoiceHubRequester = gatewayRequester
 ): Promise<VoiceHubSnapshot> {
-  if (pollInFlight) return $voiceHub.get()
+  if (pollInFlight) {
+    return $voiceHub.get()
+  }
+
   pollInFlight = true
+
   try {
     const result = (await request('voice_hub.state', {} satisfies VoiceHubStateParams)) as VoiceHubStateResult
     applyVoiceHubState(result)
@@ -88,6 +102,7 @@ export async function refreshVoiceHub(
   } finally {
     pollInFlight = false
   }
+
   return $voiceHub.get()
 }
 
@@ -96,7 +111,10 @@ export async function refreshVoiceHub(
  * Idempotent. Call when the gateway is open; stop when it closes.
  */
 export function startVoiceHubPolling(request: VoiceHubRequester = gatewayRequester): void {
-  if (pollTimer != null) return
+  if (pollTimer != null) {
+    return
+  }
+
   void refreshVoiceHub(request)
   pollTimer = setInterval(() => {
     void refreshVoiceHub(request)
@@ -108,6 +126,7 @@ export function stopVoiceHubPolling(): void {
     clearInterval(pollTimer)
     pollTimer = null
   }
+
   pollInFlight = false
 }
 
@@ -122,10 +141,13 @@ export async function stopVoiceHubListening(
   const reason = opts.reason ?? 'user_stop'
   const persist = opts.persist ?? reason === 'user_stop'
   $voiceHub.set({ ...$voiceHub.get(), pending: true })
+
   try {
     const params: WakeStopParams = { persist, reason }
     const result = (await request('wake.stop', params as Record<string, unknown>)) as WakeStopResult
-    // Optimistic local mirror so the light drops within the same tick; poll confirms.
+
+    // Optimistic local mirror so the light drops within the same tick; then await
+    // hub state so callers/tests settle on server truth (release → stopped, not idle).
     if (result?.stopped !== false) {
       $voiceHub.set({
         fetchedAt: Date.now(),
@@ -137,7 +159,8 @@ export async function stopVoiceHubListening(
     } else {
       $voiceHub.set({ ...$voiceHub.get(), pending: false })
     }
-    void refreshVoiceHub(request)
+
+    await refreshVoiceHub(request)
   } catch (err) {
     $voiceHub.set({
       ...$voiceHub.get(),
@@ -161,8 +184,15 @@ export function isVoiceHubListening(snap: VoiceHubSnapshot = $voiceHub.get()): b
 const FAILURE_REASONS = new Set(['start_failed', 'capture_failed', 'reclaimed', 'stop_failed'])
 
 export function isVoiceHubFailure(snap: VoiceHubSnapshot = $voiceHub.get()): boolean {
-  if (snap.status === 'armed') return false
+  if (snap.status === 'armed') {
+    return false
+  }
+
   const reason = snap.stopReason
-  if (!reason) return false
+
+  if (!reason) {
+    return false
+  }
+
   return FAILURE_REASONS.has(reason)
 }

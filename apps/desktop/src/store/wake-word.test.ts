@@ -194,17 +194,22 @@ describe('armWakeWord (gateway-ready auto-arm)', () => {
   })
 
   it('skips arming when this surface already listens (status sync only)', async () => {
+    // VH8: already-listening also refreshes voice_hub so the header light paints.
     const calls: string[] = []
 
     const request = requester(method => {
       calls.push(method)
+
+      if (method === 'voice_hub.state') {
+        return { status: 'armed', owner_surface: 'gui', stop_reason: null }
+      }
 
       return { available: true, listening: true, owned_by_caller: true, phrase: 'hey hermes' }
     })
 
     await armWakeWord(request)
 
-    expect(calls).toEqual(['wake.status'])
+    expect(calls).toEqual(['wake.status', 'voice_hub.state'])
     expect($wakeWord.get()).toMatchObject({ available: true, listening: true })
   })
 

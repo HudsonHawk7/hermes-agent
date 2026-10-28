@@ -51,8 +51,10 @@ describe('refreshVoiceHub', () => {
   it('pulls voice_hub.state and applies the snapshot', async () => {
     const request = requester(method => {
       expect(method).toBe('voice_hub.state')
+
       return { status: 'armed', owner_surface: 'gui', stop_reason: null }
     })
+
     await refreshVoiceHub(request)
     expect($voiceHub.get()).toMatchObject({ status: 'armed', ownerSurface: 'gui' })
     expect(request).toHaveBeenCalledWith('voice_hub.state', {})
@@ -61,12 +63,19 @@ describe('refreshVoiceHub', () => {
 
 describe('stopVoiceHubListening', () => {
   it('stops through wake.stop with user_stop + persist (Hub lease path)', async () => {
+    // Hub full release publishes status=stopped (idle is pause-while-claim-kept).
+    // Matches tui_gateway/voice_hub.release + test_owner_stop_sets_user_stop_and_closes_device.
     applyVoiceHubState({ status: 'armed', owner_surface: 'gui', stop_reason: null })
+
     const request = requester(method => {
-      if (method === 'wake.stop') return { stopped: true, disabled_persisted: true, reason: null }
-      if (method === 'voice_hub.state') {
-        return { status: 'idle', owner_surface: null, stop_reason: 'user_stop' }
+      if (method === 'wake.stop') {
+        return { stopped: true, disabled_persisted: true, reason: null }
       }
+
+      if (method === 'voice_hub.state') {
+        return { status: 'stopped', owner_surface: null, stop_reason: 'user_stop' }
+      }
+
       throw new Error(`unexpected ${method}`)
     })
 
@@ -82,11 +91,16 @@ describe('stopVoiceHubListening', () => {
 
   it('records capture_failed without persisting disabled by default when reason is failure', async () => {
     applyVoiceHubState({ status: 'armed', owner_surface: 'gui', stop_reason: null })
+
     const request = requester(method => {
-      if (method === 'wake.stop') return { stopped: true, disabled_persisted: false, reason: null }
+      if (method === 'wake.stop') {
+        return { stopped: true, disabled_persisted: false, reason: null }
+      }
+
       if (method === 'voice_hub.state') {
         return { status: 'stopped', owner_surface: null, stop_reason: 'capture_failed' }
       }
+
       throw new Error(`unexpected ${method}`)
     })
 
