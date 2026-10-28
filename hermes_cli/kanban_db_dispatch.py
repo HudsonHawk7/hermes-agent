@@ -1571,7 +1571,10 @@ def check_respawn_guard(
     a re-queue event arrived after it — a deliberate re-run) and ``"active_pr"``
     (PR URL in a recent comment BY THE CARD'S OWN WORKER; re-spawning risks a
     duplicate PR — unless a handoff event followed the comment: the named
-    profile must work on that PR). The review lane skips the last two: they are
+    profile must work on that PR, or a DELIBERATE re-queue followed it — a
+    dependency hand-back or an unblock, i.e. someone asked for the card to run
+    again. An automatic re-queue (crash, reclaim, timeout) still guards). The
+    review lane skips the last two: they are
     the *inputs* to a review handoff. Stale / dead claim locks are NOT a guard reason — the reclaim
     passes own those.
     """
@@ -1653,6 +1656,10 @@ def check_respawn_guard(
     #    Exception 2: a dependency hand-back AFTER the newest own PR comment — the
     #    worker named a PR and then parked the card on ANOTHER card's unfinished
     #    work. See the ``dependency_wait`` block below.
+    #    Exception 3: a DELIBERATE re-queue AFTER the newest own PR comment (an
+    #    unblock of a needs_input/transient/capability block) — someone asked for
+    #    this card to run again, so the guard must not swallow it. See the
+    #    ``unblocked`` block below.
     own_pr_times = [t for t, c in _rows_since(
                         conn, "task_comments", task_id, now - _RESPAWN_GUARD_PR_WINDOW,
                         cols=", body, author, created_at AS raw_created_at",
@@ -1679,6 +1686,24 @@ def check_respawn_guard(
         if any(_rows_since(
                 conn, "task_events", task_id, newest_own,
                 "AND kind = 'dependency_wait'", strict=True)):
+            return None
+        # Exception 3 — a DELIBERATE re-queue after the newest own PR comment.
+        # ``unblocked`` is written only by an unblock (``hermes kanban unblock``,
+        # the dashboard, an agent's ``kanban_unblock`` tool), never by the
+        # dispatcher's retry path — that writes ``reclaimed``/failure evidence —
+        # so it is someone saying "run this card again". Without this, a worker
+        # that asked for a decision (``needs_input``), reported a capability
+        # stop or a transient failure AFTER naming a PR came back from the
+        # unblock still guarded, and the answer the human unblocked it with
+        # reached no worker for the whole window (measured: ``blocked`` ->
+        # ``ready`` + ``active_pr`` on needs_input/transient/capability). The
+        # block KIND is not the discriminator — the same shape appears one kind
+        # over — and an automatic re-queue (crash/reclaim/timeout) is not in
+        # this set: re-spawning the worker that already opened the PR is the
+        # duplicate risk the guard exists for (#111910).
+        if any(_rows_since(
+                conn, "task_events", task_id, newest_own,
+                "AND kind = 'unblocked'", strict=True)):
             return None
         return "active_pr"
 
