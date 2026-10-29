@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { $voiceHub, applyVoiceHubState, resetVoiceHubState } from './voice-hub'
 import {
   $wakeWord,
   applyWakeStartResult,
@@ -19,6 +20,7 @@ const requester = (impl: (method: string, params?: Record<string, unknown>) => u
 
 beforeEach(() => {
   resetWakeWordState()
+  resetVoiceHubState()
 })
 
 describe('applyWakeStatus', () => {
@@ -39,6 +41,31 @@ describe('applyWakeStatus', () => {
       notice: '',
       phrase: 'hey hermes'
     })
+  })
+
+  it('VH8 F1: arms $voiceHub when wake.status says listening so ListeningLight paints', () => {
+    // Repro of LIVE FAIL: body LISTENING alone left $voiceHub idle and light null.
+    applyWakeStatus({
+      available: true,
+      listening: true,
+      owned_by_caller: true,
+      owner_surface: 'gui',
+      phrase: 'hey hermes'
+    })
+
+    expect($voiceHub.get()).toMatchObject({
+      status: 'armed',
+      ownerSurface: 'gui',
+      stopReason: null
+    })
+  })
+
+  it('does not invent a hub stop when wake.status is not listening', () => {
+    applyVoiceHubState({ status: 'armed', owner_surface: 'gui', stop_reason: null })
+    applyWakeStatus({ available: true, listening: false, phrase: 'hey hermes' })
+
+    // Poll/stop paths own idle/stopped; status-only must not clobber mid-turn pause.
+    expect($voiceHub.get().status).toBe('armed')
   })
 
   it('tracks unavailability and carries the hint for the tooltip', () => {
@@ -62,6 +89,7 @@ describe('applyWakeStatus', () => {
     const state = $wakeWord.get()
     expect(state.listening).toBe(true)
     expect(state.notice).toBe('Microphone delivers only silence — grant mic access')
+    expect($voiceHub.get().status).toBe('armed')
   })
 })
 
@@ -257,6 +285,21 @@ describe('applyWakeStartResult', () => {
 
     expect($wakeWord.get()).toMatchObject({ available: true, listening: true, phrase: 'computer' })
   })
+
+  it('VH8 F1: arms $voiceHub on started so ListeningLight can paint', () => {
+    applyWakeStartResult({
+      phrase: 'hey hermes',
+      provider: 'porcupine',
+      started: true,
+      owner_surface: 'gui'
+    })
+
+    expect($voiceHub.get()).toMatchObject({
+      status: 'armed',
+      ownerSurface: 'gui',
+      stopReason: null
+    })
+  })
 })
 
 describe('resumeWakeAfterVoice (post-voice reconcile)', () => {
@@ -315,13 +358,19 @@ describe('resumeWakeAfterVoice (post-voice reconcile)', () => {
         return { resumed: true }
       }
 
+      if (method === 'voice_hub.state') {
+        return { status: 'armed', owner_surface: 'gui', stop_reason: null }
+      }
+
       return { available: true, enabled: true, listening: true, owned_by_caller: true }
     })
 
     await resumeWakeAfterVoice(request)
 
-    expect(calls).toEqual(['wake.resume', 'wake.status'])
+    // VH8: after resume leaves listening, refreshVoiceHub locks $voiceHub armed.
+    expect(calls).toEqual(['wake.resume', 'wake.status', 'voice_hub.state'])
     expect($wakeWord.get()).toMatchObject({ listening: true })
+    expect($voiceHub.get().status).toBe('armed')
   })
 
   it('leaves the listener off when config says disabled', async () => {

@@ -56,7 +56,11 @@ import { $transcriptTailBySessionId, transcriptTailState } from '@/store/transcr
 import { isAuxiliaryWindow, isMainWindow } from '@/store/windows'
 
 import { primaryRouteSelectedSessionId, routeSessionId } from '../routes'
-import { titlebarHeaderBaseClass, titlebarHeaderShadowClass, titlebarHeaderTitleClass } from '../shell/titlebar'
+import {
+  TITLEBAR_HEIGHT,
+  titlebarHeaderShadowClass,
+  titlebarHeaderTitleClass
+} from '../shell/titlebar'
 
 import { ChatDropOverlay } from './chat-drop-overlay'
 import { dropOverlayKind, useShowChatBar } from './chat-surface-state'
@@ -173,10 +177,21 @@ function ChatHeader({
     return null
   }
 
+  // VH8 F2: pin a real header height. Content shell zeroes --titlebar-height and
+  // the tree hides `header[class*="h-(--titlebar-height)"]` entirely — so a
+  // header sized to that var collapses/disappears and ListeningLight never paints.
+  // Do NOT put the literal `h-(--titlebar-height)` token in className.
   return (
-    <header className={cn(titlebarHeaderBaseClass, isRoutedSessionView && titlebarHeaderShadowClass)}>
+    <header
+      className={cn(
+        'pointer-events-none relative z-3 flex w-full min-w-0 shrink-0 items-center justify-start gap-3 overflow-hidden border-b border-(--ui-stroke-tertiary) bg-(--ui-chat-surface-background) px-[max(0.75rem,var(--titlebar-content-inset,0rem))] pr-[calc(var(--titlebar-tools-right,0.75rem)+var(--titlebar-tools-width,0px)+0.75rem)]',
+        isRoutedSessionView && titlebarHeaderShadowClass
+      )}
+      data-testid="chat-header"
+      style={{ height: TITLEBAR_HEIGHT, minHeight: TITLEBAR_HEIGHT }}
+    >
       <div
-        className={cn(titlebarHeaderTitleClass, showProfileTag && 'flex items-center')}
+        className={cn(titlebarHeaderTitleClass, 'flex items-center', showProfileTag && 'flex items-center')}
         style={{
           maxWidth:
             'calc(100vw - var(--titlebar-content-inset,0px) - var(--titlebar-tools-right) - var(--titlebar-tools-width) - 1.5rem)'

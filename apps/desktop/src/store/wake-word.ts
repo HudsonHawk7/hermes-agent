@@ -209,6 +209,18 @@ export function applyWakeStatus(status: WakeStatusResponse | null | undefined): 
     notice: listening && !silent ? '' : noticeFrom(status),
     phrase: status?.phrase?.trim() || current.phrase
   })
+
+  // VH8 F1: body LISTENING must keep $voiceHub armed so ListeningLight paints.
+  // /wake on ends with wake.status → applyWakeStatus only; without this the light
+  // stays null when the ear is live but the hub store never got (or lost) armed.
+  // Failures stay on the start/stop/capture paths — status does not invent them.
+  if (listening) {
+    applyVoiceHubState({
+      status: 'armed',
+      owner_surface: status?.owner_surface ?? 'gui',
+      stop_reason: null
+    })
+  }
 }
 
 /** Sync the atom from a `wake.start` response. A `{started:false, reason}`
@@ -231,6 +243,8 @@ export function applyWakeStartResult(result: WakeStartResponse | null | undefine
       owner_surface: result.owner_surface ?? 'gui',
       stop_reason: null
     })
+    // Confirm server hub truth within the same arm tick (AC1 ≤1s on/off).
+    void refreshVoiceHub()
     void maybeStartClientCapture(result)
 
     return
@@ -410,6 +424,8 @@ export async function resumeWakeAfterVoice(request: WakeRequester = gatewayReque
       if (status.listening) {
         // Server lease is still armed (e.g. wake.resume after voice).
         // Client PCM was stopped on wake.detected — reattach if needed.
+        // applyWakeStatus above already armed $voiceHub for VH8; refresh locks it.
+        void refreshVoiceHub(request)
         const mode = (status.capture || '').toLowerCase()
 
         if (mode === 'client' || mode === 'remote' || mode === 'external') {
