@@ -4,14 +4,77 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
+def materialize_desktop_half(*, hermes_home: str | None = None) -> str | None:
+    """Copy this package's desktop/ half into ``$HERMES_HOME/plugins/work_watch/``.
+
+    Desktop only loads unified halves from HERMES_HOME (and profile) plugins
+    (Probe defect 3 / AC-P6). The repo ``plugins/work_watch/desktop`` path alone
+    is not scanned by ``reconcileUnifiedDesktopHalves``.
+    """
+    import os
+
+    home = hermes_home or os.environ.get("HERMES_HOME") or ""
+    if not home:
+        try:
+            from hermes_cli.config import get_hermes_home
+
+            home = str(get_hermes_home())
+        except Exception:
+            return None
+    if not home:
+        return None
+
+    src_root = Path(__file__).resolve().parent
+    src_desktop = src_root / "desktop"
+    entry = src_desktop / "plugin.js"
+    if not entry.is_file():
+        return None
+
+    dest_root = Path(home) / "plugins" / "work_watch"
+    dest_desktop = dest_root / "desktop"
+    try:
+        dest_desktop.mkdir(parents=True, exist_ok=True)
+        # Copy whole desktop tree so assets beside plugin.js travel too.
+        for path in src_desktop.rglob("*"):
+            if path.is_dir():
+                continue
+            rel = path.relative_to(src_desktop)
+            target = dest_desktop / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
+        # Minimal package marker so installers recognize a plugin dir.
+        for name in ("plugin.yaml", "README.md"):
+            src = src_root / name
+            if src.is_file():
+                shutil.copy2(src, dest_root / name)
+        return str(dest_desktop / "plugin.js")
+    except Exception as exc:
+        logger.warning("work_watch desktop materialize failed: %s", type(exc).__name__)
+        return None
+
+
 def register(ctx) -> None:
-    """Register tools + slash command. Dashboard API loads via dashboard/manifest."""
+    """Register tools + slash command + poll scheduler. Dashboard API via dashboard/manifest."""
     from plugins.work_watch import service
     from plugins.work_watch.constants import PLUGIN_LABEL, REFRESH_TOKEN_ENV
+
+    # Desktop half → HERMES_HOME so Settings / Work watch appear after reload.
+    try:
+        materialize_desktop_half()
+    except Exception as exc:
+        logger.debug("desktop materialize skipped: %s", type(exc).__name__)
+
+    # Background poll + digest (AC-P4 / AC-P5) — spawn_context_thread inside.
+    try:
+        service.start_poll_scheduler()
+    except Exception as exc:
+        logger.warning("work_watch poll scheduler not started: %s", type(exc).__name__)
 
     def _status_tool(args=None, **kwargs):
         snap = service.settings_snapshot()
@@ -24,7 +87,14 @@ def register(ctx) -> None:
     def _revoke_tool(args=None, **kwargs):
         from plugins.work_watch import auth
 
-        return json.dumps(auth.revoke(), indent=2)
+        service.stop_poll_scheduler()
+        out = auth.revoke()
+        # Restart scheduler so Off state still ticks (zero Graph when unsigned).
+        try:
+            service.start_poll_scheduler()
+        except Exception:
+            pass
+        return json.dumps(out, indent=2)
 
     def _flags_tool(args=None, **kwargs):
         from plugins.work_watch import store

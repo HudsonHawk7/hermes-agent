@@ -410,6 +410,7 @@ export default {
     const unbind = bindRest(ctx.rest)
     ctx.onDispose?.(unbind)
 
+    // Settings page title stays human; sidebar SDK wants label + codicon (Probe defect 3).
     ctx.registerSettingsPage?.({
       id: 'settings',
       title: 'Work mail + Teams',
@@ -424,7 +425,7 @@ export default {
       order: 40,
       data: {
         path: '/work-watch',
-        title: 'Work watch',
+        label: 'Work watch',
         render: () => jsx(WorkWatchPage, {})
       }
     })
@@ -435,9 +436,9 @@ export default {
       order: 42,
       data: {
         id: 'work-watch',
-        title: 'Work watch',
-        icon: 'mail',
-        path: '/work-watch'
+        path: '/work-watch',
+        label: 'Work watch',
+        codicon: 'mail'
       }
     })
   }

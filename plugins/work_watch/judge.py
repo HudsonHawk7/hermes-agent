@@ -2,13 +2,16 @@
 
 Cloud model is a separate switch (default off). Message content never leaves
 the machine through this module's public board-facing outputs.
+
+Ambiguous middle uses an optional local-model hook (AC-P7) — one call per
+candidate, capped per pass — never a hosted model unless cloud_enabled.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from plugins.work_watch.constants import TIER_1, TIER_2, TIER_3
 
@@ -49,6 +52,11 @@ _TIER2 = re.compile(
     re.IGNORECASE,
 )
 
+# Local-model middle hook (test seam + optional runtime). Returns Judgment or None.
+_local_model_fn: Optional[Callable[[dict[str, Any]], Optional[Judgment]]] = None
+_local_model_calls_this_pass = 0
+_LOCAL_MODEL_CAP = 5  # one model call per candidate, capped per pass (AC-P7)
+
 
 @dataclass(frozen=True)
 class Judgment:
@@ -56,6 +64,22 @@ class Judgment:
     why: str
     rule: str  # which rule fired
     dropped: bool = False
+
+
+def set_local_model_fn(fn: Optional[Callable[[dict[str, Any]], Optional[Judgment]]]) -> None:
+    """Install/clear the local-model middle hook (AC-P7). Never a cloud default."""
+    global _local_model_fn, _local_model_calls_this_pass
+    _local_model_fn = fn
+    _local_model_calls_this_pass = 0
+
+
+def reset_local_model_budget() -> None:
+    global _local_model_calls_this_pass
+    _local_model_calls_this_pass = 0
+
+
+def local_model_calls() -> int:
+    return _local_model_calls_this_pass
 
 
 def _blob(candidate: dict[str, Any]) -> str:
@@ -68,11 +92,37 @@ def _blob(candidate: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def _try_local_model(candidate: dict[str, Any]) -> Optional[Judgment]:
+    """Ambiguous middle → local model only (AC-P7). Capped; content stays local."""
+    global _local_model_calls_this_pass
+    if _local_model_fn is None:
+        return None
+    if _local_model_calls_this_pass >= _LOCAL_MODEL_CAP:
+        return Judgment(
+            tier=TIER_2,
+            why="ambiguous_local_cap",
+            rule="local_model_cap",
+            dropped=False,
+        )
+    _local_model_calls_this_pass += 1
+    try:
+        out = _local_model_fn(candidate)
+    except Exception:
+        return Judgment(tier=TIER_2, why="ambiguous_local_error", rule="local_model_error")
+    if out is None:
+        return None
+    if not isinstance(out, Judgment):
+        return Judgment(tier=TIER_2, why="ambiguous_local_bad_shape", rule="local_model")
+    if not out.why:
+        return Judgment(tier=out.tier, why="local_model_no_why", rule=out.rule or "local_model", dropped=out.dropped)
+    return out
+
+
 def classify(candidate: dict[str, Any], *, cloud_enabled: bool = False) -> Judgment:
-    """Classify one mail/chat candidate. Rules first; no cloud by default.
+    """Classify one mail/chat candidate. Rules first; local model for middle; cloud off.
 
     ``cloud_enabled`` is accepted for the explicit switch path but Path A default
-    keeps it off — ambiguous middle stays Tier-2 digest rather than calling out.
+    keeps it off. Ambiguous middle prefers the local-model hook when set (AC-P7).
     """
     subject = str(candidate.get("subject") or "")
     sender = str(candidate.get("sender") or "")
@@ -97,8 +147,11 @@ def classify(candidate: dict[str, Any], *, cloud_enabled: bool = False) -> Judgm
         snippet = (m.group(0) if m else "fyi").strip()
         return Judgment(tier=TIER_2, why=f"digest:{snippet.lower()[:40]}", rule="tier2_rules")
 
-    # Ambiguous middle: local default = Tier-2 quiet digest tag, not cloud.
-    # A future local-model hook can replace this without changing the contract.
+    # Ambiguous middle: local model first (AC-P7).
+    local = _try_local_model(candidate)
+    if local is not None:
+        return local
+
     if cloud_enabled:
         # Explicit switch only — still no content export from here; caller owns model I/O.
         return Judgment(tier=TIER_2, why="ambiguous_cloud_pending", rule="cloud_switch")
