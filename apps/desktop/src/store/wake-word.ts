@@ -243,8 +243,9 @@ export function applyWakeStartResult(result: WakeStartResponse | null | undefine
       owner_surface: result.owner_surface ?? 'gui',
       stop_reason: null
     })
-    // Confirm server hub truth within the same arm tick (AC1 ≤1s on/off).
-    void refreshVoiceHub()
+    // Do NOT fire-and-forget refreshVoiceHub here: a race that lands idle before
+    // the gateway heal/arm settles used to wipe this arm and blank the light.
+    // Polling (wiring) + wake.listening in ListeningLight keep AC1 honest.
     void maybeStartClientCapture(result)
 
     return

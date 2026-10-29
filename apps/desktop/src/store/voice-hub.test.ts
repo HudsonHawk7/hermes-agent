@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   $voiceHub,
   applyVoiceHubState,
+  isListeningLightActive,
   isVoiceHubFailure,
   isVoiceHubListening,
   refreshVoiceHub,
@@ -58,6 +59,25 @@ describe('refreshVoiceHub', () => {
     await refreshVoiceHub(request)
     expect($voiceHub.get()).toMatchObject({ status: 'armed', ownerSurface: 'gui' })
     expect(request).toHaveBeenCalledWith('voice_hub.state', {})
+  })
+})
+
+describe('isListeningLightActive', () => {
+  it('stays on when wake is listening even if hub poll returned idle', () => {
+    applyVoiceHubState({ status: 'idle', owner_surface: null, stop_reason: null })
+    expect(isListeningLightActive($voiceHub.get(), true)).toBe(true)
+    expect(isListeningLightActive($voiceHub.get(), false)).toBe(false)
+  })
+
+  it('stays on when hub is armed regardless of wake flag', () => {
+    applyVoiceHubState({ status: 'armed', owner_surface: 'gui', stop_reason: null })
+    expect(isListeningLightActive($voiceHub.get(), false)).toBe(true)
+  })
+
+  it('does not claim listening for capture_failed when wake is off', () => {
+    applyVoiceHubState({ status: 'stopped', owner_surface: null, stop_reason: 'capture_failed' })
+    expect(isListeningLightActive($voiceHub.get(), false)).toBe(false)
+    expect(isVoiceHubFailure()).toBe(true)
   })
 })
 

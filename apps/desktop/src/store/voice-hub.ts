@@ -171,7 +171,7 @@ export async function stopVoiceHubListening(
   }
 }
 
-/** True when the light should show the active listening glow. */
+/** True when the hub lease alone says the mic is armed. */
 export function isVoiceHubListening(snap: VoiceHubSnapshot = $voiceHub.get()): boolean {
   return snap.status === 'armed'
 }
@@ -195,4 +195,19 @@ export function isVoiceHubFailure(snap: VoiceHubSnapshot = $voiceHub.get()): boo
   }
 
   return FAILURE_REASONS.has(reason)
+}
+
+/**
+ * VH8 light contract: hub armed OR detector listening (wake store).
+ * An idle voice_hub.state poll must not blank the pill while wake is LISTENING.
+ */
+export function isListeningLightActive(
+  snap: VoiceHubSnapshot = $voiceHub.get(),
+  wakeListening = false
+): boolean {
+  if (isVoiceHubFailure(snap) && !wakeListening) {
+    return false
+  }
+
+  return snap.status === 'armed' || wakeListening
 }

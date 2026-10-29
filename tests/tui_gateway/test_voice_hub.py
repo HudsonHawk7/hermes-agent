@@ -395,3 +395,50 @@ def test_unknown_stop_reason_falls_back_to_user_stop(mic):
     )
     assert stop["result"]["stopped"] is True, stop
     assert _state()["stop_reason"] == "user_stop"
+
+
+def test_voice_hub_state_heals_idle_while_detector_listening(mic):
+    """VH8 F1: bare idle drift while the detector runs must publish armed on poll.
+
+    Client polls voice_hub.state every 500ms; if the hub snapshot drifted to idle
+    without an intentional pause/detect handoff, the light would blank while
+    wake.status still says LISTENING. Heal re-arms on the same claim.
+    """
+    transport = _transport()
+    assert _rpc(_wake_start("gui"), transport=transport)["result"]["started"] is True
+    assert _state()["status"] == "armed"
+    assert wake_word.is_listening() is True
+
+    # Simulate drift: claim kept, detector still running, status bare idle.
+    hub = voice_hub.hub()
+    with hub._lock:
+        hub._status = voice_hub.IDLE
+        hub._stop_reason = None
+    assert hub.state()["status"] == "idle"
+
+    healed = _state()
+    assert healed["status"] == "armed", healed
+    assert healed["owner_surface"] == "gui"
+    assert healed["stop_reason"] is None
+    assert wake_word.is_listening() is True
+
+
+def test_voice_hub_state_does_not_heal_intentional_pause(mic, monkeypatch):
+    """Paused for a voice turn stays idle — light must follow the mic handoff."""
+    from hermes_cli import voice
+
+    monkeypatch.setattr(voice, "start_continuous", lambda **kw: True)
+    monkeypatch.setattr(voice, "stop_continuous", lambda **kw: None)
+    monkeypatch.setattr(server, "_session_voice_enabled", lambda session_id: True)
+
+    transport = _transport()
+    assert _rpc(_wake_start("tui"), transport=transport)["result"]["started"] is True
+    recorded = _rpc(
+        {"id": "rec-start", "method": "voice.record",
+         "params": {"action": "start", "session_id": "sid-heal"}},
+        transport=transport,
+    )
+    assert recorded["result"]["status"] == "recording", recorded
+    during = _state()
+    assert during["status"] == "idle"
+    assert during["stop_reason"] == "paused"

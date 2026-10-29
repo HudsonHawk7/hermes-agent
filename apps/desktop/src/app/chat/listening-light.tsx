@@ -12,8 +12,8 @@ import { Tip } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 import {
   $voiceHub,
+  isListeningLightActive,
   isVoiceHubFailure,
-  isVoiceHubListening,
   stopVoiceHubListening
 } from '@/store/voice-hub'
 import { $wakeWord, stopClientCapture } from '@/store/wake-word'
@@ -49,8 +49,13 @@ function reasonLabel(reason: string | null): string {
 
 export function ListeningLight({ className }: { className?: string }) {
   const hub = useStore($voiceHub)
-  const listening = isVoiceHubListening(hub)
-  const failed = isVoiceHubFailure(hub)
+  const wake = useStore($wakeWord)
+  // VH8 F1: hub.armed is the lease path; wake.listening is the detector path.
+  // A 500 ms voice_hub.state of idle must not blank the light while the ear is live
+  // (applyWakeStatus / start arm can race the poll). Failures still win when the
+  // ear is off so capture_failed stays honest.
+  const listening = isListeningLightActive(hub, wake.listening)
+  const failed = isVoiceHubFailure(hub) && !wake.listening
 
   if (!listening && !failed) {
     return null

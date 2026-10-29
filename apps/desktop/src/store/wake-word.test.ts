@@ -60,6 +60,32 @@ describe('applyWakeStatus', () => {
     })
   })
 
+  it('VH8 F1: idle voice_hub.state after listening status still keeps light active', async () => {
+    // Probe R1: prior arm was wiped by poll/refresh returning idle; light must
+    // stay on via wake.listening even when hub snapshot is idle.
+    const { isListeningLightActive, refreshVoiceHub } = await import('./voice-hub')
+
+    applyWakeStatus({
+      available: true,
+      listening: true,
+      owned_by_caller: true,
+      owner_surface: 'gui',
+      phrase: 'hey hermes'
+    })
+    expect(isListeningLightActive($voiceHub.get(), $wakeWord.get().listening)).toBe(true)
+
+    const request = requester(method => {
+      expect(method).toBe('voice_hub.state')
+
+      return { status: 'idle', owner_surface: null, stop_reason: null }
+    })
+
+    await refreshVoiceHub(request)
+    expect($voiceHub.get().status).toBe('idle')
+    expect($wakeWord.get().listening).toBe(true)
+    expect(isListeningLightActive($voiceHub.get(), $wakeWord.get().listening)).toBe(true)
+  })
+
   it('does not invent a hub stop when wake.status is not listening', () => {
     applyVoiceHubState({ status: 'armed', owner_surface: 'gui', stop_reason: null })
     applyWakeStatus({ available: true, listening: false, phrase: 'hey hermes' })

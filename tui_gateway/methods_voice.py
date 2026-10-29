@@ -713,8 +713,30 @@ def _(rid, params: dict) -> dict:
 @method("voice_hub.state")
 def _(rid, params: dict) -> dict:
     """The listening light's only input — the Hub's four fields (VH1 AC4). No session, no probe:
-    it answers from memory, so a client can poll it while every agent is mid-turn."""
-    return _ok(rid, _wake_hub().state())
+    it answers from memory, so a client can poll it while every agent is mid-turn.
+
+    VH8 heal: while the detector is actually running under our claim, publish ``armed``.
+    A bare ``idle`` drift (no intentional pause/detect handoff) must not blank the light
+    on the client's 500 ms poll while ``wake.status`` still says LISTENING.
+    """
+    hub = _wake_hub()
+    try:
+        from tools.wake_word import is_listening, owns_listener
+
+        owner, surface = hub.snapshot()
+        st = hub.state()
+        intentional_quiet = st.get("stop_reason") in ("paused", "detected")
+        if (
+            owner is not None
+            and is_listening()
+            and owns_listener(owner)
+            and st.get("status") != "armed"
+            and not intentional_quiet
+        ):
+            hub.armed(surface or "auto", owner)
+    except Exception:
+        pass
+    return _ok(rid, hub.state())
 
 
 @method("wake.feed")
