@@ -1,0 +1,9 @@
+name: work_watch
+label: Work watch
+description: >
+  Path A read-only work mail + Teams watcher. Public-client device-code sign-in,
+  refresh token via profile .env, 10-minute delta polling, rules-first local judge,
+  delivery on the Work watch page (not Needs you).
+version: 0.1.0
+provides_tools: true
+# Force local carry (force/carry). Not proposed upstream as a third-party product plugin yet.
