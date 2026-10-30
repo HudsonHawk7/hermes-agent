@@ -153,6 +153,14 @@ async function expectReady(page: Page, label: string): Promise<void> {
 async function switchTo(page: Page, label: string): Promise<void> {
   await gateway(page).click()
   await page.getByRole('menuitemradio', { name: new RegExp(label) }).click()
+  // Local/remote hops may ask "Switch to This device?" before the statusbar
+  // updates — confirm when the dialog is present so expectReady is not stuck.
+  const confirm = page.getByRole('dialog').getByRole('button', { name: 'Switch', exact: true })
+
+  if (await confirm.isVisible().catch(() => false)) {
+    await confirm.click()
+  }
+
   await expectReady(page, label)
 }
 
@@ -284,6 +292,11 @@ peerTest('Ctrl+Shift+N resumes a remote-only profile on its owning gateway', asy
   const peer = await opened
   installErrorBannerGuard(peer)
   await expectReady(peer, REMOTE_LABEL)
+  // Peer windows boot a fresh draft on the same profile (use-desktop-integrations);
+  // open the session that still lives on the remote so the resume path is covered.
+  const peerSession = peer.getByRole('button', { name: /Remember this remote profile session/ })
+  await expect(peerSession).toBeVisible({ timeout: 60_000 })
+  await peerSession.click()
   await expect(peer.locator('[data-slot="aui_assistant-message-content"]').getByText(MOCK_REPLY, { exact: true })).toBeVisible({ timeout: 60_000 })
   await expectReady(source, REMOTE_LABEL)
   await peer.reload()
