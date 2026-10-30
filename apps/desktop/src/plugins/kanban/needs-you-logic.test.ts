@@ -280,6 +280,7 @@ describe('foldRepeats', () => {
    */
   it('design fixture interleave: 12 darkeyes sweeps → 14 rows + one ×12 at newest', () => {
     const SWEEP = 'Sweep: card still waiting on the GM. No change since the last check.'
+
     // one trailing-space sweep (fixture 9:12) must still join the group
     const comments = sortCommentsNewestFirst([
       c(1, 'architect', 'Note: the structured ask already exists.', 9 * 60 + 24),
@@ -327,6 +328,7 @@ describe('foldRepeats', () => {
       count: 12,
       lastAt: 9 * 60 + 18
     })
+
     if (folds[0]?.kind === 'fold') {
       expect(folds[0].stamps).toHaveLength(12)
       expect(folds[0].stamps[0]?.created_at).toBe(9 * 60 + 18)
@@ -334,9 +336,11 @@ describe('foldRepeats', () => {
 
     // Fold sits where newest member sits: second row, after architect 9:24
     expect(folded[0]).toMatchObject({ kind: 'single' })
+
     if (folded[0]?.kind === 'single') {
       expect(folded[0].comment.author).toBe('architect')
     }
+
     expect(folded[1]).toMatchObject({ kind: 'fold', author: 'darkeyes', count: 12 })
     // 8:14 different-body darkeyes remains a single somewhere below
     const singles = folded.filter(r => r.kind === 'single')

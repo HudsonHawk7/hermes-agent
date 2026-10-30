@@ -211,6 +211,7 @@ export function foldRepeats(comments: readonly CommentLike[]): FoldedComment[] {
     const stamps = [...members].sort(
       (a, b) => b.created_at - a.created_at || String(b.id).localeCompare(String(a.id))
     )
+
     const newest = stamps[0]!
     // Display the newest member's text (trimmed); match key is separate.
     const body = newest.body.replace(/\s+/g, ' ').trim()
