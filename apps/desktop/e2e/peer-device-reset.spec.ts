@@ -8,6 +8,7 @@ import * as fs from 'node:fs'
 import * as net from 'node:net'
 import * as path from 'node:path'
 
+import { writeEnvFile, writeMockProviderConfig } from '../../../tests-js/scripts/mock-provider-config'
 import { MOCK_REPLY, startMockServer } from '../../../tests-js/scripts/mock-server'
 
 import {
@@ -16,7 +17,6 @@ import {
   launchDesktop,
   type Sandbox,
 } from './fixtures'
-import { writeEnvFile, writeMockProviderConfig } from '../../../tests-js/scripts/mock-provider-config'
 import { collectErrorBanners, type ElectronApplication, expect, installErrorBannerGuard, type Page, test } from './test'
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '../../..')
@@ -61,14 +61,32 @@ function isolatedEnv(sandbox: Sandbox): Record<string, string> {
     fs.mkdirSync(env[key], { recursive: true, mode: 0o700 })
   }
 
-  for (const key of ['HERMES_DESKTOP_USER_DATA_DIR', 'HERMES_DESKTOP_IGNORE_EXISTING', 'HERMES_DESKTOP_HERMES_ROOT', 'HERMES_DESKTOP_APP_NAME', 'HERMES_DESKTOP_SKIP_QUIT_CONFIRM']) {
-    env[key] = defaults[key]
+  for (const key of [
+    'HERMES_DESKTOP_USER_DATA_DIR',
+    'HERMES_DESKTOP_IGNORE_EXISTING',
+    'HERMES_DESKTOP_HERMES_ROOT',
+    'HERMES_DESKTOP_APP_NAME',
+    'HERMES_DESKTOP_SKIP_QUIT_CONFIRM',
+    'HERMES_DESKTOP_ISOLATED_BACKEND',
+    'HERMES_DESKTOP_E2E_HIDDEN',
+    'HERMES_DESKTOP_SKIP_PROTOCOL_REGISTRATION',
+  ]) {
+    if (defaults[key]) {
+      env[key] = defaults[key]
+    }
   }
+
+  const appDataDir = path.join(sandbox.root, 'appdata')
+  const localAppDataDir = path.join(sandbox.root, 'localappdata')
+  fs.mkdirSync(appDataDir, { recursive: true })
+  fs.mkdirSync(localAppDataDir, { recursive: true })
 
   return {
     ...env,
     HOME: sandbox.root,
     USERPROFILE: sandbox.root,
+    APPDATA: appDataDir,
+    LOCALAPPDATA: localAppDataDir,
     HERMES_HOME: sandbox.hermesHome,
     HERMES_DESKTOP_PYTHON: pythonBinary(),
     PYTHONPATH: REPO_ROOT,

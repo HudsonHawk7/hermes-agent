@@ -195,7 +195,17 @@ function canonicalProducerFrame(method: string, params: Record<string, unknown>)
 
   // The owner admits identified input only. An identityless producer (session tile, quick entry,
   // bot chats) is a fresh send on every call, which is what the legacy wire did with it.
-  if (method === 'prompt.submit' && !params.submission_id && !params.input_id) { return { ...params, submission_id: crypto.randomUUID() } }
+  if (method === 'prompt.submit') {
+    // Desktop's clarify card answers the whole tool batch at once (same as classic CLI /
+    // gateway_agent). Without this flag the turn runner falls back to one card per question.
+    const withBatch: Record<string, unknown> = { ...params, clarify_batch: true }
+
+    if (!withBatch.submission_id && !withBatch.input_id) {
+      return { ...withBatch, submission_id: crypto.randomUUID() }
+    }
+
+    return withBatch
+  }
 
   return method === 'bot_relay.deliver' ? canonicalBotDelivery(params) : params
 }
@@ -512,7 +522,7 @@ export class CanonicalDesktopProtocol {
 
     if (typeof params.cwd_explicit !== 'boolean') { delete params.cwd_explicit }
 
-    const allowed = new Set(['request_id', 'source', 'cwd', 'model', 'provider', 'toolsets', 'reasoning', 'profile', 'cols', 'title', 'hidden', 'follow_profile_config', 'service_tier', 'cwd_explicit'])
+    const allowed = new Set(['request_id', 'source', 'cwd', 'model', 'provider', 'toolsets', 'reasoning', 'profile', 'cols', 'title', 'hidden', 'follow_profile_config', 'room_plumbing', 'service_tier', 'cwd_explicit'])
     const unsupported = Object.keys(params).filter(key => !allowed.has(key))
 
     if (unsupported.length) { throw new Error(`Canonical gateway does not support explicit session options: ${unsupported.join(', ')}`) }
@@ -520,7 +530,7 @@ export class CanonicalDesktopProtocol {
     // RT-26: the picked profile always rides, `default` included: a socket launched as a named
     // profile (active-profile.json) reads an omitted profile as its own launch profile.
     const result = Object.fromEntries(Object.entries(params).filter(([key, value]) =>
-      ['request_id', 'cwd', 'model', 'provider', 'toolsets', 'reasoning', 'title', 'hidden', 'follow_profile_config', 'service_tier', 'cwd_explicit'].includes(key) || (key === 'profile' && typeof value === 'string' && value !== '')))
+      ['request_id', 'cwd', 'model', 'provider', 'toolsets', 'reasoning', 'title', 'hidden', 'follow_profile_config', 'room_plumbing', 'service_tier', 'cwd_explicit'].includes(key) || (key === 'profile' && typeof value === 'string' && value !== '')))
 
     const key = JSON.stringify(result)
     const requestId = params.request_id ?? this.creates.get(key) ?? crypto.randomUUID()

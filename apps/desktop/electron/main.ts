@@ -1,5 +1,14 @@
+// FIRST import: crash-exit handlers must register before link-metadata (or any
+// other module) evaluates app.getPath('userData'). See e2e-guard.ts.
+import './e2e-guard'
+
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process'
 
+import {
+  applyE2eHiddenWindowOptions,
+  installE2eHiddenWindowGuard,
+  isDesktopE2eHidden
+} from './e2e-hidden'
 import type { GatewayEndpoint } from './local-gateway'
 import { configurePythonGatewayTicketClient, createLocalGatewayDials, createStaleGatewayRestarter, ensureLocalGateway, gatewayOwnerProfile, localGatewayDial, nativeGatewayHttpHeaders, redialLocalGateway, runGatewayEnsure, runGatewayOwnerRestart } from './local-gateway'
 import { closeGatewayTicketBridges, createGatewayTicketResolver } from './local-gateway-python'
@@ -716,11 +725,35 @@ import { isPackagedInstallPath as isPackagedInstallPathUnderRoots } from './work
 import { readWslWindowsClipboardImage } from './wsl-clipboard-image'
 import { resolvePickerDefaultPath, setActiveGatewayProfile, setWslBridgeProfileState } from './wsl-path-bridge'
 
-const IDENTITY_APP_NAME: string | null = applyDesktopIdentity(app)
-const USER_DATA_OVERRIDE: string | undefined = process.env.HERMES_DESKTOP_USER_DATA_DIR
+// Sandbox/e2e may pin userData before any getPath. Calling getPath('userData')
+// first throws "Failed to get 'userData' path" when HOME/APPDATA are faked and
+// empty (Architect 10/29). Prefer the absolute override; never probe getPath
+// unless we actually need the default as a suffix base.
+const USER_DATA_OVERRIDE: string | undefined = (process.env.HERMES_DESKTOP_USER_DATA_DIR || '').trim() || undefined
 
-if (USER_DATA_OVERRIDE || process.env.HERMES_DATA_DIR_SUFFIX) {
-  const resolvedUserData: string = resolveDesktopUserData(app.getPath('userData'))
+if (USER_DATA_OVERRIDE) {
+  const resolvedUserData = path.resolve(USER_DATA_OVERRIDE)
+  fs.mkdirSync(resolvedUserData, { recursive: true })
+  app.setPath('userData', resolvedUserData)
+}
+
+const IDENTITY_APP_NAME: string | null = applyDesktopIdentity(app)
+
+// Identity may have re-homed under APPDATA — restore the sandbox pin after it.
+if (USER_DATA_OVERRIDE) {
+  const resolvedUserData = path.resolve(USER_DATA_OVERRIDE)
+  fs.mkdirSync(resolvedUserData, { recursive: true })
+  app.setPath('userData', resolvedUserData)
+} else if (process.env.HERMES_DATA_DIR_SUFFIX) {
+  let defaultUserData = ''
+
+  try {
+    defaultUserData = app.getPath('userData')
+  } catch {
+    defaultUserData = path.join(os.tmpdir(), 'hermes-desktop-user-data')
+  }
+
+  const resolvedUserData: string = resolveDesktopUserData(defaultUserData)
   fs.mkdirSync(resolvedUserData, { recursive: true })
   app.setPath('userData', resolvedUserData)
 }
@@ -729,6 +762,12 @@ const DEV_SERVER = process.env.HERMES_DESKTOP_DEV_SERVER
 const IS_PACKAGED = app.isPackaged || Boolean(process.env.HERMES_DESKTOP_IS_PACKAGED)
 const IS_MAC = process.platform === 'darwin'
 const IS_WINDOWS = process.platform === 'win32'
+
+/** Every desktop BrowserWindow — applies e2e-hidden paint/show defaults when set. */
+function createDesktopBrowserWindow(options: ConstructorParameters<typeof BrowserWindow>[0] = {}) {
+  return new BrowserWindow(applyE2eHiddenWindowOptions(options ?? {}))
+}
+
 const IS_WSL = isWslEnvironment()
 // Truthful macOS kernel major (Tahoe = 25). Product version lies (16 vs 26) per
 // build SDK, so gate Tahoe workarounds on Darwin instead.
@@ -7216,7 +7255,7 @@ function openOauthLoginWindow(
       { baseUrl: normalizeRemoteBaseUrl(baseUrl), session: sess, silent, background: unattended },
       {
         createWindow: ({ session: windowSession, show, title }) =>
-          new BrowserWindow({
+          createDesktopBrowserWindow({
             width: 520,
             height: 720,
             title,
@@ -7716,7 +7755,7 @@ const { hasLivePortalSession, hasPortalAccessToken, renewPortalAccessSilently, o
     getOauthSession,
     resolvePortalBaseUrl,
     warmOauthCookieStore,
-    createWindow: options => new BrowserWindow(options),
+    createWindow: options => createDesktopBrowserWindow(options),
     rememberLog
   })
 
@@ -12353,7 +12392,7 @@ function spawnSecondaryWindow({
 }: { connectionId?: null | string; sessionId?: string; profile?: null | string; watch?: boolean } = {}) {
   const icon = getAppIconPath()
 
-  const win = new BrowserWindow({
+  const win = createDesktopBrowserWindow({
     width: SESSION_WINDOW_MIN_WIDTH,
     height: SESSION_WINDOW_MIN_HEIGHT,
     minWidth: SESSION_WINDOW_MIN_WIDTH,
@@ -12458,7 +12497,7 @@ function notifyBrowserPopoutClosed(tabId) {
 function spawnBrowserWindow(tabId) {
   const icon = getAppIconPath()
 
-  const win = new BrowserWindow({
+  const win = createDesktopBrowserWindow({
     width: BROWSER_WINDOW_WIDTH,
     height: BROWSER_WINDOW_HEIGHT,
     minWidth: BROWSER_WINDOW_MIN_WIDTH,
@@ -12571,7 +12610,7 @@ function createInstanceWindow(
   validateDesktopProfileRoute(route)
   const icon = getAppIconPath()
 
-  const win = new BrowserWindow({
+  const win = createDesktopBrowserWindow({
     ...nextInstanceBounds(source),
     minWidth: WINDOW_MIN_WIDTH,
     minHeight: WINDOW_MIN_HEIGHT,
@@ -12688,7 +12727,7 @@ function petOverlayUrl() {
 }
 
 function spawnPetOverlayWindow(bounds) {
-  const win = new BrowserWindow({
+  const win = createDesktopBrowserWindow({
     width: Math.max(80, Math.round(bounds?.width || 220)),
     height: Math.max(80, Math.round(bounds?.height || 220)),
     x: Number.isFinite(bounds?.x) ? Math.round(bounds.x) : undefined,
@@ -13206,7 +13245,7 @@ function broadcastHudState(open) {
 }
 
 function spawnHudWindow(sessionId, profile) {
-  const win = new BrowserWindow({
+  const win = createDesktopBrowserWindow({
     ...hudBounds(),
     minWidth: 380,
     minHeight: 160,
@@ -13480,7 +13519,7 @@ function spawnQuickEntryWindow() {
   const display = screen.getDisplayNearestPoint(cursor)
   const bounds = quickEntryWindowBounds(display?.workArea)
 
-  const win = new BrowserWindow({
+  const win = createDesktopBrowserWindow({
     ...bounds,
     frame: false,
     transparent: true,
@@ -13653,7 +13692,7 @@ function closeQuickEntryWindow() {
 function createWindow() {
   const icon = getAppIconPath()
   const savedWindowState = readWindowState()
-  mainWindow = new BrowserWindow({
+  mainWindow = createDesktopBrowserWindow({
     ...computeWindowOptions(
       savedWindowState ?? windowSize('normal', screen.getPrimaryDisplay().workArea),
       screen.getAllDisplays()
@@ -13852,8 +13891,9 @@ function createWindow() {
 
   // Under Playwright testing, instantly show the window: `ready-to-show`
   // doesn't fire in some testing envs, and the suite can't wait out the
-  // production fallback.
-  if (process.env.TEST_WORKER_INDEX !== undefined) {
+  // production fallback. Hidden e2e mode keeps the window off-screen so agent
+  // runs never flash CONNECTING popups on the operator's desk.
+  if (process.env.TEST_WORKER_INDEX !== undefined && !isDesktopE2eHidden()) {
     revealController.reveal()
   }
 
@@ -17021,7 +17061,7 @@ registerChallengeWindowIpc({
   isReady: () => app.isReady(),
   getSession: () => session.fromPartition(CHALLENGE_PARTITION),
   resolvePortalBaseUrl,
-  createWindow: options => new BrowserWindow(options),
+  createWindow: options => createDesktopBrowserWindow(options),
   rememberLog
 })
 
@@ -17886,6 +17926,9 @@ app.on('open-url', (event, url) => {
 })
 
 app.whenReady().then(() => {
+  // Agent e2e: freeze every window hidden + unthrottled (see e2e-hidden.ts).
+  installE2eHiddenWindowGuard(app)
+
   // Post-update relaunch detection (App Installer arm): when the previous
   // version wrote the one-shot pending-relaunch marker before quitting into
   // an OS package swap, consume it here — the renderer toasts "Hermes

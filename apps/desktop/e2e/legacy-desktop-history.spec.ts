@@ -19,12 +19,24 @@ const ROWS = [
 
 const NAMED_ROW = 'legacy-developer-desktop'
 
+function resolvePython(root: string): string {
+  if (process.env.HERMES_DESKTOP_PYTHON) {return process.env.HERMES_DESKTOP_PYTHON}
+  const win = path.join(root, '.venv', 'Scripts', 'python.exe')
+  const nix = path.join(root, '.venv', 'bin', 'python')
+
+  if (fs.existsSync(win)) {return win}
+
+  if (fs.existsSync(nix)) {return nix}
+
+  return process.platform === 'win32' ? 'python' : 'python3'
+}
+
 test('pre-cutover Desktop conversations remain visible and open across profiles', async () => {
   test.setTimeout(300_000)
   const sandbox = createSandbox('legacy-desktop-history')
   const mock = await startMockServer()
-  const python = process.env.HERMES_DESKTOP_PYTHON!
   const root = path.resolve(import.meta.dirname, '../../..')
+  const python = resolvePython(root)
   const env = buildAppEnv(sandbox, { HERMES_DESKTOP_PYTHON: python, TIRITH_ENABLED: 'false' })
   const multiplex = process.env.E2E_MULTIPLEX === '1'
   writeMockProviderConfig(sandbox.hermesHome, mock.url, undefined, multiplex ? 'gateway:\n  multiplex_profiles: true\n' : undefined)

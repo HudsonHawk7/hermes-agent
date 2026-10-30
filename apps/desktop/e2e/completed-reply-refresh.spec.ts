@@ -86,11 +86,27 @@ test('a delayed history read cannot remove the latest completed reply', async ()
     }, stored)
 
     // An actual backend metadata write produces the production change tick.
+    // Session PATCH now requires mutation fence identity (request_id + revision).
     await page.evaluate(async sessionId => {
-      await (window as any).hermesDesktop.api({
-        path: `/api/sessions/${sessionId}`,
+      const api = (window as any).hermesDesktop.api
+
+      const snap = await api({
+        path: `/api/sessions/${encodeURIComponent(sessionId)}/mutation-snapshot`,
+        method: 'GET',
+      })
+
+      const request_id = crypto.randomUUID()
+      const expected_revision = snap?.runtime_revision ?? snap?.revision ?? 0
+      const expected_generation = snap?.runtime_generation ?? snap?.generation
+      await api({
+        path: `/api/sessions/${encodeURIComponent(sessionId)}`,
         method: 'PATCH',
-        body: { title: 'Completed reply regression' }
+        body: {
+          title: 'Completed reply regression',
+          request_id,
+          expected_revision,
+          ...(expected_generation != null ? { expected_generation } : {}),
+        },
       })
     }, stored)
     await expect

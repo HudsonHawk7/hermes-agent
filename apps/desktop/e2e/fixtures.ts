@@ -25,11 +25,12 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
-import { _electron, type ElectronApplication, type Page } from '@playwright/test'
+import { _electron, type ElectronApplication, expect, type Page, test } from '@playwright/test'
 
 import { waitForChatReady } from '../../../tests-js/scripts/desktop-chat-smoke'
 import { writeEnvFile, writeMockProviderConfig } from '../../../tests-js/scripts/mock-provider-config'
 import { type MockServerOptions, startMockServer } from '../../../tests-js/scripts/mock-server'
+import { isDesktopE2eHidden } from '../electron/e2e-hidden'
 
 import { resolveElectronBinary } from './electron-binary'
 import { installErrorBannerGuard } from './test'
@@ -83,19 +84,157 @@ export function listGatewayRunProcesses(): Array<{ pid: number; commandLine: str
   }
 }
 
-/** Tree-kill a PID on Windows (`taskkill /T /F`). No-op elsewhere / on failure. */
+/** Tree-kill a PID (`taskkill /T /F` on Windows, process group kill elsewhere). No-op on failure. */
 export function killProcessTree(pid: number): void {
-  if (process.platform !== 'win32' || !Number.isFinite(pid) || pid <= 0) {
+  if (!Number.isFinite(pid) || pid <= 0) {
+    return
+  }
+
+  if (process.platform === 'win32') {
+    try {
+      execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
+        stdio: 'ignore',
+        windowsHide: true,
+      })
+    } catch {
+      // already gone
+    }
+
     return
   }
 
   try {
-    execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
-      stdio: 'ignore',
-      windowsHide: true,
-    })
+    process.kill(-pid, 'SIGKILL')
   } catch {
-    // already gone
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {
+      // already gone
+    }
+  }
+}
+
+/** True while `pid` is still a live OS process. */
+export function isProcessAlive(pid: number): boolean {
+  if (!Number.isFinite(pid) || pid <= 0) {
+    return false
+  }
+
+  try {
+    process.kill(pid, 0)
+
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Electron PIDs launched by this worker (for afterAll leak assert). */
+const launchedElectronPids = new Set<number>()
+
+export function rememberLaunchedElectronPid(pid: number | undefined): void {
+  if (typeof pid === 'number' && Number.isFinite(pid) && pid > 0) {
+    launchedElectronPids.add(pid)
+  }
+}
+
+export function launchedElectronPidSnapshot(): number[] {
+  return [...launchedElectronPids]
+}
+
+/**
+ * Close Playwright's ElectronApplication, then force-kill the process tree
+ * even when close hangs or the test failed mid-flight. Also reaps sandbox
+ * gateway-run orphans when hermesHome is provided.
+ */
+export async function closeDesktopApp(
+  app: ElectronApplication | null | undefined,
+  options: { hermesHome?: string } = {},
+): Promise<void> {
+  let pid: number | undefined
+
+  try {
+    pid = app?.process()?.pid
+  } catch {
+    pid = undefined
+  }
+
+  if (app) {
+    try {
+      await Promise.race([
+        app.close().catch(() => undefined),
+        new Promise<void>(resolve => {
+          setTimeout(resolve, 8_000)
+        }),
+      ])
+    } catch {
+      // continue into force-kill
+    }
+  }
+
+  if (pid) {
+    killProcessTree(pid)
+
+    // Windows can take a beat to reap the tree after taskkill.
+    const deadline = Date.now() + 2_000
+
+    while (Date.now() < deadline && isProcessAlive(pid)) {
+      try {
+        execFileSync('powershell.exe', ['-NoProfile', '-Command', 'Start-Sleep -Milliseconds 150'], {
+          stdio: 'ignore',
+          windowsHide: true,
+        })
+      } catch {
+        // ignore
+      }
+
+      killProcessTree(pid)
+    }
+  }
+
+  if (options.hermesHome) {
+    reapSandboxGatewayRuns(options.hermesHome)
+  }
+}
+
+/**
+ * afterAll leak assert: any Electron PID this worker launched must be gone.
+ * Force-kills stragglers, waits briefly, then throws if any remain so the suite fails loudly.
+ */
+export function assertNoLaunchedElectronsLeft(): void {
+  const candidates = [...launchedElectronPids]
+  const stillAlive = () => candidates.filter(isProcessAlive)
+  let leftovers = stillAlive()
+
+  for (const pid of leftovers) {
+    killProcessTree(pid)
+  }
+
+  if (leftovers.length > 0) {
+    const deadline = Date.now() + 3_000
+
+    while (Date.now() < deadline && stillAlive().length > 0) {
+      try {
+        execFileSync('powershell.exe', ['-NoProfile', '-Command', 'Start-Sleep -Milliseconds 200'], {
+          stdio: 'ignore',
+          windowsHide: true,
+        })
+      } catch {
+        // ignore
+      }
+
+      for (const pid of stillAlive()) {
+        killProcessTree(pid)
+      }
+    }
+  }
+
+  leftovers = stillAlive()
+
+  if (leftovers.length > 0) {
+    throw new Error(
+      `Desktop e2e leaked Electron process tree(s) after cleanup: pids ${leftovers.join(', ')}`,
+    )
   }
 }
 
@@ -239,6 +378,12 @@ function stripCredentials(env: Record<string, string | undefined>): Record<strin
       continue
     }
 
+    // Inherited from a Hermes-spawned agent shell: electron.exe runs as bare Node
+    // and rejects --remote-debugging-port (Playwright launch dies).
+    if (key === 'ELECTRON_RUN_AS_NODE') {
+      continue
+    }
+
     clean[key] = value
   }
 
@@ -343,8 +488,30 @@ export function buildAppEnv(sandbox: Sandbox, extra: Record<string, string> = {}
     clean.DISPLAY = process.env.DISPLAY
   }
 
+  // Prefer the worktree venv on PATH so spawns never hit the live install's
+  // hermes (which is often on the operator PATH and breaks version gates).
+  const venvBin = process.platform === 'win32'
+    ? path.join(REPO_ROOT, '.venv', 'Scripts')
+    : path.join(REPO_ROOT, '.venv', 'bin')
+
+  const pathKey = process.platform === 'win32' && clean.Path && !clean.PATH ? 'Path' : 'PATH'
+  const priorPath = clean[pathKey] ?? clean.PATH ?? clean.Path ?? ''
+
+  const nextPath = priorPath
+    ? `${venvBin}${path.delimiter}${priorPath}`
+    : venvBin
+
+  // Windows/Electron resolve userData via APPDATA + name. Point them at the
+  // sandbox so a faked HOME never leaves Electron unable to resolve paths
+  // (Architect 10/29 "Failed to get 'userData' path").
+  const appDataDir = path.join(sandbox.root, 'appdata')
+  const localAppDataDir = path.join(sandbox.root, 'localappdata')
+  fs.mkdirSync(appDataDir, { recursive: true })
+  fs.mkdirSync(localAppDataDir, { recursive: true })
+
   return {
     ...clean,
+    [pathKey]: nextPath,
     HERMES_HOME: sandbox.hermesHome,
     HERMES_DESKTOP_USER_DATA_DIR: sandbox.userDataDir,
     HERMES_DESKTOP_IGNORE_EXISTING: '1',
@@ -356,6 +523,9 @@ export function buildAppEnv(sandbox: Sandbox, extra: Record<string, string> = {}
     // either, so only local runs ever took that path.
     HERMES_DESKTOP_ISOLATED_BACKEND: '1',
     HOME: sandbox.root,
+    USERPROFILE: sandbox.root,
+    APPDATA: appDataDir,
+    LOCALAPPDATA: localAppDataDir,
     HERMES_DESKTOP_HERMES_ROOT: REPO_ROOT,
     HERMES_DESKTOP_APP_NAME: `HermesE2E-${Date.now()}`,
     // `app.close()` in teardown must exit even when a spec leaves a turn
@@ -364,6 +534,9 @@ export function buildAppEnv(sandbox: Sandbox, extra: Record<string, string> = {}
     HERMES_DESKTOP_SKIP_QUIT_CONFIRM: '1',
     // Never repoint the user's OS hermes:// handler (HKCU on Windows) at a test checkout.
     HERMES_DESKTOP_SKIP_PROTOCOL_REGISTRATION: '1',
+    // Agent default: hide every BrowserWindow so CONNECTING popups never land
+    // on the operator's screen. Set HERMES_DESKTOP_E2E_HIDDEN=0 to watch.
+    HERMES_DESKTOP_E2E_HIDDEN: process.env.HERMES_DESKTOP_E2E_HIDDEN === '0' ? '0' : '1',
     // Clear dev-server override — we want the built dist/, not a vite server.
     // The dev-server check in main.ts looks for this env var; if it's set,
     // it loads from the vite URL instead of the local file.
@@ -426,6 +599,12 @@ export async function launchDesktop(
 ): Promise<{ app: ElectronApplication; page: Page }> {
   assertDistBuilt()
 
+  // Keep the Playwright parent aligned with the child so waitForAppReady
+  // skips the visibility poll under hidden agent mode.
+  if (env.HERMES_DESKTOP_E2E_HIDDEN && process.env.HERMES_DESKTOP_E2E_HIDDEN !== '0') {
+    process.env.HERMES_DESKTOP_E2E_HIDDEN = env.HERMES_DESKTOP_E2E_HIDDEN
+  }
+
   const electronBin = findElectron()
 
   // `electron .` loads from the package.json `main` field
@@ -440,6 +619,8 @@ export async function launchDesktop(
     env,
     cwd: DESKTOP_ROOT,
   })
+
+  rememberLaunchedElectronPid(app.process().pid)
 
   const page = await app.firstWindow()
 
@@ -512,7 +693,7 @@ export async function setupMockBackend(options: MockBackendOptions = {}): Promis
     mockUrl: mock.url,
     sandbox,
     cleanup: async () => {
-      await app.close().catch(() => undefined)
+      await closeDesktopApp(app, { hermesHome: sandbox.hermesHome })
       await mock.close()
       sandbox.cleanup()
     },
@@ -542,7 +723,7 @@ export async function setupNoProvider(): Promise<NoProviderFixture> {
     page,
     sandbox,
     cleanup: async () => {
-      await app.close().catch(() => undefined)
+      await closeDesktopApp(app, { hermesHome: sandbox.hermesHome })
       sandbox.cleanup()
     },
   }
@@ -588,7 +769,7 @@ export async function setupDeadBackend(options: DeadBackendOptions = {}): Promis
     page,
     sandbox,
     cleanup: async () => {
-      await app.close().catch(() => undefined)
+      await closeDesktopApp(app, { hermesHome: sandbox.hermesHome })
       sandbox.cleanup()
     },
   }
@@ -666,6 +847,8 @@ export async function setupPackagedApp(): Promise<PackagedAppFixture> {
     env,
   })
 
+  rememberLaunchedElectronPid(app.process().pid)
+
   const page = await app.firstWindow()
   installErrorBannerGuard(page)
 
@@ -674,7 +857,7 @@ export async function setupPackagedApp(): Promise<PackagedAppFixture> {
     page,
     sandbox,
     cleanup: async () => {
-      await app.close().catch(() => undefined)
+      await closeDesktopApp(app, { hermesHome: sandbox.hermesHome })
       sandbox.cleanup()
     },
   }
@@ -682,11 +865,144 @@ export async function setupPackagedApp(): Promise<PackagedAppFixture> {
 
 // ─── Wait helpers ──────────────────────────────────────────────────────
 
+/**
+ * If an update-hold overlay is blocking the app (leftover marker / live Hermes
+ * holding a checkout the sandbox also probes), take the confirmed Start anyway
+ * path so e2e can reach the composer. No-op when the overlay is absent.
+ */
+/**
+ * First-run shared-metrics consent ("Share usage stats?") sits in the status
+ * stack as an Approval region and can steal focus from group composers.
+ * Decline it so e2e reaches the real UI. Prefer config offer_version settle;
+ * this is the UI fallback when a reask still paints.
+ */
+export async function dismissSharedMetricsConsentIfPresent(page: Page, timeoutMs = 5_000): Promise<boolean> {
+  const noThanks = page.getByRole('button', { name: /no thanks/i }).first()
+  const share = page.getByRole('button', { name: /share with nous/i }).first()
+  const banner = page.getByText(/share usage stats/i).first()
+
+  const visible =
+    (await noThanks.isVisible().catch(() => false))
+    || (await share.isVisible().catch(() => false))
+    || (await banner.isVisible().catch(() => false))
+
+  if (!visible) {
+    return false
+  }
+
+  if (await noThanks.isVisible().catch(() => false)) {
+    await noThanks.click({ timeout: timeoutMs }).catch(() => undefined)
+  }
+
+  await banner.waitFor({ state: 'hidden', timeout: timeoutMs }).catch(() => undefined)
+  await noThanks.waitFor({ state: 'hidden', timeout: 2_000 }).catch(() => undefined)
+
+  return true
+}
+
+/** Select a session/group tab by its title without hitting the nested Close control. */
+export async function selectSessionTab(page: Page, title: string | RegExp, timeoutMs = 15_000): Promise<void> {
+  const pattern = typeof title === 'string' ? new RegExp(title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) : title
+  // Session/workspace tabs live in the center tab strip (last tablist). The
+  // sidebar also has a Sessions/Bots tablist that must not absorb the click.
+  const strip = page.getByRole('tablist').last()
+  const tab = strip.getByRole('tab').filter({ hasText: pattern }).first()
+  await expect(tab).toBeVisible({ timeout: timeoutMs })
+
+  // Pane tabs activate on pointerdown (not click). Playwright's click fires
+  // the full pointer sequence. Aim left of the close control.
+  const deadline = Date.now() + timeoutMs
+
+  while (Date.now() < deadline) {
+    if ((await tab.getAttribute('aria-selected')) === 'true') {
+      return
+    }
+
+    const box = await tab.boundingBox()
+
+    if (box) {
+      // Leave room for the close button on the right (~16–24px).
+      const x = Math.max(4, Math.min(box.width - 28, 20))
+      const y = Math.max(2, box.height / 2)
+      await tab.click({ position: { x, y }, force: true }).catch(() => undefined)
+    } else {
+      await tab.click({ force: true }).catch(() => undefined)
+    }
+
+    await page.waitForTimeout(250)
+  }
+
+  await expect(tab).toHaveAttribute('aria-selected', 'true', { timeout: 1_000 })
+}
+
+export async function dismissUpdateHoldIfPresent(page: Page, timeoutMs = 8_000): Promise<boolean> {
+  const overlay = page.getByTestId('update-hold-overlay')
+  const present = await overlay.isVisible().catch(() => false)
+
+  if (!present) {
+    return false
+  }
+
+  // Prefer the typed IPC path (no i18n-fragile button labels).
+  const viaIpc = await page.evaluate(async () => {
+    const api = (window as unknown as {
+      hermesDesktop?: {
+        updateHold?: {
+          startAnyway?: (req: { holdId?: string; confirmed: boolean }) => Promise<{ ok?: boolean } | null>
+        }
+      }
+    }).hermesDesktop?.updateHold
+
+    if (!api?.startAnyway) {
+      return false
+    }
+
+    const result = await api.startAnyway({ confirmed: true }).catch(() => null)
+
+    return Boolean(result?.ok)
+  }).catch(() => false)
+
+  if (viaIpc) {
+    await overlay.waitFor({ state: 'hidden', timeout: timeoutMs }).catch(() => undefined)
+
+    return true
+  }
+
+  // Fallback: two-step Start anyway UI (ghost → confirm destructive).
+  const startAnyway = overlay.getByRole('button').filter({ hasText: /start anyway|anyway/i }).first()
+
+  if (await startAnyway.isVisible().catch(() => false)) {
+    await startAnyway.click().catch(() => undefined)
+  }
+
+  const confirm = overlay.getByRole('button').filter({ hasText: /start|confirm|continue/i }).last()
+
+  if (await confirm.isVisible().catch(() => false)) {
+    await confirm.click().catch(() => undefined)
+  }
+
+  await overlay.waitFor({ state: 'hidden', timeout: timeoutMs }).catch(() => undefined)
+
+  return true
+}
+
 /** Composer readiness includes hit testing, so boot overlays cannot produce an early pass. */
 export async function waitForAppReady(fixture: MockBackendFixture | NoProviderFixture | DeadBackendFixture, timeoutMs = 60_000): Promise<void> {
   const { page, app } = fixture
 
+  // Pin legacy group-chat create/workspace for e2e specs written against
+  // Message ${room} + localStorage group-chats (gateway now advertises canonical).
+  await page.evaluate(() => {
+    ;(window as unknown as { __HERMES_E2E_LEGACY_GROUPS?: boolean }).__HERMES_E2E_LEGACY_GROUPS = true
+  }).catch(() => undefined)
+
+  // Clear a blocking update-hold before the composer interactability poll.
+  await dismissUpdateHoldIfPresent(page, Math.min(12_000, timeoutMs))
+  await dismissSharedMetricsConsentIfPresent(page, Math.min(5_000, timeoutMs))
+
   await waitForChatReady(page, timeoutMs)
+  // Consent can appear after chat ready once the gateway finishes boot.
+  await dismissSharedMetricsConsentIfPresent(page, Math.min(5_000, timeoutMs))
 
   // On Electron 40.x, ready-to-show may never fire (electron/electron#51972)
   // and the window stays hidden even though the DOM is rendered. The main
@@ -694,7 +1010,16 @@ export async function waitForAppReady(fixture: MockBackendFixture | NoProviderFi
   // wireWindowReveal's post-load fallback in production — but the DOM can be
   // ready before that lands. Poll until the window is actually visible so
   // interactions (click, screenshot) don't hit a hidden surface.
-  if (app) {
+  //
+  // Hidden e2e mode deliberately keeps every window off-screen; Playwright
+  // still drives the page, so skip the visibility wait there. Default agent
+  // runs set HERMES_DESKTOP_E2E_HIDDEN=1 (unset parent still means hidden once
+  // launchDesktop mirrors the child env).
+  const wantVisible =
+    process.env.HERMES_DESKTOP_E2E_HIDDEN === '0'
+    || (process.env.HERMES_DESKTOP_E2E_HIDDEN !== undefined && !isDesktopE2eHidden())
+
+  if (app && wantVisible) {
     const deadline = Date.now() + timeoutMs
 
     while (Date.now() < deadline) {
@@ -709,6 +1034,11 @@ export async function waitForAppReady(fixture: MockBackendFixture | NoProviderFi
     }
   }
 }
+
+/** afterAll: force-kill any Electron trees this worker still owns, then assert 0. */
+test.afterAll(async () => {
+  assertNoLaunchedElectronsLeft()
+})
 
 /**
  * Wait for the onboarding overlay to appear (no provider configured).

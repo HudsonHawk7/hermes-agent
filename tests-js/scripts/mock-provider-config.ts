@@ -76,6 +76,22 @@ export function writeMockProviderConfig(
     // first message the smoke sends; these journeys test install and update, so
     // the root config records onboarding as done.
     onboarding: { ...config.onboarding, run: false },
+    // Keep the shared-metrics consent strip off in e2e so it never steals focus
+    // from composers / group rooms. Must include offer_version or an "off" without
+    // it is treated as a reask ("Asking once more…") and the strip still paints.
+    telemetry: {
+      ...((config.telemetry && typeof config.telemetry === 'object') ? config.telemetry : {}),
+      shared_metrics: {
+        ...((config.telemetry && typeof config.telemetry === 'object'
+          && (config.telemetry as { shared_metrics?: unknown }).shared_metrics
+          && typeof (config.telemetry as { shared_metrics?: unknown }).shared_metrics === 'object')
+          ? (config.telemetry as { shared_metrics: Record<string, unknown> }).shared_metrics
+          : {}),
+        enabled: false,
+        send: false,
+        offer_version: 2,
+      },
+    },
     ...extra,
   }
 
