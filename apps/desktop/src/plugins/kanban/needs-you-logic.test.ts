@@ -271,6 +271,84 @@ describe('foldRepeats', () => {
     const fold = folded.find(r => r.kind === 'fold')
     expect(fold).toMatchObject({ kind: 'fold', count: 12 })
   })
+
+  /**
+   * Design note v4 §4 + fixture-v4.json: 12 identical darkeyes sweeps are
+   * interleaved with hera/critiquo/sabe/architect. Consecutive-only fold yields
+   * ~19 rows; global author+body fold yields 14 rows and one ×12 at 9:18.
+   * Minutes-since-midnight stand in for the fixture clock stamps.
+   */
+  it('design fixture interleave: 12 darkeyes sweeps → 14 rows + one ×12 at newest', () => {
+    const SWEEP = 'Sweep: card still waiting on the GM. No change since the last check.'
+    // one trailing-space sweep (fixture 9:12) must still join the group
+    const comments = sortCommentsNewestFirst([
+      c(1, 'architect', 'Note: the structured ask already exists.', 9 * 60 + 24),
+      c(2, 'darkeyes', SWEEP, 9 * 60 + 18),
+      c(3, 'hera', 'Five mockups are up.', 9 * 60 + 12),
+      c(4, 'darkeyes', SWEEP + ' ', 9 * 60 + 12),
+      c(5, 'darkeyes', SWEEP, 9 * 60 + 6),
+      c(6, 'darkeyes', SWEEP, 9 * 60 + 0),
+      c(7, 'darkeyes', SWEEP, 8 * 60 + 54),
+      c(8, 'critiquo', 'Design passes with two conditions.', 8 * 60 + 48),
+      c(9, 'darkeyes', SWEEP, 8 * 60 + 48),
+      c(10, 'darkeyes', SWEEP, 8 * 60 + 42),
+      c(11, 'darkeyes', SWEEP, 8 * 60 + 36),
+      c(12, 'darkeyes', SWEEP, 8 * 60 + 30),
+      c(13, 'sabe', 'Mockups match the current drawer chrome.', 8 * 60 + 26),
+      c(14, 'darkeyes', SWEEP, 8 * 60 + 24),
+      c(15, 'darkeyes', SWEEP, 8 * 60 + 18),
+      c(16, 'darkeyes', SWEEP, 8 * 60 + 12),
+      // different body — must stay a single (not in the ×12)
+      c(
+        17,
+        'darkeyes',
+        'Sweep prompt is being patched so an unchanged GM wait is not re-commented.',
+        8 * 60 + 14
+      ),
+      c(18, 'hera', 'Asked the same question three ways.', 8 * 60 + 6),
+      c(19, 'architect', 'Facts belong on the ask, not in context.', 7 * 60 + 58),
+      c(20, 'critiquo', 'Checked the drawer at 1400px wide.', 7 * 60 + 50),
+      c(21, 'sabe', 'Same amber as the decision block today.', 7 * 60 + 42),
+      c(22, 'darkeyes', 'Board sweep ran at 7:30; one card moved to review.', 7 * 60 + 34),
+      c(23, 'hera', 'Left the composer above the thread.', 7 * 60 + 26),
+      c(24, 'architect', 'Fold threshold three is right.', 7 * 60 + 18),
+      c(25, 'critiquo', 'First read of the shape.', 7 * 60 + 10)
+    ])
+
+    expect(comments).toHaveLength(25)
+    const folded = foldRepeats(comments)
+    expect(folded).toHaveLength(14)
+
+    const folds = folded.filter(r => r.kind === 'fold')
+    expect(folds).toHaveLength(1)
+    expect(folds[0]).toMatchObject({
+      kind: 'fold',
+      author: 'darkeyes',
+      count: 12,
+      lastAt: 9 * 60 + 18
+    })
+    if (folds[0]?.kind === 'fold') {
+      expect(folds[0].stamps).toHaveLength(12)
+      expect(folds[0].stamps[0]?.created_at).toBe(9 * 60 + 18)
+    }
+
+    // Fold sits where newest member sits: second row, after architect 9:24
+    expect(folded[0]).toMatchObject({ kind: 'single' })
+    if (folded[0]?.kind === 'single') {
+      expect(folded[0].comment.author).toBe('architect')
+    }
+    expect(folded[1]).toMatchObject({ kind: 'fold', author: 'darkeyes', count: 12 })
+    // 8:14 different-body darkeyes remains a single somewhere below
+    const singles = folded.filter(r => r.kind === 'single')
+    expect(
+      singles.some(
+        r =>
+          r.kind === 'single' &&
+          r.comment.author === 'darkeyes' &&
+          r.comment.body.includes('Sweep prompt is being patched')
+      )
+    ).toBe(true)
+  })
 })
 
 describe('optionSpansFull', () => {

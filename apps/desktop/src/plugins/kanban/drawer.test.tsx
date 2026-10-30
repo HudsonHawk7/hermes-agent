@@ -442,24 +442,31 @@ describe('blocked task detail', () => {
 })
 
 describe('Needs you cliff notes drawer', () => {
+  /** Interleaved 12 pings + 13 uniques (design §4) so consecutive-only fold cannot green-fake. */
   function makeComments() {
     const base = 1_700_000_000
+    const out: Array<{ id: number; author: string; body: string; created_at: number }> = []
 
-    const uniques = Array.from({ length: 13 }, (_, i) => ({
-      id: i + 1,
-      author: 'architect',
-      body: `unique note ${i}`,
-      created_at: base - 1000 + i
-    }))
+    // Newest first when sorted: ping, unique, ping, unique… across the whole window.
+    for (let i = 0; i < 12; i++) {
+      out.push({
+        id: 100 + i,
+        author: 'worker',
+        body: 'ping status',
+        created_at: base - i * 120
+      })
+    }
 
-    const pings = Array.from({ length: 12 }, (_, i) => ({
-      id: 100 + i,
-      author: 'worker',
-      body: 'ping status',
-      created_at: base + i
-    }))
+    for (let i = 0; i < 13; i++) {
+      out.push({
+        id: i + 1,
+        author: 'architect',
+        body: `unique note ${i}`,
+        created_at: base - 60 - i * 120
+      })
+    }
 
-    return [...uniques, ...pings]
+    return out
   }
 
   it('folds 25 comments to 14 rows; Details starts closed; open lists 12 stamps', async () => {

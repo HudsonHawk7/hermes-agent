@@ -217,20 +217,22 @@ def main() -> int:
             asked_by="hera",
         )
         base_ts = int(__import__("time").time())
-        # 13 unique comments first (older), then 12 identical newest-ish stamps.
-        for i in range(13):
-            cid = kb.add_comment(conn, fold_id, "architect", f"unique note {i}")
-            with kb.write_txn(conn):
-                conn.execute(
-                    "UPDATE task_comments SET created_at=? WHERE id=?",
-                    (base_ts - 1000 + i, cid),
-                )
+        # Interleave 12 identical worker pings with 13 unique notes so a
+        # consecutive-only fold cannot green-fake (design note v4 §4).
+        # Newest-first: ping, unique, ping, unique… → one global ×12 fold.
         for i in range(12):
             cid = kb.add_comment(conn, fold_id, "worker", "ping status")
             with kb.write_txn(conn):
                 conn.execute(
                     "UPDATE task_comments SET created_at=? WHERE id=?",
-                    (base_ts + i, cid),
+                    (base_ts - i * 120, cid),
+                )
+        for i in range(13):
+            cid = kb.add_comment(conn, fold_id, "architect", f"unique note {i}")
+            with kb.write_txn(conn):
+                conn.execute(
+                    "UPDATE task_comments SET created_at=? WHERE id=?",
+                    (base_ts - 60 - i * 120, cid),
                 )
         ids["fold"] = fold_id
 

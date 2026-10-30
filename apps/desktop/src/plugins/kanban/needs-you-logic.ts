@@ -166,45 +166,86 @@ export function sortCommentsNewestFirst<T extends { created_at: number }>(commen
 }
 
 /**
- * Fold consecutive identical same-author bodies (after trim) when count ≥ 3.
- * Two identical do NOT fold. Input should already be newest-first.
+ * Normalise comment body for fold matching (design note v4 §4 / build-v4.cjs):
+ * strip clock stamps, collapse whitespace, trim, lower-case. Two bodies that
+ * only differ by a leading/embedded "9:18 AM" or trailing space still match.
+ */
+export function normalizeCommentBody(body: string): string {
+  return body
+    .replace(/\b\d{1,2}:\d{2}\s*(?:AM|PM)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+}
+
+/**
+ * Fold identical same-author bodies when count ≥ 3 — globally across the
+ * thread, not only consecutive runs. Two identical stay two. The fold sits
+ * where its newest member sits; stamps are newest-first. Input should already
+ * be newest-first (see sortCommentsNewestFirst).
  */
 export function foldRepeats(comments: readonly CommentLike[]): FoldedComment[] {
-  const out: FoldedComment[] = []
-  let i = 0
+  const groups = new Map<string, CommentLike[]>()
 
-  while (i < comments.length) {
-    const head = comments[i]!
-    const bodyKey = head.body.trim()
-    let j = i + 1
+  for (const comment of comments) {
+    const key = `${comment.author}\0${normalizeCommentBody(comment.body)}`
+    const list = groups.get(key)
 
-    while (
-      j < comments.length &&
-      comments[j]!.author === head.author &&
-      comments[j]!.body.trim() === bodyKey
-    ) {
-      j++
+    if (list) {
+      list.push(comment)
+    } else {
+      groups.set(key, [comment])
+    }
+  }
+
+  /** newest comment id → fold row to emit in its place */
+  const foldAtNewest = new Map<string | number, FoldedComment>()
+  /** older members of a fold — skip when walking the thread */
+  const skipIds = new Set<string | number>()
+
+  for (const members of groups.values()) {
+    if (members.length < 3) {
+      continue
     }
 
-    const run = comments.slice(i, j)
+    const stamps = [...members].sort(
+      (a, b) => b.created_at - a.created_at || String(b.id).localeCompare(String(a.id))
+    )
+    const newest = stamps[0]!
+    // Display the newest member's text (trimmed); match key is separate.
+    const body = newest.body.replace(/\s+/g, ' ').trim()
 
-    if (run.length >= 3) {
-      out.push({
-        kind: 'fold',
-        author: head.author,
-        body: bodyKey,
-        count: run.length,
-        lastAt: head.created_at,
-        ids: run.map(c => c.id),
-        stamps: run
-      })
-    } else {
-      for (const c of run) {
-        out.push({ kind: 'single', comment: c })
+    foldAtNewest.set(newest.id, {
+      kind: 'fold',
+      author: newest.author,
+      body,
+      count: stamps.length,
+      lastAt: newest.created_at,
+      ids: stamps.map(s => s.id),
+      stamps
+    })
+
+    for (const member of stamps) {
+      if (member.id !== newest.id) {
+        skipIds.add(member.id)
       }
     }
+  }
 
-    i = j
+  const out: FoldedComment[] = []
+
+  for (const comment of comments) {
+    if (skipIds.has(comment.id)) {
+      continue
+    }
+
+    const fold = foldAtNewest.get(comment.id)
+
+    if (fold) {
+      out.push(fold)
+    } else {
+      out.push({ kind: 'single', comment })
+    }
   }
 
   return out
