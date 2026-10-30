@@ -188,6 +188,26 @@ export interface GroupMessage {
   thread?: string
   /** Set on the ui_meta projection when `text` was cut to the sync budget. */
   truncated?: boolean
+  /**
+   * Vision receipt for a member reply that answered a turn carrying images.
+   * Sourced from gateway `message.complete.image_routing` (and attach failures
+   * on the desktop stage path) — never assumed from model name alone.
+   */
+  vision?: GroupVisionReceipt
+}
+
+/** Per-member outcome for user-attached images on the turn they answered. */
+export interface GroupVisionReceipt {
+  /** How many images the user turn carried. */
+  count: number
+  /** Gateway routing mode; `native` means pixels reached the model. */
+  mode: 'native' | 'text'
+  /** True only when mode is native and at least one image_url part landed. */
+  saw: boolean
+  /** Why she didn't get the pixels (text route, attach fail, …). */
+  reason?: string
+  /** Native parts that actually attached (when mode is native). */
+  attached?: number
 }
 
 export interface GroupHold {

@@ -210,10 +210,28 @@ class _TurnScopes:
     terminal: Any = None
 
 
+def _record_turn_image_routing(
+    agent, *, mode: str, count: int, reason: str | None = None, attached: int | None = None,
+) -> None:
+    """Stash this turn's vision routing receipt for message.complete (group chat UI)."""
+    try:
+        agent._turn_image_routing = {
+            "mode": mode,
+            "count": int(count),
+            **({"reason": reason} if reason else {}),
+            **({"attached": int(attached)} if attached is not None else {}),
+        }
+    except Exception:
+        pass
+
+
 def _route_turn_images(agent, prompt: Any, images: list[str]) -> Any:
     """Run message for a turn with attached images: "native" content parts, or "text" path
     references the agent analyzes in-loop (never blocking submit on vision calls).
-    Decision table: agent/image_routing.py."""
+    Decision table: agent/image_routing.py. Records ``agent._turn_image_routing`` so
+    message.complete can surface a real saw-it / missed receipt to clients."""
+    count = len(images) if images else 0
+    reason: str | None = None
     try:
         from agent.image_routing import build_native_content_parts, decide_image_input_mode
         from hermes_cli.config import load_config as _tui_load_config
@@ -223,11 +241,16 @@ def _route_turn_images(agent, prompt: Any, images: list[str]) -> Any:
             requested_provider=getattr(agent, "requested_provider", ""))
         if getattr(agent, "api_mode", "") == "codex_app_server":
             mode = "text"
+            reason = "codex_app_server has no native image parts"
+        elif mode != "native":
+            reason = f"model routed to text ({_provider}/{_model or 'unknown'})"
     except Exception as _img_exc:
         print(f"[tui_gateway] image_routing decision failed, defaulting to text: {_img_exc}",
               file=sys.stderr)
         mode = "text"
+        reason = f"image routing decision failed: {_img_exc}"
     if mode != "native":
+        _record_turn_image_routing(agent, mode="text", count=count, reason=reason or "text path")
         return _build_image_ref_message(prompt, images)
     try:
         parts, skipped = build_native_content_parts(prompt, images)
@@ -235,11 +258,21 @@ def _route_turn_images(agent, prompt: Any, images: list[str]) -> Any:
             print(
                 f"[tui_gateway] native image attachment skipped {len(skipped)} unreadable path(s)",
                 file=sys.stderr)
-        if any(p.get("type") == "image_url" for p in parts):
+        attached = sum(1 for p in parts if p.get("type") == "image_url")
+        if attached:
+            reason_native = (
+                f"{len(skipped)} unreadable path(s) skipped" if skipped else None
+            )
+            _record_turn_image_routing(
+                agent, mode="native", count=count, reason=reason_native, attached=attached,
+            )
             return parts
+        reason = "native attach produced no image parts"
     except Exception as _img_exc:
         print(f"[tui_gateway] native attach failed, falling back to text: {_img_exc}",
               file=sys.stderr)
+        reason = f"native attach failed: {_img_exc}"
+    _record_turn_image_routing(agent, mode="text", count=count, reason=reason or "text fallback")
     return _build_image_ref_message(prompt, images)
 
 
@@ -917,6 +950,14 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
     if _is_bot_mode_session(session):
         raw = _bot_mode_delivery_text(raw, successful=status == "complete")
     payload = {"text": raw, "usage": _get_usage(agent), "status": status}
+    # One-shot vision routing receipt for this turn (group chat "Saw N image" chips).
+    routing = getattr(agent, "_turn_image_routing", None)
+    if isinstance(routing, dict) and routing.get("count"):
+        payload["image_routing"] = dict(routing)
+        try:
+            delattr(agent, "_turn_image_routing")
+        except Exception:
+            agent._turn_image_routing = None
     if receipt := _persisted_turn_receipt(st, raw, status):
         payload["persisted_turn"] = receipt
     if last_reasoning:

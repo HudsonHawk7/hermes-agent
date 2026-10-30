@@ -974,16 +974,45 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
   // open reply box when one owns the composer, else the main (new-thread)
   // composer. Matches the 1:1 chat's drop affordance.
   const [dragOver, setDragOver] = useState(false)
+  // Click-to-enlarge for a user image shown in the log.
+  const [previewImage, setPreviewImage] = useState<null | { alt: string; src: string }>(null)
+
+  // While the room is mounted, kill Chromium's default "navigate to the dropped
+  // file" behavior for any miss outside our handlers (header chrome, empty
+  // gaps, Electron shell). preventDefault on dragover is required for drop to fire.
+  useEffect(() => {
+    const blockFileNav = (event: globalThis.DragEvent) => {
+      if ([...(event.dataTransfer?.types || [])].includes('Files')) {
+        event.preventDefault()
+      }
+    }
+
+    window.addEventListener('dragover', blockFileNav)
+    window.addEventListener('drop', blockFileNav)
+
+    return () => {
+      window.removeEventListener('dragover', blockFileNav)
+      window.removeEventListener('drop', blockFileNav)
+    }
+  }, [])
 
   const dropFiles = (event: DragEvent<HTMLDivElement>) => {
-    const files = [...(event.dataTransfer?.files || [])]
+    const hasFiles = [...(event.dataTransfer?.types || [])].includes('Files')
     setDragOver(false)
+
+    // Always stop a Files drop from navigating the window, even when the
+    // payload is empty or filtered out later.
+    if (hasFiles) {
+      event.preventDefault()
+      event.stopPropagation()
+    }
+
+    const files = [...(event.dataTransfer?.files || [])]
 
     if (!files.length) {
       return
     }
 
-    event.preventDefault()
     void filesToGroupAttachments(files).then(picked => addImages(replyThread, picked))
   }
 
@@ -1269,7 +1298,7 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
     }
 
     return (
-      <div className="flex flex-wrap items-center gap-1.5 px-1 pb-1">
+      <div className="flex flex-wrap items-center gap-1.5 px-1 pb-1" data-testid="group-pending-attachments">
         {images.map((img, index) => (
           <div
             className="flex items-center gap-1 rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) px-1 py-0.5"
@@ -1482,16 +1511,50 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
                     <span className="max-w-48 truncate">{img.name || 'attached file'}</span>
                   </div>
                 ) : (
-                  <img
-                    alt={img.name || 'attached image'}
-                    className="max-h-40 max-w-60 rounded-md border border-(--ui-stroke-secondary) object-contain"
+                  <button
+                    className="cursor-zoom-in rounded-md border border-(--ui-stroke-secondary) p-0"
                     key={`${entryKey}:img:${imgIndex}`}
-                    src={img.data}
-                    title={img.name || 'attached image'}
-                  />
+                    onClick={() =>
+                      setPreviewImage({
+                        alt: img.name || 'attached image',
+                        src: img.data
+                      })
+                    }
+                    title={img.name || b.group.enlargeImage}
+                    type="button"
+                  >
+                    <img
+                      alt={img.name || 'attached image'}
+                      className="max-h-40 max-w-60 rounded-md object-contain"
+                      src={img.data}
+                    />
+                  </button>
                 )
               )}
             </div>
+          ) : null}
+          {/* Vision receipt under a member reply that answered an image turn. */}
+          {entry.from?.kind === 'member' && entry.vision && entry.vision.count > 0 ? (
+            entry.vision.saw ? (
+              <div
+                className="mt-1 w-fit rounded-full border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) px-2 py-0.5 text-[0.65rem] text-(--ui-text-secondary)"
+                data-testid="group-vision-saw"
+                title={entry.vision.mode === 'native' ? 'native vision' : undefined}
+              >
+                {b.group.sawImages(entry.vision.attached ?? entry.vision.count)}
+              </div>
+            ) : (
+              <div
+                className="mt-1 w-fit rounded-md border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-[0.65rem] text-red-600 dark:text-red-400"
+                data-testid="group-vision-miss"
+                title={entry.vision.reason || undefined}
+              >
+                {b.group.missedImage(
+                  entry.from.name || 'Member',
+                  entry.vision.reason || b.group.missedImageFallback
+                )}
+              </div>
+            )
           ) : null}
         </div>
       </div>
@@ -1579,6 +1642,7 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
       onDragOver={event => {
         if ([...(event.dataTransfer?.types || [])].includes('Files')) {
           event.preventDefault()
+          event.stopPropagation()
           setDragOver(true)
         }
       }}
@@ -1586,11 +1650,28 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
     >
       {dragOver ? (
         <div
-          className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center border-2 border-dashed border-(--ui-accent) text-sm font-medium text-(--ui-accent)"
+          className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center border-2 border-dashed border-(--ui-accent) bg-(--ui-accent)/5 text-sm font-medium text-(--ui-accent)"
           key={'dropzone'}
         >
           {replyThread ? b.group.dropToThread : b.group.dropToRoom}
         </div>
+      ) : null}
+      {previewImage ? (
+        <Dialog
+          onOpenChange={open => {
+            if (!open) {
+              setPreviewImage(null)
+            }
+          }}
+          open
+        >
+          <DialogContent className="max-h-[90vh] max-w-[90vw] overflow-auto p-2">
+            <DialogHeader>
+              <DialogTitle>{previewImage.alt}</DialogTitle>
+            </DialogHeader>
+            <img alt={previewImage.alt} className="mx-auto max-h-[80vh] max-w-full object-contain" src={previewImage.src} />
+          </DialogContent>
+        </Dialog>
       ) : null}
       {header}
       <GroupHoldStatus

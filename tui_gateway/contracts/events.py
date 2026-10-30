@@ -15,6 +15,8 @@ closed, so a drifted emitter fails the suite (``registry.check_payload`` raises 
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import Field
 
 from .base import JsonValue, Payload, WireEnum
@@ -266,6 +268,18 @@ class PersistedTurn(Payload):
     submission_id: str | None = None
 
 
+class ImageRoutingReceipt(Payload):
+    """``prompt_turn._route_turn_images`` → ``message.complete.image_routing``.
+    Real gateway decision for this turn's user-attached images — never client-assumed."""
+
+    mode: Literal["native", "text"]
+    count: int
+    #: Why the turn was not fully native (decision failure, no vision, attach miss, …).
+    reason: str | None = None
+    #: How many image_url parts actually landed when mode is native.
+    attached: int | None = None
+
+
 class MessageCompletePayload(Payload):
     """``prompt_turn._complete_turn_payload`` / ``session_auto_continue._emit_terminal_turn_error`` /
     ``agent_callbacks._mirror_subagent_to_child`` (child watch mirror: ``text`` only) /
@@ -288,6 +302,8 @@ class MessageCompletePayload(Payload):
     error_surface: ErrorSurface | None = None
     partial: bool | None = None
     persisted_turn: PersistedTurn | None = None
+    #: Present when this turn carried user-attached images; drives group-chat vision chips.
+    image_routing: ImageRoutingReceipt | None = None
 
 
 event("message.complete", MessageCompletePayload, doc="The turn ended: final text, usage and outcome.")

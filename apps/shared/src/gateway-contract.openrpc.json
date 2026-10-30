@@ -21178,6 +21178,54 @@
         "title": "ImageGenerateResult",
         "type": "object"
       },
+      "ImageRoutingReceipt": {
+        "additionalProperties": false,
+        "description": "``prompt_turn._route_turn_images`` \u2192 ``message.complete.image_routing``.\nReal gateway decision for this turn's user-attached images \u2014 never client-assumed.",
+        "properties": {
+          "mode": {
+            "enum": [
+              "native",
+              "text"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reason"
+          },
+          "attached": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Attached"
+          }
+        },
+        "required": [
+          "mode",
+          "count"
+        ],
+        "title": "ImageRoutingReceipt",
+        "type": "object"
+      },
       "InflightTurn": {
         "additionalProperties": false,
         "description": "``session_auto_continue._inflight_snapshot``: the live (or retained failed) turn a reconnecting\nclient rebuilds its bubbles from.",
@@ -23799,6 +23847,17 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/PersistedTurn"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "image_routing": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ImageRoutingReceipt"
               },
               {
                 "type": "null"
