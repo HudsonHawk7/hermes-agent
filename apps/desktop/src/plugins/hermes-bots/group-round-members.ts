@@ -19,6 +19,7 @@ import {
   isGroupChatSelf
 } from './group-round-prompt'
 import { isGroupPassText, runGroupChatMemberTurn } from './group-turns'
+import { takeMemberTurnVision } from './group-vision'
 import type { Attachment, GroupMember, GroupMessage } from './types'
 
 export interface GroupRoundMemberContext {
@@ -214,6 +215,9 @@ export async function runGroupRoundMember(
     }
   } catch (error: any) {
     if (!binding.isLive()) {
+      // Drain vision side-channel so a later turn cannot inherit this miss/receipt.
+      takeMemberTurnVision(memberKey)
+
       return null
     }
 
@@ -245,6 +249,8 @@ export async function runGroupRoundMember(
   // trim drops entries from the FRONT, so an index slice could
   // overshoot after a mid-turn trim and silently commit a stale turn.
   if (!binding.isLive()) {
+    takeMemberTurnVision(memberKey)
+
     return null
   }
 
@@ -271,6 +277,7 @@ export async function runGroupRoundMember(
       member: groupMemberKey(member),
       thread
     })
+    takeMemberTurnVision(memberKey)
 
     return null
   }
@@ -303,24 +310,36 @@ export async function runGroupRoundMember(
   const spoke = reply !== null && !isGroupPassText(reply)
 
   if (reply !== null && spoke) {
-    appendGroupChatEntry(context.group, groupMemberAuthor(member), reply, thread)
-  } else if (reply !== null && context.isCurrent() && context.addressedKeys?.has(memberKey)) {
-    // #129443: the nudge was passed on too. Record the noncompliance where
-    // the user looks (activity row + roster badge) instead of letting the
-    // user's explicit address settle as ordinary quiet consensus. Only a
-    // CURRENT drive's pass is disclosed: a turn the epoch check just
-    // tolerated committing (a cross-thread send superseded its drive) is
-    // stale residue, and flagging it would point the user at an address
-    // their newer send already moved past.
-    const reason = 'explicitly addressed member passed twice'
+    appendGroupChatEntry(
+      context.group,
+      groupMemberAuthor(member),
+      reply,
+      thread,
+      undefined,
+      takeMemberTurnVision(memberKey)
+    )
+  } else {
+    // Pass / timeout / failed: drain so the next turn cannot inherit this receipt.
+    takeMemberTurnVision(memberKey)
 
-    recordGroupActivity(context.group, {
-      kind: 'failed',
-      member: groupMemberKey(member),
-      reason,
-      thread
-    })
-    noteBotAttention(groupMemberKey(member), reason)
+    if (reply !== null && context.isCurrent() && context.addressedKeys?.has(memberKey)) {
+      // #129443: the nudge was passed on too. Record the noncompliance where
+      // the user looks (activity row + roster badge) instead of letting the
+      // user's explicit address settle as ordinary quiet consensus. Only a
+      // CURRENT drive's pass is disclosed: a turn the epoch check just
+      // tolerated committing (a cross-thread send superseded its drive) is
+      // stale residue, and flagging it would point the user at an address
+      // their newer send already moved past.
+      const reason = 'explicitly addressed member passed twice'
+
+      recordGroupActivity(context.group, {
+        kind: 'failed',
+        member: groupMemberKey(member),
+        reason,
+        thread
+      })
+      noteBotAttention(groupMemberKey(member), reason)
+    }
   }
 
   // A member's own entries — its reply, and the rows group-external-writes.ts

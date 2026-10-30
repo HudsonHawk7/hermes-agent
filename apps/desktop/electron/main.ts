@@ -12215,12 +12215,30 @@ function wireCommonWindowHandlers(win, { zoom = true }: { zoom?: boolean } = {})
     }
   })
   win.webContents.on('will-navigate', (event, url) => {
-    if ((DEV_SERVER && url.startsWith(DEV_SERVER)) || (!DEV_SERVER && url.startsWith('file:'))) {
+    // Dev server navigations stay in-window. Production only allows the app's
+    // own renderer entry — a bare `file:` allowlist used to let a dropped
+    // image navigate the whole window away from the SPA (group-chat drops).
+    if (DEV_SERVER && url.startsWith(DEV_SERVER)) {
       return
     }
 
+    if (!DEV_SERVER && url.startsWith('file:')) {
+      try {
+        const renderer = pathToFileURL(resolveRendererIndex()).href
+
+        if (url === renderer || url.startsWith(`${renderer}#`) || url.startsWith(`${renderer}?`)) {
+          return
+        }
+      } catch {
+        /* resolve failed — fall through to block */
+      }
+    }
+
     event.preventDefault()
-    void openExternalUrl(url)
+
+    if (!url.startsWith('file:')) {
+      void openExternalUrl(url)
+    }
   })
 }
 

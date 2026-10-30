@@ -31,6 +31,13 @@ import {
   formatFreshThreadRoomContext,
   GROUP_PROMPT_HEADER_PREFIX
 } from './group-round-prompt'
+import {
+  buildGroupVisionReceipt,
+  countGroupImageAttachments,
+  groupImageAttachmentLabels,
+  type GroupImageRoutingWire,
+  stashMemberTurnVision
+} from './group-vision'
 import { botConnectionRoute, requestForBot } from './routing'
 import type { Attachment, GroupMember, GroupPrompt, GroupPromptQuestion, ProfileRoute } from './types'
 
@@ -451,8 +458,14 @@ const GROUP_TURN_SETTLE_RECHECKS = 8
 /** Resolve as soon as the member's session reports a terminal frame for the
  *  turn — or after `ms` as the backstop. Feature-detected: without
  *  `host.onEvent` (older shells, the node test harness) this is a plain sleep.
- *  `error` is terminal too (agent init failed → no message.complete follows). */
-function waitForTurnSignal(runtimeIds: string[], ms: number): Promise<boolean> {
+ *  `error` is terminal too (agent init failed → no message.complete follows).
+ *  When `routingSink` is provided, a matching message.complete copies its
+ *  image_routing payload so the room can show a real vision receipt. */
+function waitForTurnSignal(
+  runtimeIds: string[],
+  ms: number,
+  routingSink?: { imageRouting?: GroupImageRoutingWire }
+): Promise<boolean> {
   const ids = new Set(runtimeIds.filter(id => id.length > 0))
 
   return new Promise(resolve => {
@@ -493,10 +506,16 @@ function waitForTurnSignal(runtimeIds: string[], ms: number): Promise<boolean> {
     for (const type of ['message.complete', 'error']) {
       try {
         unsubs.push(
-          host.onEvent(type, (event: { session_id?: string }) => {
-            if (ids.has(String(event?.session_id || ''))) {
-              done(true)
+          host.onEvent(type, (event: any) => {
+            if (!ids.has(String(event?.session_id || ''))) {
+              return
             }
+
+            if (type === 'message.complete' && routingSink && event?.payload?.image_routing) {
+              routingSink.imageRouting = event.payload.image_routing as GroupImageRoutingWire
+            }
+
+            done(true)
           })
         )
       } catch {
@@ -971,6 +990,8 @@ interface GroupTurnPollContext {
   binding: { isLive(): boolean }
   /** The in-flight marker this poll owns (see markGroupTurnInFlight). */
   turn: string
+  /** Filled from message.complete.image_routing when the gateway reports it. */
+  routingSink: { imageRouting?: GroupImageRoutingWire }
 }
 
 // Polls alive in THIS process, by marker token. A marker whose token is here belongs to a turn
@@ -1026,7 +1047,7 @@ function clearGroupTurnMarker(group: string, member: GroupMember, turn: string) 
 }
 
 async function pollGroupMemberTurn(context: GroupTurnPollContext): Promise<null | string> {
-  const { member, thread, dispatchEpoch, stored, liveRuntime, runtimeIds, before, binding } = context
+  const { member, thread, dispatchEpoch, stored, liveRuntime, runtimeIds, before, binding, routingSink } = context
   const started = Date.now()
   let deadline = started + GROUP_TURN_TIMEOUT_MS
   // After the terminal frame fires, the gateway still has to flip
@@ -1036,8 +1057,8 @@ async function pollGroupMemberTurn(context: GroupTurnPollContext): Promise<null 
 
   while (Date.now() < deadline) {
     const signalled = quickRechecks
-      ? await waitForTurnSignal([], GROUP_TURN_SETTLE_RECHECK_MS)
-      : await waitForTurnSignal([...runtimeIds], GROUP_TURN_POLL_MS)
+      ? await waitForTurnSignal([], GROUP_TURN_SETTLE_RECHECK_MS, routingSink)
+      : await waitForTurnSignal([...runtimeIds], GROUP_TURN_POLL_MS, routingSink)
 
     quickRechecks = signalled ? GROUP_TURN_SETTLE_RECHECKS : Math.max(0, quickRechecks - 1)
 
@@ -1260,6 +1281,12 @@ async function runGroupChatMemberTurnLeased(
       turn
     })
 
+    const routingSink: { imageRouting?: GroupImageRoutingWire } = {}
+    const imageCount = countGroupImageAttachments(images)
+    const imageLabels = groupImageAttachmentLabels(images)
+    // failed[] mixes PDFs/files and images — only image labels count for vision.
+    const failedImageLabels = failed.filter(label => imageLabels.includes(label))
+
     try {
       const reply = await pollGroupMemberTurn({
         get group() {
@@ -1274,7 +1301,8 @@ async function runGroupChatMemberTurnLeased(
         before,
         leftover,
         binding,
-        turn
+        turn,
+        routingSink
       })
 
       // A reply (or an explicit pass) ends the turn; null is a timeout or a dead
@@ -1283,10 +1311,27 @@ async function runGroupChatMemberTurnLeased(
         clearGroupTurnMarker(group, member, turn)
       }
 
+      stashMemberTurnVision(
+        groupMemberKey(member),
+        buildGroupVisionReceipt({
+          imageCount,
+          failedImageLabels,
+          routing: routingSink.imageRouting
+        })
+      )
+
       return reply
     } catch (error) {
       // The turn died on our prompt: nothing to harvest.
       clearGroupTurnMarker(group, member, turn)
+      stashMemberTurnVision(
+        groupMemberKey(member),
+        buildGroupVisionReceipt({
+          imageCount,
+          failedImageLabels,
+          routing: routingSink.imageRouting
+        })
+      )
       throw error
     } finally {
       liveGroupTurns.delete(turn)
