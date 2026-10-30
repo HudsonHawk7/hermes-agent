@@ -192,7 +192,8 @@ test.describe('correction session switch', () => {
     fixture = null
   })
 
-  test('keeps a live correction in place and does not duplicate its original prompt after switching sessions', async (_args, testInfo: TestInfo) => {
+  // eslint-disable-next-line no-empty-pattern -- Playwright requires fixture-object destructuring
+  test('keeps a live correction in place and does not duplicate its original prompt after switching sessions', async ({}, testInfo: TestInfo) => {
     const { page } = fixture!
 
     // A blank draft does not exercise session hydration. Seed a real second
@@ -250,7 +251,8 @@ test.describe('correction session switch', () => {
       .toEqual([ORIGINAL_PROMPT, CORRECTION, CORRECTED_REPLY])
   })
 
-  test('keeps an inference-time correction visible through a warm session switch', async (_args, testInfo: TestInfo) => {
+  // eslint-disable-next-line no-empty-pattern -- Playwright requires fixture-object destructuring
+  test('keeps an inference-time correction visible through a warm session switch', async ({}, testInfo: TestInfo) => {
     const { mock, page } = fixture!
 
     await send(page, OTHER_SESSION_PROMPT)
