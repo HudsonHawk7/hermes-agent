@@ -21,6 +21,8 @@ export type GmAskOption = {
 export type GmAsk = {
   question: string
   context: string
+  /** Cliff Notes facts (≤3). Prefer over context on the card face. */
+  facts?: string[]
   options: GmAskOption[]
   pick: null | string
   asked_by?: string
@@ -83,4 +85,165 @@ export function optionsAreImagePair(ask: GmAsk | null | undefined): boolean {
   }
 
   return ask.options.every(opt => Boolean(opt.image || opt.image_url))
+}
+
+/** Write-time caps (design note v4). Over-cap filed asks render clamped. */
+export const CAP = {
+  question: 90,
+  label: 60,
+  effect: 110,
+  fact: 110,
+  facts: 3,
+  contextSentences: 2,
+  contextChars: 220
+} as const
+
+export type CommentLike = {
+  id: number | string
+  author: string
+  body: string
+  created_at: number
+}
+
+export type FoldedComment =
+  | { kind: 'single'; comment: CommentLike }
+  | {
+      kind: 'fold'
+      author: string
+      body: string
+      count: number
+      lastAt: number
+      ids: Array<number | string>
+      stamps: CommentLike[]
+    }
+
+/** Soft clamp for display of over-cap filed asks (never throws). */
+export function clampText(value: string, max: number): string {
+  const s = value.trim()
+
+  if (s.length <= max) {
+    return s
+  }
+
+  if (max <= 1) {
+    return s.slice(0, max)
+  }
+
+  return `${s.slice(0, Math.max(0, max - 1)).trimEnd()}…`
+}
+
+/** Facts for the Cliff Notes strip: prefer ask.facts; else first context sentence cut at 110. */
+export function cliffNotesFacts(ask: GmAsk): string[] {
+  const raw = ask.facts
+
+  if (Array.isArray(raw) && raw.length > 0) {
+    return raw
+      .filter((f): f is string => typeof f === 'string')
+      .map(f => clampText(f, CAP.fact))
+      .filter(Boolean)
+      .slice(0, CAP.facts)
+  }
+
+  const ctx = typeof ask.context === 'string' ? ask.context.trim() : ''
+
+  if (!ctx) {
+    return []
+  }
+
+  // First sentence-ish chunk; keep URL dots whole by stopping on .?! + space/end only.
+  const m = ctx.match(/^(.+?[.!?])(?:\s+|$)/)
+  const first = (m ? m[1] : ctx).trim()
+
+  return first ? [clampText(first, CAP.fact)] : []
+}
+
+/** Newest created_at first; equal stamps keep input order (stable). */
+export function sortCommentsNewestFirst<T extends { created_at: number }>(comments: readonly T[]): T[] {
+  return comments
+    .map((c, index) => ({ c, index }))
+    .sort((a, b) => b.c.created_at - a.c.created_at || a.index - b.index)
+    .map(x => x.c)
+}
+
+/**
+ * Fold consecutive identical same-author bodies (after trim) when count ≥ 3.
+ * Two identical do NOT fold. Input should already be newest-first.
+ */
+export function foldRepeats(comments: readonly CommentLike[]): FoldedComment[] {
+  const out: FoldedComment[] = []
+  let i = 0
+
+  while (i < comments.length) {
+    const head = comments[i]!
+    const bodyKey = head.body.trim()
+    let j = i + 1
+
+    while (
+      j < comments.length &&
+      comments[j]!.author === head.author &&
+      comments[j]!.body.trim() === bodyKey
+    ) {
+      j++
+    }
+
+    const run = comments.slice(i, j)
+
+    if (run.length >= 3) {
+      out.push({
+        kind: 'fold',
+        author: head.author,
+        body: bodyKey,
+        count: run.length,
+        lastAt: head.created_at,
+        ids: run.map(c => c.id),
+        stamps: run
+      })
+    } else {
+      for (const c of run) {
+        out.push({ kind: 'single', comment: c })
+      }
+    }
+
+    i = j
+  }
+
+  return out
+}
+
+/** True when this option is the last of a 3-option set and should span both columns. */
+export function optionSpansFull(count: number, index: number): boolean {
+  return count === 3 && index === 2
+}
+
+/**
+ * Titles often start with "GM yes/no:" because the card was filed that way.
+ * The Needs you column already says what it is — drop the redundant prefix so
+ * the question starts at the left edge.
+ */
+const GM_YES_NO_PREFIX = /^\s*gm\s*yes\s*\/\s*no\s*:\s*/i
+
+export function displayNeedsYouTitle(title: string, fallback = 'Needs a decision'): string {
+  const trimmed = (title || '').trim()
+
+  if (!trimmed) {
+    return fallback
+  }
+
+  const stripped = trimmed.replace(GM_YES_NO_PREFIX, '').trim()
+
+  return stripped || fallback
+}
+
+/** Resolve the asker's recommended option, if any. */
+export function recommendedOption(ask: GmAsk): GmAskOption | null {
+  if (!ask.pick) {
+    return null
+  }
+
+  return ask.options.find(o => o.key === ask.pick) ?? null
+}
+
+/** True when Recommend line should render. */
+export function showRecommend(ask: GmAsk): boolean {
+  return recommendedOption(ask) != null
 }

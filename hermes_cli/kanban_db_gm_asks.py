@@ -22,6 +22,15 @@ GM_DECISION_UNDONE_KIND = "gm_decision_undone"
 
 _OPTION_KEYS = ("key", "label", "effect")
 
+# Write-time caps (design note v4 / Cliff Notes). Over-cap filed asks render clamped.
+QUESTION_MAX = 90
+LABEL_MAX = 60
+EFFECT_MAX = 110
+FACT_MAX = 110
+FACTS_MAX = 3
+CONTEXT_SENTENCES_MAX = 2
+CONTEXT_CHAR_BACKSTOP = 220
+
 
 class GmAskError(ValueError):
     """Invalid ask payload or illegal answer/undo transition."""
@@ -32,9 +41,10 @@ def validate_gm_ask(ask: Any) -> dict[str, Any]:
     corrective message the worker can retry against.
 
     Payload:
-      question (one line), context (≤2 sentences), options (2–4 of
-      ``{key, label, effect}`` + optional ``image``), pick (recommended key or
-      null), asked_by (optional here — callers stamp it).
+      question (one line ≤90), context (≤2 sentences, ≤220 chars), optional
+      facts (≤3 one-liners ≤110), options (2–4 of ``{key, label≤60, effect≤110}``
+      + optional ``image``), pick (recommended key or null), asked_by (optional
+      here — callers stamp it).
     """
     if ask is None:
         raise GmAskError(
@@ -47,7 +57,7 @@ def validate_gm_ask(ask: Any) -> dict[str, Any]:
     if not isinstance(ask, dict):
         raise GmAskError("ask must be an object/dict with question, context, and options")
 
-    question = _one_line(ask.get("question"), "question")
+    question = _one_line(ask.get("question"), "question", max_len=QUESTION_MAX)
     context = _context_lines(ask.get("context"))
     options_raw = ask.get("options")
     if not isinstance(options_raw, list):
@@ -64,8 +74,8 @@ def validate_gm_ask(ask: Any) -> dict[str, Any]:
         if not isinstance(raw, dict):
             raise GmAskError(f"ask.options[{i}] must be an object with key, label, effect")
         key = _token(raw.get("key"), f"options[{i}].key")
-        label = _one_line(raw.get("label"), f"options[{i}].label")
-        effect = _one_line(raw.get("effect"), f"options[{i}].effect")
+        label = _one_line(raw.get("label"), f"options[{i}].label", max_len=LABEL_MAX)
+        effect = _one_line(raw.get("effect"), f"options[{i}].effect", max_len=EFFECT_MAX)
         if key in keys:
             raise GmAskError(f"ask.options keys must be unique (duplicate {key!r})")
         keys.append(key)
@@ -85,47 +95,97 @@ def validate_gm_ask(ask: Any) -> dict[str, Any]:
                 f"ask.pick must be one of the option keys {keys} (got {pick!r})"
             )
 
+    facts = _facts_list(ask.get("facts"))
+
     out: dict[str, Any] = {
         "question": question,
         "context": context,
         "options": options,
         "pick": pick,
     }
+    if facts is not None:
+        out["facts"] = facts
     asked_by = ask.get("asked_by")
     if asked_by is not None and str(asked_by).strip():
         out["asked_by"] = str(asked_by).strip()
     return out
 
 
-def _one_line(value: Any, field: str) -> str:
+def _one_line(value: Any, field: str, *, max_len: Optional[int] = None) -> str:
     if value is None or not str(value).strip():
         raise GmAskError(f"ask.{field} is required (one non-empty line)")
     text = str(value).strip()
     first = text.splitlines()[0].strip()
     if not first:
         raise GmAskError(f"ask.{field} is required (one non-empty line)")
+    if max_len is not None and len(first) > max_len:
+        raise GmAskError(
+            f"ask.{field} must be ≤{max_len} characters (got {len(first)})"
+        )
     return first
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Split on sentence-ending punctuation followed by space/end.
+
+    Dots inside tokens (URLs, versions) do not end a sentence — only `.`/`?`/`!`
+    followed by whitespace or end-of-string count as boundaries.
+    """
+    parts: list[str] = []
+    buf = ""
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        buf += ch
+        if ch in ".?!" and len(buf.strip()) > 1:
+            nxt = text[i + 1] if i + 1 < n else ""
+            if nxt == "" or nxt.isspace():
+                parts.append(buf.strip())
+                buf = ""
+                while i + 1 < n and text[i + 1].isspace():
+                    i += 1
+        i += 1
+    if buf.strip():
+        parts.append(buf.strip())
+    return parts
 
 
 def _context_lines(value: Any) -> str:
     if value is None or not str(value).strip():
         raise GmAskError("ask.context is required (at most two sentences)")
     text = str(value).strip()
-    # Cap at two sentences by splitting on '. ' / '? ' / '! ' boundaries, keep ≤2.
-    parts: list[str] = []
-    buf = ""
-    for ch in text:
-        buf += ch
-        if ch in ".?!" and len(buf.strip()) > 1:
-            parts.append(buf.strip())
-            buf = ""
-            if len(parts) >= 2:
-                break
-    if buf.strip() and len(parts) < 2:
-        parts.append(buf.strip())
+    parts = _split_sentences(text)
     if not parts:
         raise GmAskError("ask.context is required (at most two sentences)")
-    return " ".join(parts[:2])
+    if len(parts) > CONTEXT_SENTENCES_MAX:
+        raise GmAskError(
+            f"ask.context must be ≤{CONTEXT_SENTENCES_MAX} sentences "
+            f"(got {len(parts)})"
+        )
+    joined = " ".join(parts)
+    if len(joined) > CONTEXT_CHAR_BACKSTOP:
+        raise GmAskError(
+            f"ask.context must be ≤{CONTEXT_CHAR_BACKSTOP} characters "
+            f"(got {len(joined)})"
+        )
+    return joined
+
+
+def _facts_list(value: Any) -> Optional[list[str]]:
+    """Optional facts list: omit/None → None; else ≤3 one-liners ≤110 each."""
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise GmAskError("ask.facts must be a list of up to 3 one-line strings")
+    if len(value) > FACTS_MAX:
+        raise GmAskError(
+            f"ask.facts must have ≤{FACTS_MAX} items (got {len(value)})"
+        )
+    cleaned: list[str] = []
+    for i, raw in enumerate(value):
+        cleaned.append(_one_line(raw, f"facts[{i}]", max_len=FACT_MAX))
+    return cleaned
 
 
 def _token(value: Any, field: str) -> str:

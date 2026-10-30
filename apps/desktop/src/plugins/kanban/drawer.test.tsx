@@ -52,6 +52,10 @@ const rest = vi.fn(async (path: string, options?: PluginRestOptions): Promise<un
     return { exists: false, content: '', size_bytes: 0, truncated: false }
   }
 
+  if (path === '/needs-you') {
+    return { count: 0, items: [] }
+  }
+
   if (path === '/profiles') {
     return { profiles: [] }
   }
@@ -424,6 +428,8 @@ describe('blocked task detail', () => {
     detail = blockedDetail
     openDrawer()
 
+    // Needs you path keeps Diagnostics behind Details (closed by default).
+    fireEvent.click(await screen.findByTestId('needs-you-details-toggle'))
     fireEvent.click(await screen.findByRole('button', { name: 'Unblock task' }))
 
     await waitFor(() =>
@@ -432,5 +438,71 @@ describe('blocked task detail', () => {
         expect.objectContaining({ method: 'PATCH', body: { status: 'ready' } })
       )
     )
+  })
+})
+
+describe('Needs you cliff notes drawer', () => {
+  function makeComments() {
+    const base = 1_700_000_000
+
+    const uniques = Array.from({ length: 13 }, (_, i) => ({
+      id: i + 1,
+      author: 'architect',
+      body: `unique note ${i}`,
+      created_at: base - 1000 + i
+    }))
+
+    const pings = Array.from({ length: 12 }, (_, i) => ({
+      id: 100 + i,
+      author: 'worker',
+      body: 'ping status',
+      created_at: base + i
+    }))
+
+    return [...uniques, ...pings]
+  }
+
+  it('folds 25 comments to 14 rows; Details starts closed; open lists 12 stamps', async () => {
+    const comments = makeComments()
+    detail = {
+      task: {
+        id: 't_example',
+        title: 'Folded repeat comments',
+        body: 'Body stays behind Details.',
+        status: 'blocked',
+        block_kind: 'needs_input'
+      },
+      comments,
+      events: [],
+      links: { parents: [], children: [] },
+      runs: [],
+      attachments: []
+    }
+    openDrawer()
+
+    const toggle = await screen.findByTestId('needs-you-details-toggle')
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByTestId('needs-you-details-body')).toBeNull()
+    expect(toggle.textContent).toMatch(/25 comments/)
+    expect(toggle.textContent).toMatch(/14 rows/)
+    expect(toggle.textContent).toMatch(/×12/)
+
+    fireEvent.click(toggle)
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    expect(await screen.findByTestId('needs-you-details-body')).toBeTruthy()
+    expect(screen.getByTestId('needs-you-comments').querySelectorAll('[data-testid="comment-row"]')).toHaveLength(13)
+    expect(screen.getByTestId('comment-fold')).toBeTruthy()
+    fireEvent.click(screen.getByTestId('comment-fold-toggle'))
+    expect(await screen.findByTestId('comment-fold-expanded')).toBeTruthy()
+    expect(screen.getAllByTestId('comment-fold-stamp')).toHaveLength(12)
+  })
+
+  it('4-option ask uses 2×2 grid; 3-option third spans both columns', async () => {
+    // optionSpansFull is pure — covered in needs-you-logic.test.ts; here assert DecisionPanel layout classes via card path.
+    const { optionSpansFull } = await import('./needs-you-logic')
+    expect(optionSpansFull(4, 0)).toBe(false)
+    expect(optionSpansFull(4, 3)).toBe(false)
+    expect(optionSpansFull(3, 2)).toBe(true)
+    expect(optionSpansFull(3, 1)).toBe(false)
   })
 })

@@ -330,6 +330,8 @@ _SPECS = [
         _arg("--option", action="append", required=True, dest="options",
              help="Option as 'key|Label|effect' (repeat 2-4 times). "
                   "Example: --option 'yes|Yes|BB-8 rebases it and proves it'"),
+        _arg("--fact", action="append", dest="facts", default=None,
+             help="One-line Cliff Notes fact (repeat up to 3 times, each ≤110 chars)"),
         _arg("--pick", help="Recommended option key (must match one --option key)"),
         _arg("--reason", help="Optional short block reason (defaults to --question)"),
         _arg("--asked-by", help="Who filed the ask (defaults to current profile)"),

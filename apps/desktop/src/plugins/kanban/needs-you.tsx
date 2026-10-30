@@ -30,13 +30,19 @@ import {
 } from './api'
 import { useKanban } from './i18n'
 import {
+  CAP,
+  clampText,
+  cliffNotesFacts,
   countNeedsYouByBoard,
+  displayNeedsYouTitle,
   type GmAsk,
   type GmAskOption,
   NEEDS_YOU,
   NEEDS_YOU_TONE,
   type NeedsYouItem,
-  optionsAreImagePair
+  optionsAreImagePair,
+  optionSpansFull,
+  showRecommend
 } from './needs-you-logic'
 import { ago, errText, shortId } from './ui'
 
@@ -294,22 +300,44 @@ export function DecisionPanel({
 
   const imagePair = optionsAreImagePair(ask)
   const pick = pickLabel(ask)
+  const facts = cliffNotesFacts(ask)
+  const showRec = showRecommend(ask)
+  const q = clampText(ask.question, CAP.question)
+  const optionCount = ask.options.length
 
   return (
     <div className={cn('flex flex-col gap-2', large && 'gap-3')} data-testid="needs-you-decision-bar">
       {!compact && (
         <>
-          <p className={cn('font-medium leading-snug text-foreground', large ? 'text-sm' : 'text-[0.8125rem]')}>
-            {ask.question}
+          <p
+            className={cn('font-medium leading-snug text-foreground', large ? 'text-sm' : 'text-[0.8125rem]')}
+            data-testid="needs-you-question"
+          >
+            {q}
           </p>
-          {ask.context && (
-            <p className="text-[0.6875rem] leading-snug text-(--ui-text-tertiary)">{ask.context}</p>
+          {showRec && pick && (
+            <p className="text-[0.6875rem] text-amber-600" data-testid="needs-you-recommend">
+              {k.needsYouRecommend}: <span className="font-medium">{pick}</span>
+            </p>
+          )}
+          {facts.length > 0 && (
+            <ul className="flex flex-col gap-1" data-testid="needs-you-facts">
+              {facts.map((fact, i) => (
+                <li
+                  className="text-[0.6875rem] leading-snug text-(--ui-text-tertiary)"
+                  data-testid="needs-you-fact"
+                  key={`${i}:${fact.slice(0, 24)}`}
+                >
+                  {fact}
+                </li>
+              ))}
+            </ul>
           )}
         </>
       )}
-      {pick && (
+      {compact && showRec && pick && (
         <p className="text-[0.6875rem] text-amber-600">
-          {k.needsYouAskerPick}: <span className="font-medium">{pick}</span>
+          {k.needsYouRecommend}: <span className="font-medium">{pick}</span>
         </p>
       )}
 
@@ -327,10 +355,14 @@ export function DecisionPanel({
           ))}
         </div>
       ) : (
-        <div className="flex flex-col gap-1.5">
-          {ask.options.map(opt => (
+        <div className="grid grid-cols-2 gap-2" data-testid="needs-you-options">
+          {ask.options.map((opt, index) => (
             <Button
-              className={cn(BTN, 'w-full justify-start gap-2 px-3 text-left')}
+              className={cn(
+                BTN,
+                'w-full justify-start gap-2 px-3 text-left',
+                optionSpansFull(optionCount, index) && 'col-span-2'
+              )}
               data-option-key={opt.key}
               disabled={busy}
               key={opt.key}
@@ -339,9 +371,9 @@ export function DecisionPanel({
               variant={ask.pick === opt.key ? 'default' : 'outline'}
             >
               <span className="flex min-w-0 flex-1 flex-col items-start gap-0.5">
-                <span className="text-[0.8125rem] font-medium">{opt.label}</span>
+                <span className="text-[0.8125rem] font-medium">{clampText(opt.label, CAP.label)}</span>
                 <span className="line-clamp-2 text-[0.625rem] font-normal text-(--ui-text-tertiary)">
-                  {opt.effect}
+                  {clampText(opt.effect, CAP.effect)}
                 </span>
               </span>
               {ask.pick === opt.key && (
@@ -487,7 +519,7 @@ function NeedsYouCard({ item, onOpen }: { item: NeedsYouItem; onOpen: (item: Nee
         onClick={() => onOpen(item)}
         type="button"
       >
-        {item.title || item.task_id}
+        {displayNeedsYouTitle(item.title || item.task_id)}
       </button>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[0.625rem] text-(--ui-text-tertiary)">
         <span className="font-medium text-amber-700 dark:text-amber-400">{item.board_name || item.board}</span>

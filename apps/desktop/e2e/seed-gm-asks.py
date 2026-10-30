@@ -174,6 +174,66 @@ def main() -> int:
         )
         ids["fail"] = fail_id
 
+        # Cliff Notes: 4-option grid + three facts + pick (Recommend line).
+        cliff_id = running(conn, "Cliff notes four-option")
+        gm.record_gm_ask(
+            conn,
+            cliff_id,
+            {
+                "question": "Ship cliff notes layout?",
+                "context": "Mockups are the contract. Details start closed.",
+                "facts": [
+                    "Question + recommend + ≤3 facts above the fold",
+                    "Comments newest-first; ×3+ same-author fold",
+                    "hermes kanban ask --fact wires write-time caps",
+                ],
+                "options": [
+                    {"key": "a", "label": "A", "effect": "two-column first"},
+                    {"key": "b", "label": "B", "effect": "two-column second"},
+                    {"key": "c", "label": "C", "effect": "two-column third"},
+                    {"key": "d", "label": "D", "effect": "two-column fourth"},
+                ],
+                "pick": "a",
+            },
+            asked_by="hera",
+        )
+        ids["cliff"] = cliff_id
+
+        # Folded repeat: 12 identical worker pings + 13 unique → 14 drawer rows.
+        fold_id = running(conn, "Folded repeat comments")
+        gm.record_gm_ask(
+            conn,
+            fold_id,
+            {
+                "question": "Open the fold?",
+                "context": "Twelve identical pings should collapse.",
+                "facts": ["Fold needs three or more identical bodies"],
+                "options": [
+                    {"key": "yes", "label": "Yes", "effect": "expand stamps"},
+                    {"key": "no", "label": "No", "effect": "leave folded"},
+                ],
+                "pick": "yes",
+            },
+            asked_by="hera",
+        )
+        base_ts = int(__import__("time").time())
+        # 13 unique comments first (older), then 12 identical newest-ish stamps.
+        for i in range(13):
+            cid = kb.add_comment(conn, fold_id, "architect", f"unique note {i}")
+            with kb.write_txn(conn):
+                conn.execute(
+                    "UPDATE task_comments SET created_at=? WHERE id=?",
+                    (base_ts - 1000 + i, cid),
+                )
+        for i in range(12):
+            cid = kb.add_comment(conn, fold_id, "worker", "ping status")
+            with kb.write_txn(conn):
+                conn.execute(
+                    "UPDATE task_comments SET created_at=? WHERE id=?",
+                    (base_ts + i, cid),
+                )
+        ids["fold"] = fold_id
+
     with kbc.connect_closing(board="beta") as conn:
         beta_id = running(conn, "Beta board ask")
         gm.record_gm_ask(

@@ -145,6 +145,86 @@ def test_validate_gm_ask_happy() -> None:
     assert out["options"][0]["effect"]
 
 
+def test_validate_gm_ask_facts_and_caps() -> None:
+    """Cliff Notes v4 write-time caps + optional facts."""
+    out = gm.validate_gm_ask(
+        _valid_ask(
+            question="x" * gm.QUESTION_MAX,
+            facts=["one", "two", "three"],
+            pick=None,
+        )
+    )
+    assert out["facts"] == ["one", "two", "three"]
+    assert out["pick"] is None
+    assert "facts" in out
+
+    with pytest.raises(gm.GmAskError, match="question"):
+        gm.validate_gm_ask(_valid_ask(question="q" * (gm.QUESTION_MAX + 1)))
+
+    with pytest.raises(gm.GmAskError, match="facts"):
+        gm.validate_gm_ask(_valid_ask(facts=["a", "b", "c", "d"]))
+
+    with pytest.raises(gm.GmAskError, match="facts\\[0\\]"):
+        gm.validate_gm_ask(_valid_ask(facts=["f" * (gm.FACT_MAX + 1)]))
+
+    with pytest.raises(gm.GmAskError, match="effect"):
+        gm.validate_gm_ask(
+            _valid_ask(
+                options=[
+                    {"key": "yes", "label": "Yes", "effect": "e" * (gm.EFFECT_MAX + 1)},
+                    {"key": "no", "label": "No", "effect": "ok"},
+                ]
+            )
+        )
+
+    with pytest.raises(gm.GmAskError, match="label"):
+        gm.validate_gm_ask(
+            _valid_ask(
+                options=[
+                    {"key": "yes", "label": "L" * (gm.LABEL_MAX + 1), "effect": "ok"},
+                    {"key": "no", "label": "No", "effect": "ok"},
+                ]
+            )
+        )
+
+    with pytest.raises(gm.GmAskError, match="sentences"):
+        gm.validate_gm_ask(
+            _valid_ask(context="One. Two. Three sentences here.")
+        )
+
+
+def test_validate_gm_ask_url_context_stays_whole() -> None:
+    url = "See https://example.com/path.v2/doc for the mock."
+    out = gm.validate_gm_ask(_valid_ask(context=url))
+    assert "https://example.com/path.v2/doc" in out["context"]
+    # URL dots must not split into multiple sentences by themselves.
+    assert out["context"].count(".") >= 2 or "example.com" in out["context"]
+
+
+def test_cli_ask_passes_facts(kanban_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn, title="facts-cli")
+    args = argparse.Namespace(
+        task_id=tid,
+        question="Ship cliff notes?",
+        context="Mockups are the contract.",
+        options=["yes|Yes|build it", "no|No|park it"],
+        facts=["Fact one", "Fact two"],
+        pick="yes",
+        reason=None,
+        asked_by="hera",
+        json=True,
+        board=None,
+    )
+    rc = kanban_cli._cmd_ask(args)
+    assert rc == 0
+    with kbc.connect_closing() as conn:
+        open_row = gm.get_open_gm_ask(conn, tid)
+    assert open_row is not None
+    _eid, payload, _at = open_row
+    assert payload.get("facts") == ["Fact one", "Fact two"]
+
+
 # ---------------------------------------------------------------------------
 # Ask → answer path
 # ---------------------------------------------------------------------------

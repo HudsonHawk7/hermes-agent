@@ -60,7 +60,12 @@ import {
 } from './api'
 import { ModelOverrideField, overridePatch } from './model-override'
 import { DecisionPanel, useRecentDecision } from './needs-you'
-import type { GmAsk } from './needs-you-logic'
+import {
+  type CommentLike,
+  foldRepeats,
+  type GmAsk,
+  sortCommentsNewestFirst
+} from './needs-you-logic'
 import {
   type Diagnostic,
   type DiagnosticAction,
@@ -685,6 +690,161 @@ function LinkChips({
   )
 }
 
+/** Details bar for Needs you cards — closed by default (design note v4). */
+function NeedsYouDetails({
+  commentPending,
+  detail,
+  log,
+  mutate,
+  onComment,
+  onRequeue,
+  running,
+  task
+}: {
+  commentPending: boolean
+  detail: KanbanTaskDetail
+  log: null | WorkerLog
+  mutate: (fn: () => Promise<unknown>, onDone?: () => void) => () => Promise<unknown>
+  onComment: (body: string) => void
+  onRequeue: (body: string) => void
+  running: boolean
+  task: KanbanTaskDetail['task']
+}) {
+  const k = useKanban()
+  const [open, setOpen] = useState(false)
+  const sorted = sortCommentsNewestFirst(detail.comments)
+  const folded = foldRepeats(sorted)
+  const foldRow = folded.find(r => r.kind === 'fold')
+  const foldedCount = foldRow && foldRow.kind === 'fold' ? foldRow.count : 0
+
+  return (
+    <section className="flex flex-col gap-3" data-testid="needs-you-details">
+      <button
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 rounded-md border border-(--ui-stroke-tertiary) bg-(--ui-surface-secondary) px-3 py-2 text-left text-[0.75rem] hover:bg-(--ui-hover)"
+        data-testid="needs-you-details-toggle"
+        onClick={() => setOpen(v => !v)}
+        type="button"
+      >
+        <Codicon name={open ? 'chevron-down' : 'chevron-right'} size="0.75rem" />
+        <span className="font-medium text-(--ui-text-secondary)">{k.needsYouDetails}</span>
+        <span className="ml-auto text-[0.625rem] text-(--ui-text-quaternary)">
+          {k.needsYouDetailsMeta(detail.comments.length, folded.length, foldedCount)}
+        </span>
+      </button>
+      {open && (
+        <div className="flex flex-col gap-5" data-testid="needs-you-details-body">
+          {task.diagnostics && task.diagnostics.length > 0 && (
+            <Section label={k.diagnosticsN(task.diagnostics.length)}>
+              <Diagnostics
+                items={task.diagnostics}
+                onReclaim={() => void mutate(() => reclaimTask(task.id))()}
+                onUnblock={() =>
+                  void mutate(
+                    () => patchTask(task.id, { status: 'ready' }),
+                    () => host.notify({ kind: 'success', message: k.unblockedMessage(shortId(task.id)) })
+                  )()
+                }
+              />
+            </Section>
+          )}
+
+          <DescriptionSection
+            body={task.body}
+            onSave={body => void mutate(() => patchTask(task.id, { body }))()}
+          />
+
+          {task.result && (
+            <Section label={k.result}>
+              <TaskMarkdown text={task.result} />
+            </Section>
+          )}
+
+          {task.latest_summary && !isAdminSummary(task.latest_summary) && (
+            <Section label={k.latestSummary}>
+              <TaskMarkdown text={task.latest_summary} />
+            </Section>
+          )}
+
+          <FeedTabs
+            commentPending={commentPending}
+            detail={detail}
+            log={log}
+            onComment={onComment}
+            onRequeue={onRequeue}
+            running={running}
+          />
+        </div>
+      )}
+    </section>
+  )
+}
+
+/** Newest-first comments with same-author identical bodies folded (×3+ only). */
+function FoldedCommentsList({ comments }: { comments: CommentLike[] }) {
+  const k = useKanban()
+  const [openFolds, setOpenFolds] = useState<Record<string, boolean>>({})
+  const sorted = sortCommentsNewestFirst(comments)
+  const rows = foldRepeats(sorted)
+
+  return (
+    <ul className="flex flex-col gap-3" data-testid="needs-you-comments">
+      {rows.map(row => {
+        if (row.kind === 'single') {
+          const c = row.comment
+
+          return (
+            <li className="flex flex-col gap-0.5" data-testid="comment-row" key={c.id}>
+              <div className="flex items-baseline gap-2 text-[0.75rem]">
+                <span className="font-medium text-(--ui-text-secondary)">{c.author}</span>
+                <span className="text-[0.625rem] text-(--ui-text-quaternary)">{ago(c.created_at)}</span>
+              </div>
+              <TaskMarkdown text={c.body} />
+            </li>
+          )
+        }
+
+        const foldKey = `${row.author}:${row.body}`
+        const expanded = !!openFolds[foldKey]
+        const when = ago(row.lastAt) ?? ''
+
+        return (
+          <li className="flex flex-col gap-1" data-testid="comment-fold" key={foldKey}>
+            <button
+              aria-expanded={expanded}
+              aria-label={k.needsYouFoldAria(row.count, when)}
+              className="flex items-baseline gap-2 rounded px-1 py-0.5 text-left text-[0.75rem] hover:bg-(--ui-hover)"
+              data-testid="comment-fold-toggle"
+              onClick={() => setOpenFolds(prev => ({ ...prev, [foldKey]: !expanded }))}
+              type="button"
+            >
+              <span className="font-medium text-(--ui-text-secondary)">{row.author}</span>
+              <span className="text-[0.625rem] text-(--ui-text-quaternary)">{when}</span>
+              <span className="rounded bg-amber-500/15 px-1.5 py-px text-[0.625rem] font-semibold text-amber-700 dark:text-amber-300">
+                {k.needsYouFoldCount(row.count)}
+              </span>
+              <span className="ml-auto text-(--ui-text-quaternary)">
+                <Codicon name={expanded ? 'chevron-down' : 'chevron-right'} size="0.75rem" />
+              </span>
+            </button>
+            {!expanded && <TaskMarkdown text={row.body} />}
+            {expanded && (
+              <ul className="ml-2 flex flex-col gap-2 border-l border-(--ui-border) pl-3" data-testid="comment-fold-expanded">
+                {row.stamps.map(stamp => (
+                  <li className="flex flex-col gap-0.5" data-testid="comment-fold-stamp" key={stamp.id}>
+                    <span className="text-[0.625rem] text-(--ui-text-quaternary)">{ago(stamp.created_at)}</span>
+                    <TaskMarkdown text={stamp.body} />
+                  </li>
+                ))}
+              </ul>
+            )}
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+
 /** The main column's feed: Comments (default) / Activity / Runs / Worker log,
  *  selected Jira-style with a segmented control ("Activity ▸ Show: …"). The
  *  control hides itself when only comments exist — nothing to switch to. */
@@ -732,19 +892,7 @@ function FeedTabs({
     <div className="flex flex-col gap-4">
       {tab === 'comments' && (
         <>
-          {detail.comments.length > 0 && (
-            <ul className="flex flex-col gap-3">
-              {detail.comments.map(comment => (
-                <li className="flex flex-col gap-0.5" key={comment.id}>
-                  <div className="flex items-baseline gap-2 text-[0.75rem]">
-                    <span className="font-medium text-(--ui-text-secondary)">{comment.author}</span>
-                    <span className="text-[0.625rem] text-(--ui-text-quaternary)">{ago(comment.created_at)}</span>
-                  </div>
-                  <TaskMarkdown text={comment.body} />
-                </li>
-              ))}
-            </ul>
-          )}
+          {detail.comments.length > 0 && <FoldedCommentsList comments={detail.comments} />}
           <CommentComposer onRequeue={onRequeue} onSubmit={onComment} pending={commentPending} running={running} />
         </>
       )}
@@ -1122,46 +1270,61 @@ export function TaskDrawer({
                     </Callout>
                   )}
 
-                  {task.diagnostics && task.diagnostics.length > 0 && (
-                    <Section label={k.diagnosticsN(task.diagnostics.length)}>
-                      <Diagnostics
-                        items={task.diagnostics}
-                        onReclaim={() => void mutate(() => reclaimTask(task.id))()}
-                        onUnblock={() =>
-                          void mutate(
-                            () => patchTask(task.id, { status: 'ready' }),
-                            () => host.notify({ kind: 'success', message: k.unblockedMessage(shortId(task.id)) })
-                          )()
-                        }
+                  {showDecisionBar ? (
+                    <NeedsYouDetails
+                      commentPending={commentMut.isPending || requeueMut.isPending}
+                      detail={detail}
+                      log={log ?? null}
+                      mutate={mutate}
+                      onComment={(body: string) => commentMut.mutate(body)}
+                      onRequeue={(body: string) => requeueMut.mutate(body)}
+                      running={running}
+                      task={task}
+                    />
+                  ) : (
+                    <>
+                      {task.diagnostics && task.diagnostics.length > 0 && (
+                        <Section label={k.diagnosticsN(task.diagnostics.length)}>
+                          <Diagnostics
+                            items={task.diagnostics}
+                            onReclaim={() => void mutate(() => reclaimTask(task.id))()}
+                            onUnblock={() =>
+                              void mutate(
+                                () => patchTask(task.id, { status: 'ready' }),
+                                () => host.notify({ kind: 'success', message: k.unblockedMessage(shortId(task.id)) })
+                              )()
+                            }
+                          />
+                        </Section>
+                      )}
+
+                      <DescriptionSection
+                        body={task.body}
+                        onSave={body => void mutate(() => patchTask(task.id, { body }))()}
                       />
-                    </Section>
+
+                      {task.result && (
+                        <Section label={k.result}>
+                          <TaskMarkdown text={task.result} />
+                        </Section>
+                      )}
+
+                      {task.latest_summary && !isAdminSummary(task.latest_summary) && (
+                        <Section label={k.latestSummary}>
+                          <TaskMarkdown text={task.latest_summary} />
+                        </Section>
+                      )}
+
+                      <FeedTabs
+                        commentPending={commentMut.isPending || requeueMut.isPending}
+                        detail={detail}
+                        log={log ?? null}
+                        onComment={body => commentMut.mutate(body)}
+                        onRequeue={body => requeueMut.mutate(body)}
+                        running={running}
+                      />
+                    </>
                   )}
-
-                  <DescriptionSection
-                    body={task.body}
-                    onSave={body => void mutate(() => patchTask(task.id, { body }))()}
-                  />
-
-                  {task.result && (
-                    <Section label={k.result}>
-                      <TaskMarkdown text={task.result} />
-                    </Section>
-                  )}
-
-                  {task.latest_summary && !isAdminSummary(task.latest_summary) && (
-                    <Section label={k.latestSummary}>
-                      <TaskMarkdown text={task.latest_summary} />
-                    </Section>
-                  )}
-
-                  <FeedTabs
-                    commentPending={commentMut.isPending || requeueMut.isPending}
-                    detail={detail}
-                    log={log ?? null}
-                    onComment={body => commentMut.mutate(body)}
-                    onRequeue={body => requeueMut.mutate(body)}
-                    running={running}
-                  />
                 </div>
               </div>
               <aside className="flex w-64 shrink-0 flex-col gap-4 overflow-y-auto border-l border-(--ui-stroke-tertiary) px-4 pb-5">

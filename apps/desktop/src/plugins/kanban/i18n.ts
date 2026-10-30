@@ -238,6 +238,11 @@ type KanbanMessages = {
   needsYouLegacyHint: string
   needsYouPick: string
   needsYouDecisionBadge: (label: string) => string
+  needsYouRecommend: string
+  needsYouDetails: string
+  needsYouDetailsMeta: (comments: number, rows: number, folded: number) => string
+  needsYouFoldAria: (count: number, when: string) => string
+  needsYouFoldCount: (count: number) => string
 }
 
 export const en: KanbanMessages = {
@@ -480,7 +485,15 @@ export const en: KanbanMessages = {
   needsYouAnswered: 'answered',
   needsYouLegacyHint: 'No buttons: ask the agent to re-ask with options.',
   needsYouPick: 'Pick',
-  needsYouDecisionBadge: label => `You said ${label} · just now`
+  needsYouDecisionBadge: label => `You said ${label} · just now`,
+  needsYouRecommend: 'Recommend',
+  needsYouDetails: 'Details',
+  needsYouDetailsMeta: (comments, rows, folded) =>
+    folded > 0
+      ? `${comments} comments · ${rows} rows · 1 repeat ×${folded} folded`
+      : `${comments} comments · ${rows} rows`,
+  needsYouFoldAria: (count, when) => `Show ${count} identical comments, last ${when}`,
+  needsYouFoldCount: count => `×${count}`
 }
 
 const ja: KanbanMessages = {
@@ -722,7 +735,15 @@ const ja: KanbanMessages = {
   needsYouAnswered: '回答済み',
   needsYouLegacyHint: 'ボタンなし: エージェントに選択肢付きで再質問させてください。',
   needsYouPick: '選ぶ',
-  needsYouDecisionBadge: label => `「${label}」· たった今`
+  needsYouDecisionBadge: label => `「${label}」· たった今`,
+  needsYouRecommend: 'おすすめ',
+  needsYouDetails: '詳細',
+  needsYouDetailsMeta: (comments, rows, folded) =>
+    folded > 0
+      ? `${comments} 件のコメント · ${rows} 行 · 繰り返し ×${folded}`
+      : `${comments} 件のコメント · ${rows} 行`,
+  needsYouFoldAria: (count, when) => `同一コメント ${count} 件を表示（最終 ${when}）`,
+  needsYouFoldCount: count => `×${count}`
 }
 
 const zh: KanbanMessages = {
@@ -961,7 +982,15 @@ const zh: KanbanMessages = {
   needsYouAnswered: '已回答',
   needsYouLegacyHint: '无按钮：请让代理用选项重新提问。',
   needsYouPick: '选择',
-  needsYouDecisionBadge: label => `你选了 ${label} · 刚刚`
+  needsYouDecisionBadge: label => `你选了 ${label} · 刚刚`,
+  needsYouRecommend: '推荐',
+  needsYouDetails: '详情',
+  needsYouDetailsMeta: (comments, rows, folded) =>
+    folded > 0
+      ? `${comments} 条评论 · ${rows} 行 · 重复 ×${folded}`
+      : `${comments} 条评论 · ${rows} 行`,
+  needsYouFoldAria: (count, when) => `显示 ${count} 条相同评论，最近 ${when}`,
+  needsYouFoldCount: count => `×${count}`
 }
 
 const zhHant: KanbanMessages = {
@@ -1200,7 +1229,15 @@ const zhHant: KanbanMessages = {
   needsYouAnswered: '已回答',
   needsYouLegacyHint: '無按鈕：請讓代理用選項重新提問。',
   needsYouPick: '選擇',
-  needsYouDecisionBadge: label => `你選了 ${label} · 剛剛`
+  needsYouDecisionBadge: label => `你選了 ${label} · 剛剛`,
+  needsYouRecommend: '推薦',
+  needsYouDetails: '詳細',
+  needsYouDetailsMeta: (comments, rows, folded) =>
+    folded > 0
+      ? `${comments} 則留言 · ${rows} 列 · 重複 ×${folded}`
+      : `${comments} 則留言 · ${rows} 列`,
+  needsYouFoldAria: (count, when) => `顯示 ${count} 則相同留言，最近 ${when}`,
+  needsYouFoldCount: count => `×${count}`
 }
 
 /** Registered via `ctx.i18n.register` at plugin load (disposer tracked). */

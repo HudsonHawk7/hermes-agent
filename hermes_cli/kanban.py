@@ -1019,6 +1019,9 @@ def _cmd_ask(args: argparse.Namespace) -> int:
             "options": options,
             "pick": getattr(args, "pick", None),
         }
+        facts = getattr(args, "facts", None)
+        if facts:
+            ask["facts"] = list(facts)
         author = (getattr(args, "asked_by", None) or _profile_author() or "cli").strip()
         with kbc.connect_closing() as conn:
             result = gm.record_gm_ask(

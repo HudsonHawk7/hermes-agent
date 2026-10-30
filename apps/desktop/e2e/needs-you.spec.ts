@@ -227,8 +227,8 @@ test.describe('Needs you column (gm-asks part 2)', () => {
     const page = fixture!.page
     const col = page.getByTestId('needs-you-column')
     await expect(col).toBeVisible()
-    // 6 on alpha + 1 on beta = 7
-    await expect(page.getByTestId('needs-you-count')).toHaveText(/7/)
+    // 8 on alpha + 1 on beta = 9 (includes cliff + fold fixtures)
+    await expect(page.getByTestId('needs-you-count')).toHaveText(/9/)
     await expect(page.getByTestId('needs-you-card').filter({ hasText: 'Rebase Alpha PR?' })).toBeVisible()
     await expect(page.getByTestId('needs-you-card').filter({ hasText: 'Beta board ask' })).toBeVisible()
     await expect(page.getByTestId('needs-you-card').filter({ hasText: 'Legacy free-text block' })).toBeVisible()
@@ -242,7 +242,7 @@ test.describe('Needs you column (gm-asks part 2)', () => {
     await card.getByRole('button', { name: /Yes/i }).click()
     await expect(card).toHaveCount(0, { timeout: 15_000 })
     // counts drop
-    await expect(page.getByTestId('needs-you-count')).toHaveText(/6/)
+    await expect(page.getByTestId('needs-you-count')).toHaveText(/8/)
 
     // DB check via python one-shot
     const home = fixture!.sandbox.hermesHome
@@ -481,5 +481,48 @@ with kbc.connect_closing(board="alpha") as conn:
     await page.evaluate(() => {
       ;(window as unknown as { __HERMES_E2E_FAIL_ANSWER?: boolean }).__HERMES_E2E_FAIL_ANSWER = false
     })
+  })
+
+  test('(h) cliff notes: facts + recommend + 4-option grid', async () => {
+    const page = fixture!.page
+    await closeDrawer(page)
+    const card = page.getByTestId('needs-you-card').filter({ hasText: 'Cliff notes four-option' })
+    await expect(card).toBeVisible()
+    await card.scrollIntoViewIfNeeded()
+    await expect(card.getByTestId('needs-you-question')).toContainText(/Ship cliff notes layout/i)
+    await expect(card.getByTestId('needs-you-recommend')).toBeVisible()
+    await expect(card.getByTestId('needs-you-facts').getByTestId('needs-you-fact')).toHaveCount(3)
+    await expect(card.getByTestId('needs-you-options').getByRole('button')).toHaveCount(4)
+    await card.screenshot({ path: path.join(shots, 'h-cliff-notes-four-option.png') })
+  })
+
+  test('(i) folded repeat comments: Details closed, open fold shows 12 stamps', async () => {
+    const page = fixture!.page
+    await closeDrawer(page)
+    const card = page.getByTestId('needs-you-card').filter({ hasText: 'Folded repeat comments' })
+    await expect(card).toBeVisible()
+    await card.click()
+    const drawer = page.getByRole('dialog')
+    await expect(drawer).toBeVisible({ timeout: 15_000 })
+    const details = drawer.getByTestId('needs-you-details')
+    await expect(details).toBeVisible()
+    const toggle = drawer.getByTestId('needs-you-details-toggle')
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    await expect(drawer.getByTestId('needs-you-details-body')).toHaveCount(0)
+    await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    await expect(drawer.getByTestId('needs-you-details-body')).toBeVisible()
+    // Meta: 25 comments · 14 rows · 1 repeat ×12 folded
+    await expect(toggle).toContainText(/25 comments/)
+    await expect(toggle).toContainText(/14 rows/)
+    await expect(toggle).toContainText(/×12/)
+    const foldToggle = drawer.getByTestId('comment-fold-toggle')
+    await expect(foldToggle).toBeVisible()
+    await foldToggle.focus()
+    await page.keyboard.press('Enter')
+    await expect(drawer.getByTestId('comment-fold-expanded')).toBeVisible()
+    await expect(drawer.getByTestId('comment-fold-stamp')).toHaveCount(12)
+    await drawer.screenshot({ path: path.join(shots, 'i-folded-repeat-expanded.png') })
+    await closeDrawer(page)
   })
 })
