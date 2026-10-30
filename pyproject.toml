@@ -307,6 +307,11 @@ voice = [
   # onnxruntime has no darwin-x64 wheel/sdist (darwin-x64). Gate the local
   # STT path off both; sounddevice/numpy still ship.
   "faster-whisper==1.2.1; (platform_machine != 'ARM64' or sys_platform != 'win32') and (platform_machine != 'x86_64' or platform_system != 'Darwin') and sys_platform != 'android'",
+  # ctranslate2's Windows wheel ships cuDNN 9 but NOT cuBLAS 12, and Python no longer searches
+  # PATH for an extension's dependencies: without this the GPU path dies with "Library
+  # cublas64_12.dll is not found or cannot be loaded" and the CPU fallback costs 6-8 s per
+  # utterance. CUDA 12 major only — ctranslate2 4.8 links cublas64_12.dll.
+  "nvidia-cublas-cu12==12.9.2.10; sys_platform == 'win32' and platform_machine == 'AMD64'",
   "sounddevice==0.5.5",
   "numpy==2.4.3",
 ]
@@ -340,6 +345,8 @@ discord = ["discord.py[voice]==2.7.1"]
 # stt-whisper + audio-io compose [voice] (faster-whisper / sounddevice / numpy).
 stt-whisper = [
   "faster-whisper==1.2.1; (platform_machine != 'ARM64' or sys_platform != 'win32') and (platform_machine != 'x86_64' or platform_system != 'Darwin') and sys_platform != 'android'",
+  # The GPU path's missing half on Windows; see [voice] for why it is a dependency at all.
+  "nvidia-cublas-cu12==12.9.2.10; sys_platform == 'win32' and platform_machine == 'AMD64'",
 ]
 audio-io = ["sounddevice==0.5.5", "numpy==2.4.3"]
 # WeChat voice decode (tools/transcription_tools.py self-heal path).
@@ -725,11 +732,12 @@ markers = [
   "real_retry_backoff: opt out of the tests/agent autouse stub that zeroes jittered_backoff",
   "requires_wal: needs the runtime to actually enable SQLite WAL mode (skipped where Hermes falls back to journal_mode=DELETE)",
   "no_isolate: opt out of per-file subprocess isolation (tests share mutable module-level state)",
+  "local-assets: needs this host's real accelerators and downloaded models (a GPU, a cached faster-whisper model); deselected by default",
   "ssh: marks tests requiring a reachable SSH server (skipped in normal CI)",
   "platforms(*specs, arch=None, arch_negate=False): run only on hosts matching at least one spec — linux/macos/windows/posix/any, 'not X' negation, optional arch filter",
 ]
 # integration tests take way too long to run in the normal CI environments
-addopts = "-m 'not integration and not live'"
+addopts = "-m 'not integration and not live and not local-assets'"
 
 [tool.ty.environment]
 python-version = "3.13"
