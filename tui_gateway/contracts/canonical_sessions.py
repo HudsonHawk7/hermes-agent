@@ -43,6 +43,9 @@ class CanonicalCreateParams(ProfileParams):
     editor: dict[str, JsonValue] | None = None
     title: str | None = None
     hidden: bool = False
+    # Desktop group-member plumbing: re-read the profile route each turn (same as Bot Chat).
+    # Handled like ``hidden`` — popped before ``build_policy`` / CREATE_FIELDS staging.
+    room_plumbing: bool = False
     follow_profile_config: bool | None = None
     service_tier: str | None = None
     cwd_explicit: bool | None = None

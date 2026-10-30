@@ -6,7 +6,26 @@ import type { RosterRow } from './types'
 
 export type GroupExecutionMode = 'canonical' | 'legacy' | 'unavailable'
 
+/** Desktop e2e (and unit tests) can pin the legacy group room path so older
+ *  specs that drive `Message ${room}` + localStorage group-chats stay valid
+ *  against gateways that advertise the canonical driver. */
+export function e2eLegacyGroupsPinned(): boolean {
+  try {
+    if (typeof window !== 'undefined' && (window as { __HERMES_E2E_LEGACY_GROUPS?: unknown }).__HERMES_E2E_LEGACY_GROUPS === true) {
+      return true
+    }
+  } catch {
+    // SSR / non-DOM
+  }
+
+  return false
+}
+
 export function groupExecutionMode(value: unknown): GroupExecutionMode {
+  if (e2eLegacyGroupsPinned()) {
+    return 'legacy'
+  }
+
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return 'unavailable'
   }
@@ -109,10 +128,20 @@ export function useGroupCapability(active: boolean) {
 
   const current = capability?.source === source ? capability : null
 
+  // E2E pin: never leave the create dialog on "checking"/"unavailable" while the
+  // isolated gateway reconnects after bot profiles are minted (groups.capabilities
+  // fails or gateway!=='open'). Legacy mode seats every roster bot without the
+  // driver; Create Group must stay clickable for the existing e2e room helpers.
+  const mode: GroupExecutionMode | 'checking' = e2eLegacyGroupsPinned()
+    ? 'legacy'
+    : current
+      ? current.mode
+      : ('checking' as const)
+
   return {
     capability,
     connectionId,
-    mode: current ? current.mode : ('checking' as const),
+    mode,
     observedRoute: connectionId ? { connectionId, profile } : null,
     seatable: current ? current.seatable : null,
     source

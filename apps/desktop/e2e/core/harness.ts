@@ -200,7 +200,13 @@ export function coreAppEnv(sandbox: CoreSandbox, extra: Record<string, string> =
   const env: Record<string, string> = {}
 
   for (const [key, value] of Object.entries(process.env)) {
-    if (!value || CREDENTIAL_RE.test(key) || /^_?HERMES_/.test(key) || key === 'VIRTUAL_ENV') {
+    if (
+      !value
+      || CREDENTIAL_RE.test(key)
+      || /^_?HERMES_/.test(key)
+      || key === 'VIRTUAL_ENV'
+      || key === 'ELECTRON_RUN_AS_NODE'
+    ) {
       continue
     }
 
@@ -223,6 +229,8 @@ export function coreAppEnv(sandbox: CoreSandbox, extra: Record<string, string> =
     // Never repoint the user's OS hermes:// handler (HKCU on Windows) at a test checkout.
     HERMES_DESKTOP_SKIP_PROTOCOL_REGISTRATION: '1',
     HERMES_DESKTOP_CDP_PORT: 'off',
+    // Agent default: hide BrowserWindows (set HERMES_DESKTOP_E2E_HIDDEN=0 to watch).
+    HERMES_DESKTOP_E2E_HIDDEN: process.env.HERMES_DESKTOP_E2E_HIDDEN === '0' ? '0' : '1',
     // A partial-clone (blob:none) dev checkout turns some backend git read into
     // a lazy `git fetch origin` over the network, which outlived quit by >60 s
     // (reported as a finding). CI checkouts are not partial; keep dev runs
