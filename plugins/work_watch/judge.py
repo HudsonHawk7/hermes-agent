@@ -82,6 +82,104 @@ def local_model_calls() -> int:
     return _local_model_calls_this_pass
 
 
+def _production_local_model(candidate: dict[str, Any]) -> Optional[Judgment]:
+    """AC-P7 production middle: one local attempt, else honest model_unavailable.
+
+    Never returns None — a bare None would fall through to Tier-3 ``no_action_signal``
+    and drop ambiguous mail (Probe r3 defect 3). Cloud is a separate switch.
+    Content stays on-box: we only call a client whose base_url is clearly local.
+    """
+    try:
+        from agent.auxiliary_client import get_text_auxiliary_client
+    except Exception:
+        return Judgment(
+            tier=TIER_2,
+            why="model_unavailable",
+            rule="local_model_unavailable",
+            dropped=False,
+        )
+
+    try:
+        client, model = get_text_auxiliary_client(task="work_watch_judge")
+    except Exception:
+        client, model = None, None
+
+    if client is None or not model:
+        return Judgment(
+            tier=TIER_2,
+            why="model_unavailable",
+            rule="local_model_unavailable",
+            dropped=False,
+        )
+
+    # Refuse cloud endpoints for the default middle (cloud is GRAPH_WATCH_CLOUD_JUDGE).
+    base = ""
+    try:
+        base = str(getattr(client, "base_url", "") or getattr(getattr(client, "_client", None), "base_url", "") or "")
+    except Exception:
+        base = ""
+    base_l = base.lower()
+    local_hints = ("localhost", "127.0.0.1", "0.0.0.0", "::1", "ollama", "11434", "local")
+    if base and not any(h in base_l for h in local_hints):
+        return Judgment(
+            tier=TIER_2,
+            why="model_unavailable",
+            rule="local_model_unavailable",
+            dropped=False,
+        )
+
+    # Minimal local classify — subject/preview only; never export off-box.
+    subject = str(candidate.get("subject") or "")[:200]
+    preview = str(candidate.get("preview") or candidate.get("body_preview") or "")[:280]
+    prompt = (
+        "Classify this work message as tier 1 (action needed), 2 (fyi digest), or 3 (drop noise). "
+        "Reply with exactly: TIER <n> WHY <short_tag>\n"
+        f"Subject: {subject}\nPreview: {preview}\n"
+    )
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=40,
+            temperature=0,
+        )
+        text = ""
+        try:
+            text = str(resp.choices[0].message.content or "")
+        except Exception:
+            text = str(resp)
+    except Exception:
+        return Judgment(
+            tier=TIER_2,
+            why="ambiguous_local_error",
+            rule="local_model_error",
+            dropped=False,
+        )
+
+    m = re.search(r"TIER\s*([123]).*?WHY\s*([a-z0-9_:\-]{1,40})", text, re.IGNORECASE | re.DOTALL)
+    if not m:
+        return Judgment(
+            tier=TIER_2,
+            why="local:unparsed",
+            rule="local_model",
+            dropped=False,
+        )
+    tier = int(m.group(1))
+    why = f"local:{m.group(2).lower()}"
+    return Judgment(
+        tier=tier,
+        why=why,
+        rule="local_model",
+        dropped=(tier == TIER_3),
+    )
+
+
+def install_production_local_model() -> None:
+    """Wire the default local-model middle for live register() (AC-P7 / Probe r3)."""
+    set_local_model_fn(_production_local_model)
+    reset_local_model_budget()
+
+
 def _blob(candidate: dict[str, Any]) -> str:
     parts = [
         str(candidate.get("subject") or ""),

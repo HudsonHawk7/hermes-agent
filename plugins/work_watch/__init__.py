@@ -10,6 +10,13 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+def install_production_judge() -> None:
+    """Public alias used by tests + register — wires AC-P7 local-model middle."""
+    from plugins.work_watch import judge
+
+    judge.install_production_local_model()
+
+
 def materialize_desktop_half(*, hermes_home: str | None = None) -> str | None:
     """Copy this package's desktop/ half into ``$HERMES_HOME/plugins/work_watch/``.
 
@@ -61,7 +68,7 @@ def materialize_desktop_half(*, hermes_home: str | None = None) -> str | None:
 
 def register(ctx) -> None:
     """Register tools + slash command + poll scheduler. Dashboard API via dashboard/manifest."""
-    from plugins.work_watch import service
+    from plugins.work_watch import judge, service
     from plugins.work_watch.constants import PLUGIN_LABEL, REFRESH_TOKEN_ENV
 
     # Desktop half → HERMES_HOME so Settings / Work watch appear after reload.
@@ -69,6 +76,12 @@ def register(ctx) -> None:
         materialize_desktop_half()
     except Exception as exc:
         logger.debug("desktop materialize skipped: %s", type(exc).__name__)
+
+    # AC-P7: production local-model middle (never leave bare → Tier-3 no_action_signal).
+    try:
+        judge.install_production_local_model()
+    except Exception as exc:
+        logger.warning("work_watch local-model middle not installed: %s", type(exc).__name__)
 
     # Background poll + digest (AC-P4 / AC-P5) — spawn_context_thread inside.
     try:
