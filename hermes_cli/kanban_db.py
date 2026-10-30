@@ -2439,23 +2439,16 @@ def release_stale_claims(
     with ``consecutive_failures`` stuck at 0, so the breaker never trips.
     ``reclaim_task`` (operator path) deliberately resets the counter instead.
 
-    A host-local worker that is still alive gets its claim *extended* instead
-    (a slow model can sit longer than the TTL inside one tool-free call, so no
-    heartbeat) — unless ``last_heartbeat_at`` is older than
-    ``DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS`` (wedged; ``_touch_activity``
-    keeps any genuinely active worker fresh). Safe to call often.
-
-    Reclaiming a live worker mid-flight produces the spawn- then-immediately-reclaim loop seen on slow
-    models that spend longer than ``DEFAULT_CLAIM_TTL_SECONDS`` inside a single tool-free LLM call (#23025):
-    no tool calls means no ``kanban_heartbeat``, even though the subprocess is healthy.
-    Backstop (#29747 gap 3): if the worker's PID is still alive but its ``last_heartbeat_at`` is stale by
-    more than ``DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS`` (1h), the worker has been making no observable
-    progress and we reclaim anyway — even if ``_pid_alive`` is still true. This catches the
-    wedged-in-a-logic-loop case where the process is technically running but accomplishing nothing.
-    ``_touch_activity`` (run_agent.py) bridges chunk-level liveness into ``last_heartbeat_at`` via #31752,
-    so any genuinely active worker keeps its heartbeat fresh as a side effect of normal API traffic.
-    ``enforce_max_runtime`` and ``detect_crashed_workers`` remain the upper bounds for genuinely wedged or
-    dead workers.
+    A host-local worker that is still alive gets its claim *extended* only when
+    ``last_heartbeat_at`` is present and fresher than
+    ``DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS``. ``pid_alive`` alone must not
+    keep the claim forever: that is the post-``worker_bound`` hang with no
+    ``agent_init`` / no heartbeat (GM stall rule). After the agent is up,
+    ``_touch_activity`` bridges chunk-level liveness into ``last_heartbeat_at``
+    (#31752), so a healthy long tool-free call still extends. A null heartbeat
+    falls through to terminate + reclaim (or defer if the kill cannot land).
+    ``detect_pre_heartbeat_stalls`` warns at 5 min and kills at 15 min even
+    before claim TTL expiry. Safe to call often.
     """
     now = int(time.time())
     reclaimed = 0
@@ -2473,12 +2466,15 @@ def release_stale_claims(
             continue
         host_local = (row["claim_lock"] or "").startswith(host_prefix)
         hb = _to_epoch(row["last_heartbeat_at"])
-        # Backstop: a heartbeat older than the max-stale threshold means no
-        # observable progress — reclaim even if the PID is alive (logic loop).
-        heartbeat_stale = hb is not None and (now - hb) > DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS
+        # Fresh heartbeat = observable progress. Null heartbeat never extends
+        # (stall rule); a heartbeat older than the max-stale window is wedged.
+        heartbeat_fresh = (
+            hb is not None and (now - hb) <= DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS
+        )
+        heartbeat_stale = hb is not None and not heartbeat_fresh
         started_at = _row_get(row, "worker_started_at")
         if (host_local and row["worker_pid"] and _worker_alive(row["worker_pid"], started_at)
-                and not heartbeat_stale):
+                and heartbeat_fresh):
             _extend_live_stale_claim(conn, row, now)
             continue
 
@@ -2557,9 +2553,10 @@ def _record_reclaim(
 
 
 def _extend_live_stale_claim(conn: sqlite3.Connection, row: sqlite3.Row, now: int) -> None:
-    """TTL-expired claim whose host-local worker is alive: extend instead of
-    reclaiming (``claim_extended`` event). CAS on the same expired lock so a
-    concurrent reclaimer wins cleanly."""
+    """TTL-expired claim whose host-local worker is alive *and heartbeating*:
+    extend instead of reclaiming (``claim_extended`` event). Caller must have
+    already required a fresh ``last_heartbeat_at`` — ``pid_alive`` alone is not
+    enough. CAS on the same expired lock so a concurrent reclaimer wins cleanly."""
     new_expires = now + _resolve_claim_ttl_seconds()
     with write_txn(conn):
         cur = conn.execute(
@@ -2575,7 +2572,7 @@ def _extend_live_stale_claim(conn: sqlite3.Connection, row: sqlite3.Row, now: in
         _append_event(
             conn, row["id"], "claim_extended",
             {
-                "reason": "pid_alive",
+                "reason": "heartbeat_fresh",
                 "worker_pid": int(row["worker_pid"]),
                 "claim_lock": row["claim_lock"],
                 "claim_expires_was": _to_epoch(row["claim_expires"]),

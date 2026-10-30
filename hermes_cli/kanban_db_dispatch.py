@@ -84,6 +84,23 @@ _RESPAWN_GUARD_PR_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Pre-heartbeat stall rule (GM 10/23): nothing stuck > ~5 min without progress.
+# A worker that binds then hangs before agent_init never heartbeats; pid_alive
+# alone used to extend the claim forever. Warn at 5 min, reclaim + kill at 15.
+# Overridable via HERMES_KANBAN_STALL_WARN_SECONDS / HERMES_KANBAN_STALL_KILL_SECONDS.
+DEFAULT_PRE_HEARTBEAT_STALL_WARN_SECONDS = 5 * 60
+DEFAULT_PRE_HEARTBEAT_STALL_KILL_SECONDS = 15 * 60
+
+# Log markers that mean the agent got past the worker_bound hang class.
+# Match real progress only. Bare "agent_init" is too loose — a hang log like
+# "still waiting before agent_init" would false-positive and skip the stall kill.
+_AGENT_INIT_LOG_MARKERS = (
+    "OpenAI client created",
+    "(agent_init",
+    "agent_init ok",
+    "agent_init ...",
+)
+
 
 @dataclass
 class DispatchResult:
@@ -134,6 +151,8 @@ class DispatchResult:
     """Task ids whose workers exceeded ``max_runtime_seconds``."""
     stale: list[str] = field(default_factory=list)
     """Task ids reclaimed for no heartbeat within ``dispatch_stale_timeout_seconds``."""
+    stalled: list[str] = field(default_factory=list)
+    """Task ids reclaimed by the pre-heartbeat 5/15-minute stall rule (no hb / no agent_init)."""
     respawn_guarded: list[tuple[str, str]] = field(default_factory=list)
     """``(task_id, reason)`` skipped by the respawn guard: ``"blocker_auth"``
     (quota/auth error — also auto-blocked), ``"recent_success"`` (completed run
@@ -554,6 +573,239 @@ def _reap_terminal_worker_row(conn, row, host_prefix: str, signal_fn, reaped: li
             )
     if alive:
         reaped.append(row["task_id"])
+
+
+def _stall_env_seconds(name: str, default: int) -> int:
+    """Positive int from env, else ``default`` (bad values ignored)."""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return default
+
+
+def _last_worker_log_line(task_id: str, *, board: Optional[str] = None) -> Optional[str]:
+    """Last non-empty worker-log line (truncated), or None when missing."""
+    raw = _kb.read_worker_log(task_id, tail_bytes=8000, board=board)
+    if not raw:
+        return None
+    for line in reversed(raw.splitlines()):
+        text = line.strip()
+        if text:
+            return text[:500]
+    return None
+
+
+def _worker_log_has_agent_init(task_id: str, *, board: Optional[str] = None) -> bool:
+    """True when the worker log shows agent_init / client-created progress."""
+    raw = _kb.read_worker_log(task_id, tail_bytes=64_000, board=board) or ""
+    return any(marker in raw for marker in _AGENT_INIT_LOG_MARKERS)
+
+
+def _has_event_kind_for_run(
+    conn: sqlite3.Connection, task_id: str, run_id: Optional[int], kind: str,
+) -> bool:
+    """True when this run (or task-scoped when run_id is None) already has ``kind``."""
+    if run_id is None:
+        row = conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id = ? AND kind = ? LIMIT 1",
+            (task_id, kind),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT 1 FROM task_events WHERE task_id = ? AND run_id = ? AND kind = ? LIMIT 1",
+            (task_id, int(run_id), kind),
+        ).fetchone()
+    return row is not None
+
+
+def detect_pre_heartbeat_stalls(
+    conn: sqlite3.Connection,
+    *,
+    warn_seconds: Optional[int] = None,
+    kill_seconds: Optional[int] = None,
+    signal_fn=None,
+    board: Optional[str] = None,
+    failure_limit: Optional[int] = None,
+    now: Optional[int] = None,
+) -> list[str]:
+    """Warn at 5m / reclaim at 15m for running workers that never heartbeated.
+
+    Targets the hang after ``worker_bound`` with no ``agent_init``: the worker
+    PID stays alive, ``last_heartbeat_at`` stays NULL, and (before this rule)
+    ``release_stale_claims`` extended the claim on ``pid_alive`` forever.
+
+    - Age is from the active run's ``started_at`` (else the task's).
+    - A worker log that already shows ``agent_init`` is past this hang class;
+      leave it to heartbeat / 4h stale / max_runtime paths.
+    - Warn once per run at ``warn_seconds`` (``stall_warned`` event).
+    - At ``kill_seconds``: terminate the worker tree, reclaim to retry status,
+      emit a loud ``stalled`` event naming the last log line, and book a
+      failure so the breaker can trip on a repeated hang.
+    """
+    warn_s = (
+        int(warn_seconds)
+        if warn_seconds is not None
+        else _stall_env_seconds(
+            "HERMES_KANBAN_STALL_WARN_SECONDS", DEFAULT_PRE_HEARTBEAT_STALL_WARN_SECONDS,
+        )
+    )
+    kill_s = (
+        int(kill_seconds)
+        if kill_seconds is not None
+        else _stall_env_seconds(
+            "HERMES_KANBAN_STALL_KILL_SECONDS", DEFAULT_PRE_HEARTBEAT_STALL_KILL_SECONDS,
+        )
+    )
+    kill_s = max(kill_s, warn_s)
+    now_ts = int(now if now is not None else time.time())
+    rows = conn.execute(
+        "SELECT t.id, t.claim_lock, t.worker_pid, t.current_run_id, t.assignee, "
+        "       t.started_at AS task_started_at, t.last_heartbeat_at, "
+        "       t.worker_started_at AS task_worker_started_at, "
+        "       r.started_at AS run_started_at, r.worker_started_at AS run_worker_started_at "
+        "FROM tasks t "
+        "LEFT JOIN task_runs r ON r.id = t.current_run_id "
+        "WHERE t.status = 'running' AND t.last_heartbeat_at IS NULL",
+    ).fetchall()
+    from hermes_cli.kanban_owner_recovery import owner_reclaim_blocked, owner_reclaim_blocked_after_kill
+
+    stalled: list[str] = []
+    for row in rows:
+        tid = row["id"]
+        if owner_reclaim_blocked(conn, tid):
+            continue
+        started = _kb._to_epoch(row["run_started_at"]) or _kb._to_epoch(row["task_started_at"])
+        if started is None:
+            continue
+        age = now_ts - int(started)
+        if age < warn_s:
+            continue
+        if _worker_log_has_agent_init(tid, board=board):
+            continue
+
+        last_line = _last_worker_log_line(tid, board=board)
+        run_id = row["current_run_id"]
+        if age < kill_s:
+            if _has_event_kind_for_run(conn, tid, run_id, "stall_warned"):
+                continue
+            with _kb.write_txn(conn):
+                # Re-check under the write lock so a late heartbeat wins.
+                cur = conn.execute(
+                    "SELECT last_heartbeat_at FROM tasks WHERE id = ? AND status = 'running'",
+                    (tid,),
+                ).fetchone()
+                if cur is None or cur["last_heartbeat_at"] is not None:
+                    continue
+                if _has_event_kind_for_run(conn, tid, run_id, "stall_warned"):
+                    continue
+                _kb._append_event(
+                    conn, tid, "stall_warned",
+                    {
+                        "age_seconds": int(age),
+                        "warn_after_seconds": warn_s,
+                        "kill_after_seconds": kill_s,
+                        "last_log_line": last_line,
+                        "worker_pid": _kb._opt_int(row["worker_pid"]),
+                        "reason": "no_heartbeat",
+                    },
+                    run_id=run_id,
+                )
+            continue
+
+        fingerprint = row["run_worker_started_at"]
+        if fingerprint is None:
+            fingerprint = row["task_worker_started_at"]
+        termination = _terminate_reclaimed_worker(
+            row["worker_pid"], row["claim_lock"],
+            signal_fn=signal_fn, started_at=fingerprint,
+        )
+        if _worker_survived_termination(termination):
+            _defer_reclaim_for_live_worker(
+                conn, tid, row["claim_lock"], now_ts, termination,
+                reason="pre_heartbeat_stall_worker_alive",
+            )
+            with _kb.write_txn(conn):
+                _kb._append_event(
+                    conn, tid, "stall_kill_deferred",
+                    {
+                        "age_seconds": int(age),
+                        "kill_after_seconds": kill_s,
+                        "last_log_line": last_line,
+                        "reason": "no_heartbeat",
+                        **{k: termination.get(k) for k in (
+                            "prev_pid", "host_local", "termination_attempted",
+                            "terminated", "signal_refused", "sigkill",
+                        )},
+                    },
+                    run_id=run_id,
+                )
+            continue
+
+        retry_status = "ready"
+        error = (
+            f"pre-heartbeat stall after {int(age)}s "
+            f"(no heartbeat / no agent_init); last log: {last_line or '(empty)'}"
+        )
+        with _kb.write_txn(conn):
+            if owner_reclaim_blocked_after_kill(
+                conn, tid, signalled=bool(termination.get("termination_attempted")),
+            ):
+                continue
+            cur_row = conn.execute(
+                "SELECT last_heartbeat_at, claim_lock FROM tasks "
+                "WHERE id = ? AND status = 'running'",
+                (tid,),
+            ).fetchone()
+            if cur_row is None or cur_row["last_heartbeat_at"] is not None:
+                continue
+            retry_status = _kb._retry_status_for_run(conn, tid)
+            cur = conn.execute(
+                "UPDATE tasks SET status = ?, claim_lock = NULL, "
+                "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
+                "last_heartbeat_at = NULL "
+                "WHERE id = ? AND status = 'running' AND claim_lock IS ? "
+                "AND last_heartbeat_at IS NULL",
+                (retry_status, tid, row["claim_lock"]),
+            )
+            if cur.rowcount != 1:
+                continue
+            payload = {
+                "age_seconds": int(age),
+                "warn_after_seconds": warn_s,
+                "kill_after_seconds": kill_s,
+                "last_log_line": last_line,
+                "reason": "no_heartbeat",
+                "retry_status": retry_status,
+                "worker_pid": _kb._opt_int(row["worker_pid"]),
+            }
+            payload.update(termination)
+            ended_run = _kb._end_run(
+                conn, tid, outcome="stalled", status="stalled",
+                error=error, metadata=payload,
+            )
+            _kb._append_event(conn, tid, "stalled", payload, run_id=ended_run)
+            stalled.append(tid)
+
+        if tid in stalled:
+            _kb._record_task_failure(
+                conn, tid, error,
+                outcome="stalled", failure_limit=failure_limit,
+                release_claim=False, end_run=False,
+                event_payload_extra={
+                    "worker_pid": _kb._opt_int(row["worker_pid"]),
+                    "retry_status": retry_status,
+                    "last_log_line": last_line,
+                },
+            )
+            _kb._log.warning(
+                "kanban stall: reclaimed %s after %ss with no heartbeat "
+                "(last log: %s)",
+                tid, int(age), last_line or "(empty)",
+            )
+    return stalled
 
 
 def _worker_survived_termination(termination: dict) -> bool:
@@ -2448,6 +2700,13 @@ def _run_reclaim_phase(
     if reconcile_orphans:
         result.reconciled_orphans = reconcile_orphaned_running(conn)
     result.stale = detect_stale_running(conn, stale_timeout_seconds=stale_timeout_seconds)
+    # 5/15 pre-heartbeat stall: warn then kill workers that never progress past
+    # worker_bound (no heartbeat / no agent_init). Runs after claim-TTL reclaim
+    # so an already-reclaimed row is not double-counted.
+    result.stalled = detect_pre_heartbeat_stalls(
+        conn, signal_fn=None, board=board, failure_limit=failure_limit,
+    )
+    result.reclaimed += len(result.stalled)
     result.crashed = detect_crashed_workers(conn, board=board)
     # Side-channel attributes (see detect_crashed_workers); rate-limited tasks
     # went back to ``ready`` and the respawn guard defers them until quota clears.
