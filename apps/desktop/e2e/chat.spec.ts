@@ -56,10 +56,9 @@ test.describe('chat interaction with mock backend', () => {
 
     await composer.click()
     await composer.type('please answer tersely')
-    // Since "running is not busy" (3bc52fb9df) the primary keeps the Send
-    // affordance mid-turn — steer is routed through the submit engine, not a
-    // separate labeled button. Queue remains the explicit secondary action.
-    await expect(primary).toHaveAttribute('aria-label', 'Send')
+    // Mid-turn draft uses the busy-input policy label (interrupt → Redirect).
+    // "running is not busy" still routes steer through submit; Queue stays secondary.
+    await expect(primary).toHaveAttribute('aria-label', 'Redirect the current run')
     await expect(queue).toBeVisible()
     await page.screenshot({ path: testInfo.outputPath('busy-composer-steer.png') })
 

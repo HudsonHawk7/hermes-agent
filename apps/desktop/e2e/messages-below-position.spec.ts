@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
 
@@ -7,16 +7,25 @@ import { build } from 'esbuild'
 import { resolveElectronBinary } from './electron-binary'
 import { _electron, expect, test } from './test'
 
-test('messages-below reads stay bounded with real content-visibility groups', async ({}, testInfo) => {
+test('messages-below reads stay bounded with real content-visibility groups', async (_args, testInfo) => {
   const temporary = mkdtempSync(path.join(tmpdir(), 'hermes-messages-below-'))
+  const userData = path.join(temporary, 'user-data')
+  // Electron throws "Failed to get 'userData' path" when the override folder
+  // was never created (Architect 10/29). Create it before launch.
+  mkdirSync(userData, { recursive: true })
   const main = path.join(temporary, 'main.cjs')
   writeFileSync(
     main,
     `const { app, BrowserWindow } = require('electron');
-app.setPath('userData', ${JSON.stringify(path.join(temporary, 'user-data'))});
+app.setPath('userData', ${JSON.stringify(userData)});
 app.whenReady().then(() => {
-  const window = new BrowserWindow({ width: 1000, height: 800,
-    webPreferences: { sandbox: true, contextIsolation: true, backgroundThrottling: false } });
+  const window = new BrowserWindow({
+    width: 1000,
+    height: 800,
+    show: false,
+    paintWhenInitiallyHidden: true,
+    webPreferences: { sandbox: true, contextIsolation: true, backgroundThrottling: false }
+  });
   window.loadURL('about:blank');
 });`
   )
@@ -28,15 +37,28 @@ app.whenReady().then(() => {
     globalName: 'MessagesBelow',
     write: false
   })
+
+  // Strip ELECTRON_RUN_AS_NODE: an agent shell inherits it and electron.exe
+  // then rejects --remote-debugging-port.
+  const launchEnv: Record<string, string> = {}
+
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined && key !== 'ELECTRON_RUN_AS_NODE') {
+      launchEnv[key] = value
+    }
+  }
+
   const app = await _electron.launch({
     executablePath: resolveElectronBinary([path.resolve('.'), path.resolve('../..')]),
-    args: ['--no-sandbox', main]
+    args: ['--no-sandbox', main],
+    env: launchEnv
   })
 
   try {
     const page = await app.firstWindow()
     await page.setContent('<div id="viewport" style="height:600px;overflow:auto"><div id="content"></div></div>')
     await page.addScriptTag({ content: bundle.outputFiles[0].text })
+
     const results = await page.evaluate(async () => {
       const count = 512
       const viewport = document.getElementById('viewport')!
@@ -64,10 +86,12 @@ app.whenReady().then(() => {
           ) => { read: () => { count: number; settled: boolean } }
         }
       }).MessagesBelow
+
       const reader = api.createMessagesBelowReader(viewport, content)
       const original = Element.prototype.getBoundingClientRect
       let outer = 0
       let inner = 0
+
       Element.prototype.getBoundingClientRect = function () {
         if (this.getAttribute('data-slot') === 'aui_message-group') {
           outer++
@@ -117,6 +141,7 @@ app.whenReady().then(() => {
 
             if (groupRect.top >= bottom) {
               reference += messages.length
+
               continue
             }
 
@@ -155,7 +180,18 @@ app.whenReady().then(() => {
       contentType: 'application/json'
     })
   } finally {
-    await app.close()
+    try {
+      const pid = app.process().pid
+      await app.close().catch(() => undefined)
+
+      if (pid) {
+        const { killProcessTree } = await import('./fixtures')
+        killProcessTree(pid)
+      }
+    } catch {
+      // best-effort
+    }
+
     rmSync(temporary, { recursive: true, force: true })
   }
 })

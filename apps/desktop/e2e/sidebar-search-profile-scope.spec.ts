@@ -40,12 +40,22 @@ function seedSession(sandbox: Sandbox, home: string, sessionId: string, marker: 
     'db.close()'
   ].join('\n')
 
-  const python = path.join(REPO_ROOT, '.venv', 'bin', 'python')
+  const python =
+    process.env.HERMES_DESKTOP_PYTHON ||
+    (fs.existsSync(path.join(REPO_ROOT, '.venv', 'Scripts', 'python.exe'))
+      ? path.join(REPO_ROOT, '.venv', 'Scripts', 'python.exe')
+      : path.join(REPO_ROOT, '.venv', 'bin', 'python'))
 
   const result = spawnSync(python, ['-c', script, home, sessionId, marker], {
     cwd: REPO_ROOT,
     encoding: 'utf8',
-    env: { ...process.env, HERMES_HOME: sandbox.hermesHome, HOME: sandbox.root, PYTHONPATH: REPO_ROOT }
+    env: {
+      ...process.env,
+      HERMES_HOME: sandbox.hermesHome,
+      HOME: sandbox.root,
+      USERPROFILE: sandbox.root,
+      PYTHONPATH: REPO_ROOT,
+    },
   })
 
   if (result.status !== 0) {

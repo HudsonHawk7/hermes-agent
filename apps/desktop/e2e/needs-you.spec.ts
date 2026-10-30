@@ -48,9 +48,23 @@ function proofDir(sha: string): string {
   return dir
 }
 
+function resolvePython(): string {
+  if (process.env.HERMES_DESKTOP_PYTHON) {return process.env.HERMES_DESKTOP_PYTHON}
+
+  if (process.env.PYTHON) {return process.env.PYTHON}
+  const win = path.join(REPO_ROOT, '.venv', 'Scripts', 'python.exe')
+  const nix = path.join(REPO_ROOT, '.venv', 'bin', 'python')
+
+  if (fs.existsSync(win)) {return win}
+
+  if (fs.existsSync(nix)) {return nix}
+
+  return process.platform === 'win32' ? 'python' : 'python3'
+}
+
 function seedHome(hermesHome: string): { ids: Record<string, string> } {
   const out = path.join(hermesHome, 'gm-asks-seed.json')
-  const py = process.env.PYTHON || 'python'
+  const py = resolvePython()
   execFileSync(py, [SEED_SCRIPT, '--home', hermesHome, '--out', out], {
     cwd: REPO_ROOT,
     env: { ...process.env, HERMES_HOME: hermesHome, PYTHONPATH: REPO_ROOT },

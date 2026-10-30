@@ -12,7 +12,7 @@
  * repo's Python venv (`.venv`) must exist for both backends.
  */
 
-import { type ChildProcess, spawn, spawnSync } from 'node:child_process'
+import { type ChildProcess, spawn } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as net from 'node:net'
 import * as path from 'node:path'
@@ -44,19 +44,23 @@ interface RemoteGateway {
 }
 
 function findHermesBinary(): string {
-  const venv = path.join(REPO_ROOT, '.venv', 'bin', 'hermes')
+  // Prefer the worktree venv — never the live install on PATH.
+  const candidates = process.platform === 'win32'
+    ? [
+        path.join(REPO_ROOT, '.venv', 'Scripts', 'hermes.exe'),
+        path.join(REPO_ROOT, '.venv', 'Scripts', 'hermes.cmd'),
+      ]
+    : [path.join(REPO_ROOT, '.venv', 'bin', 'hermes')]
 
-  if (fs.existsSync(venv)) {
-    return venv
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate
+    }
   }
 
-  const result = spawnSync('which', ['hermes'], { encoding: 'utf8' })
-
-  if (result.status === 0 && result.stdout.trim()) {
-    return result.stdout.trim()
-  }
-
-  throw new Error('hermes binary not found: create the repo venv (uv sync) or put hermes on PATH')
+  throw new Error(
+    `hermes binary not found under ${path.join(REPO_ROOT, '.venv')}: run uv sync in the worktree (do not use the live install)`,
+  )
 }
 
 async function freePort(): Promise<number> {

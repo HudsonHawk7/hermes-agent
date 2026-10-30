@@ -73,9 +73,9 @@ test('a fresh (non-clone) bot gets a runnable model block on disk', async () => 
   await expect.poll(() => existsSync(cfgPath), { timeout: 30_000 }).toBe(true)
   const cfg = readFileSync(cfgPath, 'utf8')
   expect(cfg).toMatch(/^model:/m)
-  expect(cfg).toMatch(/provider:\s*mock/)
+  // Mock e2e configs use provider: custom + base_url (writeMockProviderConfig); older
+  // trees used a named `mock` provider that no longer resolves.
+  expect(cfg).toMatch(/provider:\s*custom/)
   expect(cfg).toMatch(/default:\s*mock-model/)
-  // The inherited model rides a custom `providers:` gateway; its definition must travel with it
-  // or the first turn dies with "Unknown provider 'mock'".
-  expect(cfg).toMatch(/^providers:\n\s+mock:/m)
+  expect(cfg).toMatch(/base_url:\s*http:\/\//)
 })
