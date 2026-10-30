@@ -33,9 +33,9 @@ from tools.transcription_audio import (
 from tools.transcription_chunking import exceeds_upload_limit, transcribe_oversized, upload_limit
 from tools.transcription_local import (
     _get_idle_unload_seconds, _has_local_command, _join_confident_segments,
-    _load_local_whisper_model, _looks_like_cuda_lib_error, _normalize_local_model,
-    _normalize_local_stt_language, _transcribe_local_command, _try_lazy_install_stt,
-    build_local_transcribe_kwargs)
+    _load_local_whisper_model, _looks_like_cuda_lib_error, _looks_like_cuda_oom_error,
+    _normalize_local_model, _normalize_local_stt_language, _transcribe_local_command,
+    _try_lazy_install_stt, build_local_transcribe_kwargs)
 # The ``_transcribe_<provider>`` handlers are looked up in this module's globals by _dispatch_stt_provider.
 from tools.transcription_cloud import (
     _has_xai_stt_credentials, _resolve_openai_audio_client_config, _transcribe_deepinfra,
@@ -365,6 +365,15 @@ def _replace_cached_model_on_cpu(model_name: str):
     return model
 
 
+def _transient_cpu_model(model_name: str):
+    """A CPU/int8 model for ONE utterance, leaving the cached CUDA model in place.
+
+    Out of GPU memory is transient (ComfyUI, Ollama and the transcription all share the 3090), so
+    unlike a missing library it must not poison the cache: the next utterance tries the GPU again.
+    """
+    return _load_local_whisper_model(model_name, device="cpu", compute_type="int8")
+
+
 def _transcribe_local(
     file_path: str, model_name: str, *, language: Optional[str] = None, prompt: Optional[str] = None
 ) -> dict[str, Any]:
@@ -401,11 +410,19 @@ def _transcribe_local(
         except Exception as exc:
             # CUDA libs can fail at dlopen-on-first-use, AFTER loading: evict the poisoned
             # cached model, reload on CPU and retry once, else every later message fails.
-            if not _looks_like_cuda_lib_error(exc):
+            # An out-of-memory failure is different — nothing is broken, so the cached CUDA model
+            # stays and only this utterance drops to the CPU (the 3090 is shared with ComfyUI and
+            # Ollama; a silent 6-8 s degrade is exactly how the CPU-only path went unnoticed).
+            if not (_looks_like_cuda_lib_error(exc) or _looks_like_cuda_oom_error(exc)):
                 raise
-            logger.warning("faster-whisper CUDA runtime failed mid-transcribe (%s) — "
-                           "evicting cached model and retrying on CPU (int8).", exc)
-            model = _replace_cached_model_on_cpu(model_name)
+            if _looks_like_cuda_oom_error(exc):
+                logger.warning("faster-whisper CUDA out of memory mid-transcribe (%s) — retrying this "
+                               "utterance on the CPU (int8); the next one tries the GPU again.", exc)
+                model = _transient_cpu_model(model_name)
+            else:
+                logger.warning("faster-whisper CUDA runtime failed mid-transcribe (%s) — "
+                               "evicting cached model and retrying on CPU (int8).", exc)
+                model = _replace_cached_model_on_cpu(model_name)
             segments, info = model.transcribe(file_path, **transcribe_kwargs)
             segments = list(segments)
         transcript = _join_confident_segments(segments, local_cfg)
