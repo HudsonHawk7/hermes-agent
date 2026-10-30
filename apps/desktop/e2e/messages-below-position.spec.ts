@@ -7,7 +7,8 @@ import { build } from 'esbuild'
 import { resolveElectronBinary } from './electron-binary'
 import { _electron, expect, test } from './test'
 
-test('messages-below reads stay bounded with real content-visibility groups', async (_args, testInfo) => {
+// eslint-disable-next-line no-empty-pattern -- Playwright requires fixture-object destructuring
+test('messages-below reads stay bounded with real content-visibility groups', async ({}, testInfo) => {
   const temporary = mkdtempSync(path.join(tmpdir(), 'hermes-messages-below-'))
   const userData = path.join(temporary, 'user-data')
   // Electron throws "Failed to get 'userData' path" when the override folder
