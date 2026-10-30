@@ -693,7 +693,7 @@ export async function setupMockBackend(options: MockBackendOptions = {}): Promis
     options.extraConfig,
     options.modelContextLength,
   )
-  writeEnvFile(sandbox.hermesHome)
+  writeEnvFile(sandbox.hermesHome, 'e2e-mock-key', mock.url)
 
   // 3. Build env + launch
   const env = buildAppEnv(sandbox)

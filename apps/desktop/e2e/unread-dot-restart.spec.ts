@@ -28,6 +28,8 @@
 import { expect, type Page, test } from '@playwright/test'
 import { type ElectronApplication } from '@playwright/test'
 
+import { restartMockServer } from '../../../tests-js/scripts/mock-server'
+
 import {
   buildAppEnv,
   launchDesktop,
@@ -35,7 +37,6 @@ import {
   setupMockBackend,
   waitForAppReady,
 } from './fixtures'
-import { restartMockServer } from '../../../tests-js/scripts/mock-server'
 
 /** Finished-unread dot aria-label (from i18n en.ts). */
 const UNREAD_DOT_LABEL = 'Finished — unread'
@@ -138,11 +139,23 @@ test.describe('unread dot survives app restart', () => {
       .toBeGreaterThan(0)
 
     // ── 5. Open session A — the dot clears ─────────────────────────────
-    // The dot sits inside A's sidebar row button; click that row.
+    // Session rows are DIVs with onClick (#38072), not buttons. The title
+    // is the keyboard button; pointer click-anywhere lands on the cluster.
     await unreadDots(page)
       .first()
-      .locator('xpath=ancestor::button[1]')
-      .click()
+      .evaluate((dot) => {
+        const cluster = (dot as HTMLElement).closest('.cursor-pointer') as HTMLElement | null
+
+        if (cluster) {
+          cluster.click()
+
+          return
+        }
+
+        const shell = (dot as HTMLElement).closest('.grid') as HTMLElement | null
+        const title = shell?.querySelector('button[data-slot="row-button"]') as HTMLElement | null
+        title?.click()
+      })
 
     await expect
       .poll(() => unreadDots(page).count(), {

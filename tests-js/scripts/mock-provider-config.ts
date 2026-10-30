@@ -50,7 +50,7 @@ export function writeMockProviderConfig(
   const extra = configSchema.parse(extraConfig ? yaml.load(extraConfig) ?? {} : {})
   const display = section.parse(extraDisplayConfig ? yaml.load(extraDisplayConfig) ?? {} : {})
 
-  const merged = {
+  const merged: Record<string, unknown> = {
     ...config,
     // The endpoint must live in config.yaml: runtime_provider's bare-`custom`
     // trust path reads the CONFIG base_url, and v2026.8.31 says so outright --
@@ -70,7 +70,19 @@ export function writeMockProviderConfig(
       ...(config.custom_providers ?? []).filter(entry => entry?.name !== MOCK_PROVIDER_NAME),
       { name: MOCK_PROVIDER_NAME, base_url: `${url}/v1`, key_env: 'OPENAI_API_KEY' },
     ],
-    auxiliary: { ...config.auxiliary, title_generation: { ...config.auxiliary?.title_generation, enabled: false } },
+    auxiliary: {
+      ...config.auxiliary,
+      ...((extra.auxiliary && typeof extra.auxiliary === 'object') ? extra.auxiliary : {}),
+      title_generation: {
+        ...config.auxiliary?.title_generation,
+        ...((extra.auxiliary && typeof extra.auxiliary === 'object'
+          && (extra.auxiliary as { title_generation?: unknown }).title_generation
+          && typeof (extra.auxiliary as { title_generation?: unknown }).title_generation === 'object')
+          ? (extra.auxiliary as { title_generation: Record<string, unknown> }).title_generation
+          : {}),
+        enabled: false,
+      },
+    },
     approvals: { ...config.approvals, mode: 'off' },
     // A fresh desktop install opens the first-run onboarding chat, which takes the
     // first message the smoke sends; these journeys test install and update, so
@@ -93,6 +105,33 @@ export function writeMockProviderConfig(
       },
     },
     ...extra,
+  }
+
+  // Re-apply after ...extra so a partial tools: in extra cannot wipe tool_search.
+  // Desktop e2e scripts call todo_list directly; with tool_search on those tools
+  // are deferred by default and naked calls become "invalid tool call".
+  const priorTools = (merged.tools && typeof merged.tools === 'object')
+    ? (merged.tools as Record<string, unknown>)
+    : {}
+
+  const priorSearch = (priorTools.tool_search && typeof priorTools.tool_search === 'object')
+    ? (priorTools.tool_search as Record<string, unknown>)
+    : {}
+
+  merged.tools = {
+    ...priorTools,
+    tool_search: {
+      ...priorSearch,
+      enabled: 'off',
+    },
+  }
+
+  // Prefer deep-merge for agent so verify_on_stop and friends stick.
+  if (extra.agent && typeof extra.agent === 'object') {
+    merged.agent = {
+      ...((config.agent && typeof config.agent === 'object') ? config.agent : {}),
+      ...(extra.agent as Record<string, unknown>),
+    }
   }
 
   if (extraDisplayConfig) {
