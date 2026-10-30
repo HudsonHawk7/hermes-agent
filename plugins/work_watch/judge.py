@@ -112,15 +112,20 @@ def _production_local_model(candidate: dict[str, Any]) -> Optional[Judgment]:
             dropped=False,
         )
 
-    # Refuse cloud endpoints for the default middle (cloud is GRAPH_WATCH_CLOUD_JUDGE).
+    # Refuse cloud / unknown endpoints for the default middle (cloud is GRAPH_WATCH_CLOUD_JUDGE).
+    # Empty or unreadable base is NOT local — calling would leak subject/preview (AC-N11 / Probe r4).
     base = ""
     try:
-        base = str(getattr(client, "base_url", "") or getattr(getattr(client, "_client", None), "base_url", "") or "")
+        base = str(
+            getattr(client, "base_url", "")
+            or getattr(getattr(client, "_client", None), "base_url", "")
+            or ""
+        ).strip()
     except Exception:
         base = ""
     base_l = base.lower()
     local_hints = ("localhost", "127.0.0.1", "0.0.0.0", "::1", "ollama", "11434", "local")
-    if base and not any(h in base_l for h in local_hints):
+    if not base or not any(h in base_l for h in local_hints):
         return Judgment(
             tier=TIER_2,
             why="model_unavailable",
