@@ -9,19 +9,20 @@
  * Prerequisite: `npm run build` must have been run so dist/ exists.
  */
 
-import { expect, test, type Page } from '@playwright/test'
+import { expect, type Page, test } from '@playwright/test'
 
-import {
-  type MockBackendFixture,
-  setupMockBackend,
-  waitForAppReady,
-} from './fixtures'
 import {
   createBackgroundReleaseHandle,
   restartMockServer,
   SIDEBAR_CROSS_TEXTS,
   SIDEBAR_TEXTS,
 } from '../../../tests-js/scripts/mock-server'
+
+import {
+  type MockBackendFixture,
+  setupMockBackend,
+  waitForAppReady,
+} from './fixtures'
 
 /** Background-running dot aria-label (from i18n en.ts). */
 const BG_DOT_LABEL = 'Background task running'
@@ -120,6 +121,7 @@ test.describe('sidebar states — background process and subagent', () => {
     const viewportText = await page
       .locator('[data-slot="aui_thread-viewport"]')
       .textContent()
+
     expect(viewportText).toContain(SIDEBAR_TEXTS.finalText)
   })
 })
@@ -296,10 +298,12 @@ test.describe('sidebar states — cross-session dot transition', () => {
     // Now let the background process finish. The session A dot should
     // transition away from "background running".
     bgRelease.release()
+    // Windows + bash wait loop can take a beat to notice the sentinel and
+    // for gateway process-complete events to reach the renderer.
     await expect
       .poll(
         () => page.locator(`[aria-label="${BG_DOT_LABEL}"]`).count(),
-        { timeout: 30_000, message: 'background dot should disappear after process finishes' },
+        { timeout: 60_000, message: 'background dot should disappear after process finishes' },
       )
       .toBe(0)
 
