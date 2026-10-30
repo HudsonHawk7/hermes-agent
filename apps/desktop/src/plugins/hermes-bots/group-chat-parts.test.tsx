@@ -173,7 +173,7 @@ describe('insertion', () => {
   })
 })
 
-describe('keyboard (#89884)', () => {
+describe('keyboard (#89884 + t_53595138)', () => {
   it('submits on Enter and leaves Shift+Enter to the textarea', async () => {
     const { input, onSubmitDraft } = await mount('a room prompt')
 
@@ -186,7 +186,7 @@ describe('keyboard (#89884)', () => {
     expect(onSubmitDraft).toHaveBeenCalledTimes(1)
   })
 
-  it('inserts the highlighted mention on Enter while the popover is open', async () => {
+  it('inserts the highlighted mention on Enter while the query is still a prefix', async () => {
     const { input, onChange, onSubmitDraft } = await mount()
 
     typeInto(input, 'hey @alp')
@@ -194,6 +194,29 @@ describe('keyboard (#89884)', () => {
 
     expect(onChange).toHaveBeenLastCalledWith('hey @alpha ')
     expect(onSubmitDraft).not.toHaveBeenCalled()
+  })
+
+  it('sends on Enter after the full member name is already typed (menu open)', async () => {
+    const { input, onChange, onSubmitDraft } = await mount()
+
+    typeInto(input, 'hey @alpha')
+    // Menu still open with @alpha highlighted, but the handle is complete.
+    expect(options().some(label => label.startsWith('@alpha'))).toBe(true)
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    expect(onSubmitDraft).toHaveBeenCalledTimes(1)
+    // Must not re-insert / rewrite the draft.
+    expect(onChange).not.toHaveBeenCalledWith('hey @alpha ')
+  })
+
+  it('lets Shift+Enter make a newline even while the mention menu is open', async () => {
+    const { input, onChange, onSubmitDraft } = await mount()
+
+    typeInto(input, 'hey @alp')
+    fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })
+
+    expect(onSubmitDraft).not.toHaveBeenCalled()
+    expect(onChange).not.toHaveBeenCalledWith('hey @alpha ')
   })
 
   // #93528: Enter here confirms composed Chinese/Japanese/Korean text. It must
