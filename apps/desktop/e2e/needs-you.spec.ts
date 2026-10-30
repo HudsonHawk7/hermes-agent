@@ -497,9 +497,26 @@ with kbc.connect_closing(board="alpha") as conn:
     })
   })
 
+  async function clearStickyErrorBanners(page: Page) {
+    // Test (g) leaves a "forced fail" alert + page-side guard entries that
+    // would fail the next afterEach. Dismiss DOM + clear the observer list.
+    await page.evaluate(() => {
+      const w = window as unknown as { __ERROR_BANNER_GUARD__?: string[] }
+
+      if (w.__ERROR_BANNER_GUARD__) {
+        w.__ERROR_BANNER_GUARD__.length = 0
+      }
+
+      for (const el of Array.from(document.querySelectorAll('[role="alert"]'))) {
+        el.remove()
+      }
+    })
+  }
+
   test('(h) cliff notes: facts + recommend + 4-option grid', async () => {
     const page = fixture!.page
     await closeDrawer(page)
+    await clearStickyErrorBanners(page)
     const card = page.getByTestId('needs-you-card').filter({ hasText: 'Cliff notes four-option' })
     await expect(card).toBeVisible()
     await card.scrollIntoViewIfNeeded()
@@ -513,9 +530,12 @@ with kbc.connect_closing(board="alpha") as conn:
   test('(i) folded repeat comments: Details closed, open fold shows 12 stamps', async () => {
     const page = fixture!.page
     await closeDrawer(page)
+    await clearStickyErrorBanners(page)
     const card = page.getByTestId('needs-you-card').filter({ hasText: 'Folded repeat comments' })
     await expect(card).toBeVisible()
-    await card.click()
+    await card.scrollIntoViewIfNeeded()
+    // Title button opens the task Dialog (card body click does not).
+    await card.getByTestId('needs-you-open').click()
     const drawer = page.getByRole('dialog')
     await expect(drawer).toBeVisible({ timeout: 15_000 })
     const details = drawer.getByTestId('needs-you-details')
