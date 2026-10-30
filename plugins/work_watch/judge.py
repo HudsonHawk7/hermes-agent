@@ -12,8 +12,30 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
+from urllib.parse import urlparse
 
 from plugins.work_watch.constants import TIER_1, TIER_2, TIER_3
+
+# Exact loopback hostnames only (AC-N11). Substring hints ("local", "ollama", "11434")
+# are not hosts — a hosted URL that merely contains those words must refuse.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _is_loopback_base_url(base: str) -> bool:
+    """True only when the URL's hostname is exact loopback (localhost / 127.0.0.1 / ::1).
+
+    Parses the host — never substring-matches the full base string. Userinfo tricks
+    (``http://127.0.0.1:11434@evil.com/v1``) resolve to host ``evil.com`` and refuse.
+    Empty / unparseable / missing host refuse.
+    """
+    raw = str(base or "").strip()
+    if not raw:
+        return False
+    try:
+        host = (urlparse(raw).hostname or "").lower().rstrip(".")
+    except Exception:
+        return False
+    return host in _LOOPBACK_HOSTS
 
 # Newsletter / marketing / no-action automated patterns (subject + sender heuristics).
 _TIER3_SUBJECT = re.compile(
@@ -113,7 +135,8 @@ def _production_local_model(candidate: dict[str, Any]) -> Optional[Judgment]:
         )
 
     # Refuse cloud / unknown endpoints for the default middle (cloud is GRAPH_WATCH_CLOUD_JUDGE).
-    # Empty or unreadable base is NOT local — calling would leak subject/preview (AC-N11 / Probe r4).
+    # Empty base and non-loopback hosts are NOT local — calling would leak subject/preview
+    # (AC-N11 / Probe r4 empty + Probe r5 host-parse). Parse hostname; never substring-match.
     base = ""
     try:
         base = str(
@@ -123,9 +146,7 @@ def _production_local_model(candidate: dict[str, Any]) -> Optional[Judgment]:
         ).strip()
     except Exception:
         base = ""
-    base_l = base.lower()
-    local_hints = ("localhost", "127.0.0.1", "0.0.0.0", "::1", "ollama", "11434", "local")
-    if not base or not any(h in base_l for h in local_hints):
+    if not _is_loopback_base_url(base):
         return Judgment(
             tier=TIER_2,
             why="model_unavailable",
