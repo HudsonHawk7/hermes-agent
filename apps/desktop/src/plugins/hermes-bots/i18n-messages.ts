@@ -289,6 +289,8 @@ export type BotsMessages = {
     waitingForAnswer: string
     memberThinking: (name: string) => string
     roomWorking: string
+    /** Pill shown when the reader has scrolled up; click jumps to newest. */
+    jumpToLatest: string
     messageRoom: (group: string) => string
     newThreadPlaceholder: (group: string) => string
     everyoneMeta: string

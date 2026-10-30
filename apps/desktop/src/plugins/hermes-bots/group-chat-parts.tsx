@@ -15,6 +15,7 @@ import { useRef, useState } from 'react'
 import { $imagenAvailable, normalizeAvatarImage, pickImageFromDevice, probeImagen } from './avatar-image'
 import { $botMeta, botHandle, botMentionTag } from './data'
 import { appendGroupChatEntry } from './group-chat'
+import { shouldCompleteMentionOnEnter } from './group-chat-follow'
 import { groupMemberKey } from './group-membership'
 import { answerGroupClarify } from './group-turns'
 import { useBots } from './i18n'
@@ -321,9 +322,29 @@ export function GroupMentionInput({ members, onChange, onSubmitDraft, value, ...
               return
             }
 
-            if (event.key === 'Enter' || event.key === 'Tab') {
+            // Tab always completes the highlighted option while the menu is
+            // open. Enter only completes while the typed query is still a
+            // PREFIX of that option — a full exact match means the user
+            // finished the name and wants to send. Shift+Enter never takes
+            // the mention path (falls through for a native newline).
+            if (event.key === 'Tab' && !event.shiftKey) {
               event.preventDefault()
               insert(options[active].handle)
+
+              return
+            }
+
+            if (event.key === 'Enter' && !event.shiftKey) {
+              event.preventDefault()
+              const pick = options[active]
+
+              if (shouldCompleteMentionOnEnter(open, pick?.handle, token?.query || '')) {
+                insert(pick.handle)
+
+                return
+              }
+
+              onSubmitDraft?.()
 
               return
             }
