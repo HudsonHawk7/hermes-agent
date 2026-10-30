@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import * as path from 'node:path'
 
@@ -8,16 +8,26 @@ import { resolveElectronBinary } from './electron-binary'
 import { _electron, expect, test } from './test'
 
 /** Native Chromium geometry, without a backend or the app's other scroll observers. */
+// eslint-disable-next-line no-empty-pattern -- Playwright requires fixture-object destructuring
 test('timeline reads stay logarithmic with real skipped tool-heavy groups', async ({}, testInfo) => {
   const temporary = mkdtempSync(path.join(tmpdir(), 'hermes-timeline-position-'))
+  const userData = path.join(temporary, 'user-data')
+  // Electron throws "Failed to get 'userData' path" when the override folder
+  // was never created (Architect 10/29). Create it before launch.
+  mkdirSync(userData, { recursive: true })
   const main = path.join(temporary, 'main.cjs')
   writeFileSync(
     main,
     `const { app, BrowserWindow } = require('electron');
-app.setPath('userData', ${JSON.stringify(path.join(temporary, 'user-data'))});
+app.setPath('userData', ${JSON.stringify(userData)});
 app.whenReady().then(() => {
-  const window = new BrowserWindow({ width: 1000, height: 800,
-    webPreferences: { sandbox: true, contextIsolation: true, backgroundThrottling: false } });
+  const window = new BrowserWindow({
+    width: 1000,
+    height: 800,
+    show: false,
+    paintWhenInitiallyHidden: true,
+    webPreferences: { sandbox: true, contextIsolation: true, backgroundThrottling: false }
+  });
   window.loadURL('about:blank');
 });`
   )
@@ -29,9 +39,21 @@ app.whenReady().then(() => {
     globalName: 'TimelinePosition',
     write: false
   })
+
+  // Strip ELECTRON_RUN_AS_NODE: an agent shell inherits it and electron.exe
+  // then rejects --remote-debugging-port.
+  const launchEnv: Record<string, string> = {}
+
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined && key !== 'ELECTRON_RUN_AS_NODE') {
+      launchEnv[key] = value
+    }
+  }
+
   const app = await _electron.launch({
     executablePath: resolveElectronBinary([path.resolve('.'), path.resolve('../..')]),
-    args: ['--no-sandbox', main]
+    args: ['--no-sandbox', main],
+    env: launchEnv
   })
 
   try {
@@ -121,7 +143,18 @@ app.whenReady().then(() => {
     await testInfo.attach('timeline-measurements.json', { body: JSON.stringify(results, null, 2), contentType: 'application/json' })
     await page.screenshot({ path: testInfo.outputPath('timeline-geometry.png') })
   } finally {
-    await app.close()
+    try {
+      const pid = app.process().pid
+      await app.close().catch(() => undefined)
+
+      if (pid) {
+        const { killProcessTree } = await import('./fixtures')
+        killProcessTree(pid)
+      }
+    } catch {
+      // best-effort
+    }
+
     rmSync(temporary, { recursive: true, force: true })
   }
 })
