@@ -44,8 +44,14 @@ export default defineConfig({
   retries: process.env.CI ? 1 : 0,
   /* A stray `test.only` must never let CI report a partial green run. */
   forbidOnly: !!process.env.CI,
-  /* Each test gets its own worker so the Electron process is fully isolated. */
+  /* Each test gets its own worker so the Electron process is fully isolated.
+   * Agent runs on Windows must stay single-worker: parallel Electron trees
+   * race the afterAll leak assert and leave CONNECTING windows on the desk
+   * when a worker dies (t_ecc82493). CI may override via PLAYWRIGHT_WORKERS. */
   fullyParallel: false,
+  workers: process.env.PLAYWRIGHT_WORKERS
+    ? Number(process.env.PLAYWRIGHT_WORKERS)
+    : 1,
   reporter: reporters,
   use: {
     screenshot: 'only-on-failure',

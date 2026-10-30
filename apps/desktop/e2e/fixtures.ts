@@ -32,6 +32,7 @@ import { writeEnvFile, writeMockProviderConfig } from '../../../tests-js/scripts
 import { type MockServerOptions, startMockServer } from '../../../tests-js/scripts/mock-server'
 import { isDesktopE2eHidden } from '../electron/e2e-hidden'
 
+import { electronProcessesMatching } from './core/process-census'
 import { resolveElectronBinary } from './electron-binary'
 import { installErrorBannerGuard } from './test'
 
@@ -149,7 +150,7 @@ export function launchedElectronPidSnapshot(): number[] {
  */
 export async function closeDesktopApp(
   app: ElectronApplication | null | undefined,
-  options: { hermesHome?: string } = {},
+  options: { hermesHome?: string; userDataDir?: string } = {},
 ): Promise<void> {
   let pid: number | undefined
 
@@ -189,6 +190,18 @@ export async function closeDesktopApp(
       }
 
       killProcessTree(pid)
+    }
+  }
+
+  // Child gpu/renderer processes can detach from a dead main on Windows; kill
+  // any Electron still pointing at this sandbox's userData / HERMES_HOME.
+  for (const marker of [options.userDataDir, options.hermesHome]) {
+    if (!marker) {
+      continue
+    }
+
+    for (const proc of electronProcessesMatching(marker)) {
+      killProcessTree(proc.pid)
     }
   }
 
@@ -693,7 +706,7 @@ export async function setupMockBackend(options: MockBackendOptions = {}): Promis
     mockUrl: mock.url,
     sandbox,
     cleanup: async () => {
-      await closeDesktopApp(app, { hermesHome: sandbox.hermesHome })
+      await closeDesktopApp(app, { hermesHome: sandbox.hermesHome, userDataDir: sandbox.userDataDir })
       await mock.close()
       sandbox.cleanup()
     },
@@ -723,7 +736,7 @@ export async function setupNoProvider(): Promise<NoProviderFixture> {
     page,
     sandbox,
     cleanup: async () => {
-      await closeDesktopApp(app, { hermesHome: sandbox.hermesHome })
+      await closeDesktopApp(app, { hermesHome: sandbox.hermesHome, userDataDir: sandbox.userDataDir })
       sandbox.cleanup()
     },
   }
@@ -769,7 +782,7 @@ export async function setupDeadBackend(options: DeadBackendOptions = {}): Promis
     page,
     sandbox,
     cleanup: async () => {
-      await closeDesktopApp(app, { hermesHome: sandbox.hermesHome })
+      await closeDesktopApp(app, { hermesHome: sandbox.hermesHome, userDataDir: sandbox.userDataDir })
       sandbox.cleanup()
     },
   }
@@ -857,7 +870,7 @@ export async function setupPackagedApp(): Promise<PackagedAppFixture> {
     page,
     sandbox,
     cleanup: async () => {
-      await closeDesktopApp(app, { hermesHome: sandbox.hermesHome })
+      await closeDesktopApp(app, { hermesHome: sandbox.hermesHome, userDataDir: sandbox.userDataDir })
       sandbox.cleanup()
     },
   }
