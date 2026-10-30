@@ -93,6 +93,30 @@ function cleanSlug(segment: string): string {
 export function urlSlugTitleLabel(value: string): string {
   const url = parseUrl(value)
 
+  // GitHub pull/issue: "Hyperdrive PR #2" / "hermes-agent Issue #146073"
+  // so Needs you facts never dump a multi-line raw URL (GM 10/29 layout).
+  if (url && /(?:^|\.)github\.com$/i.test(url.hostname)) {
+    const parts = url.pathname.split('/').filter(Boolean)
+
+    if (parts.length >= 4) {
+      // Keep the authored repo slug (hyphens) — cleanSlug would turn
+      // hermes-agent into "hermes agent".
+      const repo = parts[1] ?? ''
+      const kind = (parts[2] ?? '').toLowerCase()
+      const num = parts[3] ?? ''
+
+      if (repo && /^\d+$/.test(num)) {
+        if (kind === 'pull' || kind === 'pulls') {
+          return `${repo} PR #${num}`
+        }
+
+        if (kind === 'issues' || kind === 'issue') {
+          return `${repo} Issue #${num}`
+        }
+      }
+    }
+  }
+
   for (const segment of url?.pathname.split('/').filter(Boolean).reverse() ?? []) {
     const cleaned = cleanSlug(segment)
 

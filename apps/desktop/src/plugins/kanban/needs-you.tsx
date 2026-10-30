@@ -8,6 +8,7 @@ import {
   cn,
   Codicon,
   host,
+  LinkifiedText,
   Textarea,
   Tip,
   useMutation,
@@ -46,7 +47,10 @@ import {
 } from './needs-you-logic'
 import { ago, errText, shortId } from './ui'
 
-const BTN = 'min-h-11 h-11'
+// h-auto + whitespace-normal so long effect text wraps inside the button
+// instead of clipping at a fixed 44px row (GM 10/29 layout bugs).
+const BTN =
+  'h-auto min-h-11 w-full whitespace-normal px-2.5 py-2 items-start justify-start text-left'
 
 export type RecentDecision = {
   label: string
@@ -324,11 +328,11 @@ export function DecisionPanel({
             <ul className="flex flex-col gap-1" data-testid="needs-you-facts">
               {facts.map((fact, i) => (
                 <li
-                  className="text-[0.6875rem] leading-snug text-(--ui-text-tertiary)"
+                  className="text-[0.6875rem] leading-snug break-words text-(--ui-text-tertiary)"
                   data-testid="needs-you-fact"
                   key={`${i}:${fact.slice(0, 24)}`}
                 >
-                  {fact}
+                  <LinkifiedText explicitOnly text={fact} />
                 </li>
               ))}
             </ul>
@@ -336,7 +340,7 @@ export function DecisionPanel({
         </>
       )}
       {compact && showRec && pick && (
-        <p className="text-[0.6875rem] text-amber-600">
+        <p className="text-[0.6875rem] text-amber-600" data-testid="needs-you-recommend">
           {k.needsYouRecommend}: <span className="font-medium">{pick}</span>
         </p>
       )}
@@ -356,33 +360,50 @@ export function DecisionPanel({
         </div>
       ) : (
         <div className="grid grid-cols-2 gap-2" data-testid="needs-you-options">
-          {ask.options.map((opt, index) => (
-            <Button
-              className={cn(
-                BTN,
-                'w-full justify-start gap-2 px-3 text-left',
-                optionSpansFull(optionCount, index) && 'col-span-2'
-              )}
-              data-option-key={opt.key}
-              disabled={busy}
-              key={opt.key}
-              onClick={() => answerMut.mutate({ key: opt.key })}
-              type="button"
-              variant={ask.pick === opt.key ? 'default' : 'outline'}
-            >
-              <span className="flex min-w-0 flex-1 flex-col items-start gap-0.5">
-                <span className="text-[0.8125rem] font-medium">{clampText(opt.label, CAP.label)}</span>
-                <span className="line-clamp-2 text-[0.625rem] font-normal text-(--ui-text-tertiary)">
-                  {clampText(opt.effect, CAP.effect)}
+          {ask.options.map((opt, index) => {
+            const isPick = ask.pick === opt.key
+
+            return (
+              <Button
+                className={cn(BTN, optionSpansFull(optionCount, index) && 'col-span-2')}
+                data-option-key={opt.key}
+                data-recommended={isPick || undefined}
+                data-testid={`needs-you-opt-${opt.key}`}
+                disabled={busy}
+                key={opt.key}
+                onClick={() => answerMut.mutate({ key: opt.key })}
+                type="button"
+                // Outline until the GM taps (then this panel swaps to Undo).
+                // Recommended is the badge + Recommend line — never filled blue.
+                variant="outline"
+              >
+                <span className="flex min-w-0 w-full flex-col items-start gap-0.5 text-left">
+                  {isPick ? (
+                    <span
+                      className="rounded bg-amber-500/20 px-1 py-0.5 text-[0.5625rem] font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300"
+                      data-testid="needs-you-pick-badge"
+                    >
+                      {k.needsYouAskerPick}
+                    </span>
+                  ) : null}
+                  <span
+                    className="w-full text-[0.8125rem] font-medium leading-snug break-words"
+                    data-testid="needs-you-opt-label"
+                  >
+                    {clampText(opt.label, CAP.label)}
+                  </span>
+                  {opt.effect ? (
+                    <span
+                      className="w-full text-[0.625rem] font-normal leading-snug break-words whitespace-normal text-(--ui-text-tertiary)"
+                      data-testid="needs-you-opt-effect"
+                    >
+                      {clampText(opt.effect, CAP.effect)}
+                    </span>
+                  ) : null}
                 </span>
-              </span>
-              {ask.pick === opt.key && (
-                <span className="shrink-0 text-[0.625rem] uppercase tracking-wide text-amber-200">
-                  {k.needsYouAskerPick}
-                </span>
-              )}
-            </Button>
-          ))}
+              </Button>
+            )
+          })}
         </div>
       )}
 
@@ -473,13 +494,15 @@ function ImageOption({
     <div
       className={cn(
         'flex flex-col gap-1.5 rounded-md border p-1.5',
-        recommended ? 'border-amber-500 bg-amber-500/10' : 'border-(--ui-stroke-tertiary)'
+        // Outline + badge for recommended — never a filled primary look before the tap.
+        recommended ? 'border-amber-500/70' : 'border-(--ui-stroke-tertiary)',
       )}
+      data-recommended={recommended || undefined}
     >
       <div
         className={cn(
           'flex items-center justify-center overflow-hidden rounded bg-(--ui-bg-quaternary)',
-          large ? 'min-h-40' : 'min-h-24'
+          large ? 'min-h-40' : 'min-h-24',
         )}
       >
         {src ? (
@@ -490,9 +513,23 @@ function ImageOption({
           </span>
         )}
       </div>
-      <span className="px-0.5 text-[0.75rem] font-medium leading-snug">{option.label}</span>
-      <span className="px-0.5 text-[0.625rem] leading-snug text-(--ui-text-tertiary)">{option.effect}</span>
-      <Button className={cn(BTN, 'w-full')} disabled={busy} onClick={onPick} type="button">
+      <span className="flex flex-col gap-0.5 px-0.5">
+        {recommended ? (
+          <span
+            className="w-fit rounded bg-amber-500/20 px-1 py-0.5 text-[0.5625rem] font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300"
+            data-testid="needs-you-pick-badge"
+          >
+            {k.needsYouAskerPick}
+          </span>
+        ) : null}
+        <span className="text-[0.75rem] font-medium leading-snug break-words">{option.label}</span>
+        {option.effect ? (
+          <span className="text-[0.625rem] leading-snug break-words whitespace-normal text-(--ui-text-tertiary)">
+            {option.effect}
+          </span>
+        ) : null}
+      </span>
+      <Button className={cn(BTN, 'w-full')} disabled={busy} onClick={onPick} type="button" variant="outline">
         {k.needsYouPick} {option.label}
       </Button>
     </div>

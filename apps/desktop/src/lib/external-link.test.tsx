@@ -81,6 +81,13 @@ describe('external link helpers', () => {
     expect(urlSlugTitleLabel('https://example.com/p/quantumcomputing')).toBe('Quantumcomputing')
   })
 
+  it('shortens GitHub pull and issue URLs for Needs you facts', () => {
+    expect(urlSlugTitleLabel('https://github.com/HudsonHawk7/Hyperdrive/pull/2')).toBe('Hyperdrive PR #2')
+    expect(urlSlugTitleLabel('https://github.com/NousResearch/hermes-agent/issues/146073')).toBe(
+      'hermes-agent Issue #146073',
+    )
+  })
+
   it('filters out local/non-http targets for title fetches', () => {
     expect(isTitleFetchable('https://www.expedia.com/things-to-do/foo')).toBe(true)
     expect(isTitleFetchable('http://localhost:5174')).toBe(false)

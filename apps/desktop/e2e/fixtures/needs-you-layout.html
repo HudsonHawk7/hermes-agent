@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Needs you layout fixture (GM 10/29)</title>
+    <style>
+      :root {
+        --ui-text-primary: #e8eaed;
+        --ui-text-tertiary: #9aa0a6;
+        --ui-stroke-secondary: #5f6368;
+        --ui-bg-primary: #1e1f22;
+        --ui-bg-secondary: #2a2b2f;
+        --primary: #3b82f6;
+        --primary-foreground: #fff;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--ui-bg-primary);
+        color: var(--ui-text-primary);
+        font: 14px/1.35 system-ui, sans-serif;
+      }
+      /* Real Needs you column width on the board (~288px card face). */
+      .col {
+        width: 288px;
+        margin: 24px;
+        padding: 8px;
+        background: var(--ui-bg-secondary);
+        border-radius: 8px;
+      }
+      .card {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        padding: 10px;
+        border: 1px solid color-mix(in srgb, #f59e0b 40%, transparent);
+        border-radius: 8px;
+        background: color-mix(in srgb, #f59e0b 8%, var(--ui-bg-secondary));
+      }
+      .title {
+        font-size: 0.8125rem;
+        font-weight: 600;
+        line-height: 1.3;
+      }
+      .recommend {
+        font-size: 0.6875rem;
+        color: #d97706;
+      }
+      .facts {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        font-size: 0.6875rem;
+        line-height: 1.35;
+        color: var(--ui-text-tertiary);
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+      .facts a {
+        color: #93c5fd;
+        text-decoration: underline;
+        text-underline-offset: 2px;
+      }
+      .btn {
+        display: inline-flex;
+        width: 100%;
+        min-height: 44px;
+        height: auto;
+        align-items: flex-start;
+        justify-content: flex-start;
+        text-align: left;
+        white-space: normal;
+        padding: 8px 10px;
+        border-radius: 2.5px;
+        cursor: pointer;
+        background: transparent;
+        color: var(--ui-text-primary);
+        box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ui-stroke-secondary) 50%, transparent);
+        border: 0;
+      }
+      /* Filled primary would look pre-selected — recommended stays outline. */
+      .btn.filled-primary {
+        background: var(--primary);
+        color: var(--primary-foreground);
+        box-shadow: none;
+      }
+      .stack {
+        display: flex;
+        width: 100%;
+        min-width: 0;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 2px;
+        text-align: left;
+      }
+      .badge {
+        display: inline-block;
+        border-radius: 2px;
+        background: color-mix(in srgb, #f59e0b 20%, transparent);
+        color: #fcd34d;
+        padding: 2px 4px;
+        font-size: 0.5625rem;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+      .label {
+        width: 100%;
+        font-size: 0.8125rem;
+        font-weight: 600;
+        line-height: 1.3;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+      .effect {
+        width: 100%;
+        font-size: 0.625rem;
+        font-weight: 400;
+        line-height: 1.35;
+        color: var(--ui-text-tertiary);
+        overflow-wrap: anywhere;
+        word-break: break-word;
+        white-space: normal;
+      }
+      .opts { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    </style>
+  </head>
+  <body>
+    <div class="col" data-testid="needs-you-column">
+      <article class="card" data-testid="needs-you-card">
+        <button class="title" data-testid="needs-you-open" type="button">
+          build the read-only work mail + Teams watcher
+        </button>
+        <p class="recommend" data-testid="needs-you-recommend">
+          Recommend: <span style="font-weight:600">Yes - build it (recommended)</span>
+        </p>
+        <ul class="facts" data-testid="needs-you-facts">
+          <li data-testid="needs-you-fact">
+            Spec and
+            <a href="https://github.com/HudsonHawk7/Hyperdrive/pull/2">Hyperdrive PR #2</a>
+            — keep the sign-in local.
+          </li>
+          <li data-testid="needs-you-fact">Delegated Graph, one sign-in, all local.</li>
+          <li data-testid="needs-you-fact">Never write secrets to the board.</li>
+        </ul>
+        <div class="opts" data-testid="needs-you-options">
+          <button
+            class="btn"
+            data-option-key="yes"
+            data-recommended="true"
+            data-testid="needs-you-opt-yes"
+            type="button"
+          >
+            <span class="stack">
+              <span class="badge" data-testid="needs-you-pick-badge">Asker's pick</span>
+              <span class="label" data-testid="needs-you-opt-label">Yes - build it (recommended)</span>
+              <span class="effect" data-testid="needs-you-opt-effect"
+                >scaffold Settings, wire Graph, park for approval once Backbone notes land on force/carry</span
+              >
+            </span>
+          </button>
+          <button class="btn" data-option-key="no" data-testid="needs-you-opt-no" type="button">
+            <span class="stack">
+              <span class="label" data-testid="needs-you-opt-label">No - keep as-is</span>
+              <span class="effect" data-testid="needs-you-opt-effect"
+                >leave watcher unbuilt; close the ask and file Backbone notes only</span
+              >
+            </span>
+          </button>
+        </div>
+      </article>
+    </div>
+  </body>
+</html>

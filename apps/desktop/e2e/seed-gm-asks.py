@@ -174,6 +174,56 @@ def main() -> int:
         )
         ids["fail"] = fail_id
 
+        # Long-text layout fixture (GM 10/29 layout bugs): long effect text, a
+        # URL in a fact, "GM yes/no:" title prefix, recommended pick.
+        layout_id = running(
+            conn,
+            "GM yes/no: build the read-only work mail + Teams watcher",
+        )
+        gm.record_gm_ask(
+            conn,
+            layout_id,
+            {
+                "question": "Build the read-only work mail + Teams watcher?",
+                "context": (
+                    "Path A uses delegated Graph. Spec and Hyperdrive PR at "
+                    "https://github.com/HudsonHawk7/Hyperdrive/pull/2 — keep "
+                    "the sign-in local and never write secrets to the board."
+                ),
+                "facts": [
+                    (
+                        "Spec and https://github.com/HudsonHawk7/Hyperdrive/pull/2 "
+                        "— keep the sign-in local."
+                    ),
+                    "Delegated Graph, one sign-in, all local.",
+                    "Never write secrets to the board.",
+                ],
+                "options": [
+                    {
+                        "key": "yes",
+                        "label": "Yes - build it (recommended)",
+                        # ≤110 EFFECT_MAX; still long enough to wrap in a half-column button.
+                        "effect": (
+                            "scaffold Settings, wire Graph, park for approval "
+                            "once Backbone notes land on force/carry"
+                        ),
+                    },
+                    {
+                        "key": "no",
+                        "label": "No - keep as-is",
+                        "effect": (
+                            "leave watcher unbuilt; close the ask and file "
+                            "Backbone notes only"
+                        ),
+                    },
+                ],
+                "pick": "yes",
+            },
+            asked_by="hera",
+            reason="need GM call on layout fixture",
+        )
+        ids["layout"] = layout_id
+
         # Cliff Notes: 4-option grid + three facts + pick (Recommend line).
         cliff_id = running(conn, "Cliff notes four-option")
         gm.record_gm_ask(

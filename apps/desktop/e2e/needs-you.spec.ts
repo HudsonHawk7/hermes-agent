@@ -241,8 +241,8 @@ test.describe('Needs you column (gm-asks part 2)', () => {
     const page = fixture!.page
     const col = page.getByTestId('needs-you-column')
     await expect(col).toBeVisible()
-    // 8 on alpha + 1 on beta = 9 (includes cliff + fold fixtures)
-    await expect(page.getByTestId('needs-you-count')).toHaveText(/9/)
+    // 9 on alpha + 1 on beta = 10 (cliff + fold + long-text layout fixture)
+    await expect(page.getByTestId('needs-you-count')).toHaveText(/10/)
     await expect(page.getByTestId('needs-you-card').filter({ hasText: 'Rebase Alpha PR?' })).toBeVisible()
     await expect(page.getByTestId('needs-you-card').filter({ hasText: 'Beta board ask' })).toBeVisible()
     await expect(page.getByTestId('needs-you-card').filter({ hasText: 'Legacy free-text block' })).toBeVisible()
@@ -255,8 +255,8 @@ test.describe('Needs you column (gm-asks part 2)', () => {
     await expect(card).toBeVisible()
     await card.getByRole('button', { name: /Yes/i }).click()
     await expect(card).toHaveCount(0, { timeout: 15_000 })
-    // counts drop
-    await expect(page.getByTestId('needs-you-count')).toHaveText(/8/)
+    // counts drop (10 → 9)
+    await expect(page.getByTestId('needs-you-count')).toHaveText(/9/)
 
     // DB check via python one-shot
     const home = fixture!.sandbox.hermesHome
@@ -524,7 +524,11 @@ with kbc.connect_closing(board="alpha") as conn:
     await expect(card.getByTestId('needs-you-recommend')).toBeVisible()
     await expect(card.getByTestId('needs-you-facts').getByTestId('needs-you-fact')).toHaveCount(3)
     await expect(card.getByTestId('needs-you-options').getByRole('button')).toHaveCount(4)
-    await card.screenshot({ path: path.join(shots, 'h-cliff-notes-four-option.png') })
+    // animations:'disabled' — active glow can keep the element "unstable" for PW.
+    await card.screenshot({
+      animations: 'disabled',
+      path: path.join(shots, 'h-cliff-notes-four-option.png'),
+    })
   })
 
   test('(i) folded repeat comments: Details closed, open fold shows 12 stamps', async () => {
@@ -558,5 +562,78 @@ with kbc.connect_closing(board="alpha") as conn:
     await expect(drawer.getByTestId('comment-fold-stamp')).toHaveCount(12)
     await drawer.screenshot({ path: path.join(shots, 'i-folded-repeat-expanded.png') })
     await closeDrawer(page)
+  })
+
+  test('(j) long-text layout: no badge overlap, no effect clip, linkified URL, stripped title, outline recommended', async () => {
+    const page = fixture!.page
+    await closeDrawer(page)
+    await clearStickyErrorBanners(page)
+
+    // Escape + so toHaveText treats it as a literal, not a regex quantifier.
+    const titleBit = 'build the read-only work mail + Teams watcher'
+    const titleRe = /build the read-only work mail \+ Teams watcher/i
+    const card = page.getByTestId('needs-you-card').filter({ hasText: titleBit })
+    await expect(card).toBeVisible()
+    await card.scrollIntoViewIfNeeded()
+
+    // Title strips the "GM yes/no:" column-redundant prefix.
+    const openBtn = card.getByTestId('needs-you-open')
+    await expect(openBtn).toHaveText(titleRe)
+    await expect(openBtn).not.toHaveText(/GM\s*yes\s*\/\s*no\s*:/i)
+
+    // Cliff Notes Recommend line is the pick prose; no "Asker's pick: …" line.
+    await expect(card.getByText(/Asker's pick\s*:/i)).toHaveCount(0)
+    await expect(card.getByTestId('needs-you-recommend')).toBeVisible()
+    const badge = card.getByTestId('needs-you-pick-badge')
+    await expect(badge).toBeVisible()
+
+    const yesBtn = card.getByTestId('needs-you-opt-yes')
+    const noBtn = card.getByTestId('needs-you-opt-no')
+    await expect(yesBtn).toBeVisible()
+    await expect(noBtn).toBeVisible()
+
+    // Recommended stays outline (not filled primary) before the GM taps.
+    await expect(yesBtn).toHaveAttribute('data-recommended', 'true')
+    await expect(yesBtn).not.toHaveClass(/\bbg-primary\b/)
+
+    const label = yesBtn.getByTestId('needs-you-opt-label')
+    const effect = yesBtn.getByTestId('needs-you-opt-effect')
+    await expect(label).toBeVisible()
+    await expect(effect).toBeVisible()
+    await expect(effect).toContainText(/Backbone notes land on force\/carry/i)
+
+    // Bounding-box proof: badge does not sit on the label; effect is fully inside the button.
+    const badgeBox = await badge.boundingBox()
+    const labelBox = await label.boundingBox()
+    const effectBox = await effect.boundingBox()
+    const btnBox = await yesBtn.boundingBox()
+    expect(badgeBox).toBeTruthy()
+    expect(labelBox).toBeTruthy()
+    expect(effectBox).toBeTruthy()
+    expect(btnBox).toBeTruthy()
+    // Badge sits above the label (own line) — bottoms of badge ≤ top of label (+1px slack).
+    expect(badgeBox!.y + badgeBox!.height).toBeLessThanOrEqual(labelBox!.y + 1)
+    // Effect fully inside the option button (no horizontal clip at the edge).
+    expect(effectBox!.x).toBeGreaterThanOrEqual(btnBox!.x - 1)
+    expect(effectBox!.x + effectBox!.width).toBeLessThanOrEqual(btnBox!.x + btnBox!.width + 1)
+    expect(effectBox!.y + effectBox!.height).toBeLessThanOrEqual(btnBox!.y + btnBox!.height + 1)
+
+    // Fact URL is a clickable short link, not a raw multi-line URL.
+    const facts = card.getByTestId('needs-you-facts')
+    await expect(facts).toBeVisible()
+    const link = facts.locator('a[href*="github.com/HudsonHawk7/Hyperdrive/pull/2"]')
+    await expect(link).toBeVisible()
+    await expect(link).toHaveText(/Hyperdrive PR #2/i)
+    await expect(link).not.toHaveText(/https?:\/\//i)
+
+    await card.screenshot({
+      animations: 'disabled',
+      path: path.join(shots, 'j-layout-long-text-after.png'),
+    })
+    await page.screenshot({
+      animations: 'disabled',
+      fullPage: true,
+      path: path.join(shots, 'j-layout-column-after.png'),
+    })
   })
 })
