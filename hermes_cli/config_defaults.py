@@ -1959,6 +1959,17 @@ DEFAULT_CONFIG = {
         # Running tasks with no heartbeat (last_heartbeat_at) for this many seconds are reclaimed to
         # ready on the next tick; a still-running local worker is terminated first. 0 = off.
         "dispatch_stale_timeout_seconds": 14400,
+        # Root for every kanban worker's TEMP/TMP/TMPDIR
+        # (<root>/<assignee>/<task_id>_<run_id>). None = leave the inherited env
+        # alone (no silent C: fallback). Set this to keep pytest/Playwright temp
+        # off the system drive (example: S:\\ForceAgents\\_tmp).
+        "worker_temp_root": None,
+        # Hours a run folder may sit idle under worker_temp_root before the
+        # janitor may delete it. Live owners (pid still running) are never removed.
+        "worker_temp_max_age_hours": 48,
+        # Minutes between gateway janitor passes over worker_temp_root. Also
+        # callable once via ``hermes kanban gc``. Never a Windows scheduled task.
+        "worker_temp_janitor_minutes": 60,
         # Each tick, requeue 'running' cards with broken claim bookkeeping (claim_lock or
         # claim_expires NULL with a dead worker) that TTL/crash/stale recovery can't see. False
         # keeps orphans frozen for manual forensics.

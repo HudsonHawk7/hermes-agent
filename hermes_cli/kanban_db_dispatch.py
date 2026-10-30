@@ -3109,6 +3109,20 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     if not env.get("PYTHONSAFEPATH"):
         env["PYTHONSAFEPATH"] = "1"
         env["HERMES_PINNED_PYTHONSAFEPATH"] = "1"
+    # Route TEMP/TMP/TMPDIR under kanban.worker_temp_root when set (None = leave
+    # inherited env alone; never invent a C: fallback). Marker
+    # HERMES_WORKER_TEMP_ROOT mirrors HERMES_PINNED_PYTHONSAFEPATH so a strip
+    # can attribute the pin.
+    from hermes_cli.kanban_worker_temp import apply_worker_temp_env
+
+    worker_temp_dir = apply_worker_temp_env(
+        env,
+        assignee=profile_arg,
+        task_id=task.id,
+        run_id=task.current_run_id,
+        log_warning=_kb._log.warning,
+        log_error=_kb._log.error,
+    )
     # A worker spawned by a managed systemd gateway must leave the gateway's
     # cgroup before startup; otherwise restarting the service kills the worker
     # that is performing the handoff.
@@ -3133,6 +3147,15 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
             "`hermes` executable not found on PATH. "
             "Install Hermes Agent or activate its venv before running the kanban dispatcher."
         )
+    if worker_temp_dir is not None and getattr(proc, "pid", None):
+        try:
+            from hermes_cli.kanban_worker_temp import write_owner_marker
+
+            write_owner_marker(worker_temp_dir, pid=int(proc.pid), task_id=task.id)
+        except Exception as exc:
+            _kb._log.warning(
+                "kanban worker temp: owner marker skipped for %s (%s)", worker_temp_dir, exc
+            )
     # Intentionally NOT closing log_f: the child keeps writing after return;
     # the OS-level FD stays open in the child until it exits.
     if _kb._IS_WINDOWS:
