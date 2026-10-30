@@ -205,8 +205,13 @@ class TestProbe2_SpawnContextThread:
         def fake_spawn(target, name=None, daemon=True):
             calls["n"] += 1
             calls["name"] = name
-            t = types.SimpleNamespace(is_alive=lambda: False, join=lambda timeout=None: None)
-            # Do not run target — we only care that spawn was chosen.
+            t = types.SimpleNamespace(
+                is_alive=lambda: False,
+                join=lambda timeout=None: None,
+                start=lambda: None,
+                name=name or "t",
+            )
+            # Do not run target — we only care that spawn was chosen + started.
             return t
 
         # Inject fake agent.memory_provider
@@ -266,7 +271,12 @@ class TestProbe4_SchedulerAndChats:
             calls["n"] += 1
             calls["name"] = name
             # Run one tick with immediate stop via fake sleep
-            return types.SimpleNamespace(is_alive=lambda: True, join=lambda timeout=None: None)
+            return types.SimpleNamespace(
+                is_alive=lambda: True,
+                join=lambda timeout=None: None,
+                start=lambda: None,
+                name=name or "t",
+            )
 
         mp = types.ModuleType("agent.memory_provider")
         mp.spawn_context_thread = fake_spawn

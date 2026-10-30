@@ -30,12 +30,19 @@ CT = ZoneInfo("America/Chicago")
 _reader_stop_reason: Optional[str] = None
 _scanning: bool = False
 
-# Background poll scheduler (Probe defect 4)
+# Background poll scheduler (Probe defect 4 / r3 cadence)
 _scheduler_stop = threading.Event()
 _scheduler_thread: Optional[threading.Thread] = None
 _scheduler_lock = threading.Lock()
-# Injectable sleep for tests
+# Injectable sleep + clock for tests
 _sleep_fn: Callable[[float], None] = time.sleep
+_now_fn: Callable[..., datetime] = datetime.now
+# Last Graph poll monotonic marker (None = never polled this process)
+_last_graph_poll_mono: Optional[float] = None
+# Wall-clock next-due (lets tests advance CT without mono)
+_next_graph_wall: Optional[datetime] = None
+# Max wake so 08:07 digest is not missed by a long sleep (does NOT call Graph).
+_DIGEST_WAKE_CAP_S = 60.0
 
 
 def cloud_judge_enabled() -> bool:
@@ -46,11 +53,7 @@ def cloud_judge_enabled() -> bool:
 
 
 def poll_interval_minutes(now: Optional[datetime] = None) -> int:
-    now = now or datetime.now(CT)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=CT)
-    else:
-        now = now.astimezone(CT)
+    now = now or _now_ct()
     if ACTIVE_HOUR_START_CT <= now.hour < ACTIVE_HOUR_END_CT:
         return POLL_ACTIVE_MINUTES
     return POLL_OFFHOURS_MINUTES
@@ -75,9 +78,37 @@ def set_sleep_fn(fn: Optional[Callable[[float], None]]) -> None:
     _sleep_fn = fn or time.sleep
 
 
+def set_now_fn(fn: Optional[Callable[..., datetime]]) -> None:
+    """Test seam for CT clock (digest + cadence)."""
+    global _now_fn
+    _now_fn = fn or datetime.now
+
+
+def reset_scheduler_poll_clock() -> None:
+    """Clear last Graph-poll marker (tests + revoke restart)."""
+    global _last_graph_poll_mono, _next_graph_wall
+    _last_graph_poll_mono = None
+    _next_graph_wall = None
+
+
+def _now_ct() -> datetime:
+    now = _now_fn(CT) if _now_fn is not datetime.now else datetime.now(CT)
+    # Allow plain datetime.now() style fakes that ignore tz arg.
+    if not isinstance(now, datetime):
+        now = datetime.now(CT)
+    if now.tzinfo is None:
+        return now.replace(tzinfo=CT)
+    return now.astimezone(CT)
+
+
+def _mono() -> float:
+    """Monotonic seconds for production cadence."""
+    return time.monotonic()
+
+
 def seconds_until_digest(now: Optional[datetime] = None) -> float:
     """Seconds until next 8:07 AM CT digest window (AC-P5)."""
-    now = now or datetime.now(CT)
+    now = now or _now_ct()
     if now.tzinfo is None:
         now = now.replace(tzinfo=CT)
     else:
@@ -90,7 +121,7 @@ def seconds_until_digest(now: Optional[datetime] = None) -> float:
 
 def is_digest_window(now: Optional[datetime] = None, *, window_seconds: int = 60) -> bool:
     """True when within ``window_seconds`` of 8:07 CT (morning digest)."""
-    now = now or datetime.now(CT)
+    now = now or _now_ct()
     if now.tzinfo is None:
         now = now.replace(tzinfo=CT)
     else:
@@ -98,6 +129,28 @@ def is_digest_window(now: Optional[datetime] = None, *, window_seconds: int = 60
     if now.hour != DIGEST_HOUR_CT or now.minute != DIGEST_MINUTE_CT:
         return False
     return now.second < window_seconds
+
+
+def seconds_until_next_graph_poll(now: Optional[datetime] = None) -> float:
+    """Seconds until the next Graph poll is due (AC-P4 cadence). 0 = due now."""
+    global _last_graph_poll_mono, _next_graph_wall
+    now = now or _now_ct()
+    interval_s = float(poll_interval_minutes(now)) * 60.0
+    if _last_graph_poll_mono is None and _next_graph_wall is None:
+        return 0.0
+    # Wall clock (tests inject now_fn and advance without mono moving).
+    if _next_graph_wall is not None:
+        return max(0.0, (_next_graph_wall - now).total_seconds())
+    elapsed_mono = _mono() - float(_last_graph_poll_mono or 0.0)
+    return max(0.0, interval_s - elapsed_mono)
+
+
+def _mark_graph_polled(now: Optional[datetime] = None) -> None:
+    global _last_graph_poll_mono, _next_graph_wall
+    now = now or _now_ct()
+    _last_graph_poll_mono = _mono()
+    interval_s = float(poll_interval_minutes(now)) * 60.0
+    _next_graph_wall = now + timedelta(seconds=interval_s)
 
 
 def build_digest(db_path: Optional[str] = None) -> dict[str, Any]:
@@ -217,25 +270,49 @@ def run_once(
 
 
 def _scheduler_loop(db_path: Optional[str] = None) -> None:
-    """Background loop: sleep poll_interval, run_once; fire digest near 8:07 CT."""
+    """Background loop: Graph on 10 min / hourly cadence; short wakes only for digest.
+
+    Probe r3: a 60s wake must NOT call Graph. Digest window may wake often, but
+    ``run_once`` only fires when the full poll interval has elapsed (AC-P4 / AC-P5).
+    """
     last_digest_day: Optional[str] = None
     first = True
     while not _scheduler_stop.is_set():
         try:
-            interval_min = poll_interval_minutes()
-            # Wake at least every minute so digest window is not missed by long sleep.
-            sleep_s = min(60.0, max(1.0, float(interval_min) * 60.0))
-            # First tick soon after start so a signed-in gateway is not idle forever.
-            _sleep_fn(min(sleep_s, 5.0) if first else sleep_s)
+            now = _now_ct()
+            due_graph = seconds_until_next_graph_poll(now)
+            due_digest = seconds_until_digest(now)
+
+            candidates = [_DIGEST_WAKE_CAP_S]
+            if due_graph > 0.0:
+                candidates.append(due_graph)
+            else:
+                # Graph due now: brief settle so start is not a busy-loop.
+                candidates.append(5.0 if first else 1.0)
+            if due_digest > 0.0:
+                candidates.append(due_digest)
+            sleep_s = max(1.0, min(candidates))
+
+            _sleep_fn(sleep_s)
             first = False
             if _scheduler_stop.is_set():
                 break
-            if auth.reader_may_call_graph() and not _reader_stop_reason:
+
+            now = _now_ct()
+            # Graph only when the full cadence says so (never on every digest wake).
+            if (
+                auth.reader_may_call_graph()
+                and not _reader_stop_reason
+                and seconds_until_next_graph_poll(now) <= 0.0
+            ):
                 try:
                     run_once(db_path=db_path)
+                    _mark_graph_polled(now)
                 except Exception as exc:
                     logger.warning("work_watch scheduled poll failed: %s", type(exc).__name__)
-            now = datetime.now(CT)
+                    # Still advance the clock so a hard error cannot spin Graph every wake.
+                    _mark_graph_polled(now)
+
             day_key = now.strftime("%Y-%m-%d")
             if is_digest_window(now) and day_key != last_digest_day:
                 try:
@@ -257,16 +334,18 @@ def store_digest_receipt(digest: dict[str, Any], *, db_path: Optional[str] = Non
     """Persist a local digest receipt (counts only)."""
     try:
         with store.open_store(db_path) as conn:
-            store.set_meta(conn, "last_digest_at", datetime.now(CT).isoformat())
+            store.set_meta(conn, "last_digest_at", _now_ct().isoformat())
             store.set_meta(conn, "last_digest_tier2", str(int(digest.get("tier_2_count") or 0)))
     except Exception as exc:
         logger.debug("digest receipt skipped: %s", type(exc).__name__)
 
 
 def start_poll_scheduler(*, db_path: Optional[str] = None) -> bool:
-    """Start the background poll loop via spawn_context_thread (Probe defect 4).
+    """Start the background poll loop via spawn_context_thread (Probe defect 4 / r3).
 
-    Returns True when a new thread was started.
+    ``spawn_context_thread`` returns an unstarted Thread — always ``.start()`` it.
+    No bare-thread fallback (drops secret_scope). Returns True when a new thread
+    was started.
     """
     global _scheduler_thread
     with _scheduler_lock:
@@ -277,22 +356,15 @@ def start_poll_scheduler(*, db_path: Optional[str] = None) -> bool:
         def _run() -> None:
             _scheduler_loop(db_path=db_path)
 
-        try:
-            from agent.memory_provider import spawn_context_thread
+        from agent.memory_provider import spawn_context_thread
 
-            _scheduler_thread = spawn_context_thread(
-                _run,
-                name="work-watch-poll",
-                daemon=True,
-            )
-        except Exception as exc:
-            logger.warning(
-                "work_watch: spawn_context_thread unavailable for poller (%s); bare thread",
-                type(exc).__name__,
-            )
-            t = threading.Thread(target=_run, name="work-watch-poll", daemon=True)
-            t.start()
-            _scheduler_thread = t
+        t = spawn_context_thread(
+            _run,
+            name="work-watch-poll",
+            daemon=True,
+        )
+        t.start()
+        _scheduler_thread = t
         return True
 
 

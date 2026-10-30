@@ -355,26 +355,21 @@ def cancel_device_flow() -> None:
 def _spawn_poller_thread(target: Callable[[], None]) -> threading.Thread:
     """AC-P1 / AC-N6: carry profile secret_scope into the device-code poller.
 
-    Bare ``threading.Thread`` drops the contextvar on a multiplex gateway, so a
-    successful grant cannot write the owning profile's ``.env``. Prefer
-    ``agent.memory_provider.spawn_context_thread`` (Probe defect 2).
+    ``spawn_context_thread`` returns an *unstarted* Thread (same contract as
+    ``agent.memory_provider``). Callers elsewhere always ``.start()`` it. A bare
+    ``threading.Thread`` fallback drops the contextvar on a multiplex gateway, so
+    a successful grant cannot write the owning profile's ``.env`` — fail loud
+    instead (Probe r3 defect 1).
     """
-    try:
-        from agent.memory_provider import spawn_context_thread
+    from agent.memory_provider import spawn_context_thread
 
-        return spawn_context_thread(
-            target,
-            name="work-watch-device-code",
-            daemon=True,
-        )
-    except Exception as exc:
-        logger.warning(
-            "work_watch: spawn_context_thread unavailable (%s); bare thread fallback",
-            type(exc).__name__,
-        )
-        t = threading.Thread(target=target, name="work-watch-device-code", daemon=True)
-        t.start()
-        return t
+    t = spawn_context_thread(
+        target,
+        name="work-watch-device-code",
+        daemon=True,
+    )
+    t.start()
+    return t
 
 
 def start_device_code_sign_in(
