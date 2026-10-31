@@ -475,14 +475,33 @@ def _should_keep_for_owner(owner: Optional[dict[str, Any]], *, max_age_seconds: 
     return False, "owner-dead"
 
 
+def _candidate_is_safe_name(name: str) -> bool:
+    """Refuse empty / traversal junk; never a path segment with separators."""
+    if not name or name in (".", ".."):
+        return False
+    if ".." in name or "/" in name or "\\" in name:
+        return False
+    return True
+
+
 def _sweep_one_tree(
     resolved: Path,
     *,
     max_age_seconds: float,
     clock: float,
     warn: Callable[..., None],
+    require_run_folder_name: bool = True,
 ) -> SweepResult:
-    """Walk one temp tree: either ``_tmp/<agent>/<run>`` or legacy ``<agent>/tmp/<run>``."""
+    """Walk one temp tree.
+
+    * Primary ``_tmp`` (``require_run_folder_name=True``): children are assignee
+      buckets; only leaves matching ``t_<hex>_<run|no-run>`` are delete candidates.
+    * Legacy ``<agent>/tmp`` (``require_run_folder_name=False``): the tree root
+      already is the agent tmp dir, so every direct child directory is a candidate
+      by age (live pile names look like ``hermes-pytest`` or ``0qzfgakh.fbm``, not
+      task-id run folders). Still refuses the root itself, reparse points, and
+      traversal junk; keeps live-pid owners.
+    """
     removed = 0
     bytes_freed = 0
     refused = 0
@@ -495,22 +514,12 @@ def _sweep_one_tree(
         warn("worker-temp janitor: cannot list %s (%s)", resolved, exc)
         return SweepResult(0, 0, 1, 0, 0)
 
-    # Primary shape: root / assignee / run_folder
-    # Legacy shape: agent_tmp_root already IS the "tmp" dir, so children are run folders.
-    # Detect: if any child matches run-folder RE, treat resolved as the assignee-level tmp.
-    run_like = 0
-    dir_count = 0
-    for entry in top_entries:
-        if entry.is_dir() and not _is_reparse_point(entry):
-            dir_count += 1
-            if _RUN_FOLDER_RE.match(entry.name):
-                run_like += 1
-    legacy_flat = dir_count > 0 and run_like >= max(1, dir_count // 2)
-
-    if legacy_flat:
-        assignee_buckets = [resolved]
-    else:
+    if require_run_folder_name:
+        # Primary shape: root / assignee / run_folder
         assignee_buckets = [e for e in top_entries if e.is_dir()]
+    else:
+        # Legacy flat: children of <agent>/tmp are the delete candidates.
+        assignee_buckets = [resolved]
 
     for assignee_dir in assignee_buckets:
         if _is_reparse_point(assignee_dir):
@@ -552,12 +561,16 @@ def _sweep_one_tree(
                 warn("worker-temp janitor refused: would delete the root itself (%s)", run_dir)
                 refused += 1
                 continue
-            if not _RUN_FOLDER_RE.match(run_dir.name):
+            if not _candidate_is_safe_name(run_dir.name):
                 warn(
-                    "worker-temp janitor refused: folder name %r is not a task-id run folder",
+                    "worker-temp janitor refused: unsafe folder name %r",
                     run_dir.name,
                 )
                 refused += 1
+                continue
+            if require_run_folder_name and not _RUN_FOLDER_RE.match(run_dir.name):
+                # Primary _tmp tree only: non-run litter is skipped quietly so a
+                # half-migrated bucket does not spam one warning per ordinary name.
                 continue
 
             owner = _read_owner(run_dir)
@@ -642,9 +655,11 @@ def sweep_worker_temp(
     max_age_seconds = max(1, int(age_h)) * 3600
     clock = time.time() if now is None else float(now)
 
-    trees: list[Path] = []
+    # (tree, require_run_folder_name). Primary _tmp keeps the task-id gate;
+    # legacy <agent>/tmp is flat age-delete of direct children (live pile names).
+    trees: list[tuple[Path, bool]] = []
     if resolved.exists() and resolved.is_dir():
-        trees.append(resolved)
+        trees.append((resolved, True))
     elif not resolved.exists():
         info("worker-temp janitor: root %s does not exist yet; checking legacy agent tmp only", resolved)
     else:
@@ -657,8 +672,8 @@ def sweep_worker_temp(
             continue
         if _is_reparse_point(validated) or not validated.is_dir():
             continue
-        if validated not in trees:
-            trees.append(validated)
+        if not any(t is validated or t == validated for t, _ in trees):
+            trees.append((validated, False))
 
     if not trees:
         info("worker-temp janitor: nothing to sweep under %s", resolved)
@@ -669,13 +684,22 @@ def sweep_worker_temp(
     refused = 0
     skipped_live = 0
     skipped_young = 0
-    for tree in trees:
-        part = _sweep_one_tree(tree, max_age_seconds=max_age_seconds, clock=clock, warn=warn)
+    legacy_count = 0
+    for tree, require_name in trees:
+        part = _sweep_one_tree(
+            tree,
+            max_age_seconds=max_age_seconds,
+            clock=clock,
+            warn=warn,
+            require_run_folder_name=require_name,
+        )
         removed += part.removed
         bytes_freed += part.bytes_freed
         refused += part.refused
         skipped_live += part.skipped_live
         skipped_young += part.skipped_young
+        if not require_name:
+            legacy_count += 1
 
     info(
         "worker-temp janitor: removed %d run folder(s), freed %s (refused=%d, live=%d, young=%d) under %s (+%d legacy root(s))",
@@ -685,7 +709,7 @@ def sweep_worker_temp(
         skipped_live,
         skipped_young,
         resolved,
-        max(0, len(trees) - 1),
+        legacy_count,
     )
     return SweepResult(removed, bytes_freed, refused, skipped_live, skipped_young)
 

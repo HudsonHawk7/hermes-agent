@@ -348,18 +348,33 @@ def test_sweep_includes_legacy_agent_tmp(tmp_path):
     """Architect note: existing ForceAgents/<agent>/tmp is outside _tmp.
 
     Decision: when root leaf is ``_tmp``, also sweep sibling ``<parent>/<agent>/tmp``
-    run folders so the 48h rule reaches the measured legacy pile.
+    so the 48h rule reaches the measured legacy pile. Live names are NOT the new
+    ``t_<hex>_<run>`` shape (Probe measure: 0/213 hermes-pytest, 0/2716 8.3 names).
     """
     base = tmp_path / "ForceAgents"
     new_root = base / "_tmp"
     new_root.mkdir(parents=True)
-    legacy = base / "hera" / "tmp" / f"{_TID_OLD}_9"
-    legacy.mkdir(parents=True)
-    blob = legacy / "old.bin"
-    blob.write_bytes(b"L" * 1024)
+    # Live-pile shapes (not t_<hex>_<run>):
+    aged_pytest = base / "hera" / "tmp" / "hermes-pytest"
+    aged_short = base / "hera" / "tmp" / "0qzfgakh.fbm"
+    young_keep = base / "hera" / "tmp" / "fulcrum-pack"
+    for d in (aged_pytest, aged_short, young_keep):
+        d.mkdir(parents=True)
+        blob = d / "old.bin"
+        blob.write_bytes(b"L" * 1024)
     old = time.time() - (49 * 3600)
-    os.utime(blob, (old, old))
-    os.utime(legacy, (old, old))
+    for d in (aged_pytest, aged_short):
+        os.utime(d / "old.bin", (old, old))
+        os.utime(d, (old, old))
+    # young_keep stays at current mtime
+
+    # Primary _tmp still requires the task-id gate: a non-run name under an
+    # assignee bucket must NOT be deleted even when aged.
+    primary_litter = new_root / "hera" / "not-a-run-folder"
+    primary_litter.mkdir(parents=True)
+    (primary_litter / "x.bin").write_bytes(b"P" * 256)
+    os.utime(primary_litter / "x.bin", (old, old))
+    os.utime(primary_litter, (old, old))
 
     result = kwt.sweep_worker_temp(
         kanban_cfg={
@@ -367,5 +382,8 @@ def test_sweep_includes_legacy_agent_tmp(tmp_path):
             "worker_temp_max_age_hours": 48,
         }
     )
-    assert result.removed >= 1
-    assert not legacy.exists()
+    assert result.removed == 2, f"expected two live-pile dirs removed, got {result}"
+    assert not aged_pytest.exists()
+    assert not aged_short.exists()
+    assert young_keep.exists(), "young legacy dir must be kept"
+    assert primary_litter.exists(), "primary _tmp still requires task-id run names"
