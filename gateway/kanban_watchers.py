@@ -330,3 +330,44 @@ class GatewayKanbanWatchersMixin:
             await self._sleep_between_ticks(interval)
 
         self._release_kanban_dispatcher_lock()
+
+    async def _kanban_worker_temp_janitor_watcher(self) -> None:
+        """Delete aged run folders under ``kanban.worker_temp_root``.
+
+        One pass every ``kanban.worker_temp_janitor_minutes`` (default 60). First
+        pass a few minutes after boot so adapters finish wiring. Never touches
+        Windows Task Scheduler — this is a gateway loop only. The same sweep is
+        exposed once via ``hermes kanban gc``.
+        """
+        # Initial delay: a few minutes after boot (matches card contract).
+        await asyncio.sleep(180)
+        while self._running:
+            interval_minutes = 60
+            try:
+                from hermes_cli.config import load_config as _load_config
+                from hermes_cli.kanban_worker_temp import (
+                    format_sweep_counts,
+                    load_worker_temp_settings,
+                    sweep_worker_temp,
+                )
+
+                cfg = _load_config() or {}
+                kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+                settings = load_worker_temp_settings(kanban_cfg if isinstance(kanban_cfg, dict) else {})
+                interval_minutes = max(1, int(settings.janitor_minutes or 60))
+                if not settings.root:
+                    logger.debug(
+                        "kanban worker-temp janitor: kanban.worker_temp_root unset; pass skipped"
+                    )
+                else:
+                    cfg_snapshot = dict(kanban_cfg) if isinstance(kanban_cfg, dict) else {}
+                    result = await _to_thread_process_service(
+                        lambda: sweep_worker_temp(kanban_cfg=cfg_snapshot)
+                    )
+                    logger.info("kanban %s", format_sweep_counts(result))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("kanban worker-temp janitor: pass failed")
+
+            await self._sleep_between_ticks(float(interval_minutes) * 60.0)
