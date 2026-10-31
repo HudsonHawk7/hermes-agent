@@ -1499,6 +1499,44 @@ def _collect_auto_append_media_tags(
     return media_tags, has_voice_directive
 
 
+def _collect_cron_inbound_media_tags(
+    messages: list[dict[str, Any]], history_offset: int = 0,
+    history_media_paths: Optional[set] = None) -> list[str]:
+    """Collect MEDIA tags from this turn's cron / no-agent bot-chat user admission.
+
+    Cron script output is admitted as a user message shaped by ``bot_chat_message``
+    (``[Cronjob \"…\" output — …]``). Those MEDIA lines must attach to the companion reply
+    even when she omits or mangles paths — delivery must not depend on the model copying
+    file paths exactly.
+    """
+    from gateway.platforms.base import BasePlatformAdapter
+
+    history_media_paths = history_media_paths or set()
+    if not messages:
+        return []
+    if history_offset > len(messages):
+        # Compression shrank the list; scan every user message that looks like a cron admission.
+        turn_msgs = messages
+    else:
+        turn_msgs = messages[history_offset:]
+    tags: list[str] = []
+    for msg in turn_msgs:
+        if msg.get("role") != "user":
+            continue
+        content = str(msg.get("content") or "")
+        if "MEDIA:" not in content:
+            continue
+        # bot_chat_message prefix: [Cronjob "name" output — …
+        if "[Cronjob " not in content and "[cronjob " not in content.lower():
+            continue
+        media_files, _ = BasePlatformAdapter.extract_media(content)
+        for path, _is_voice in media_files:
+            if path and path not in history_media_paths:
+                tags.append(f"MEDIA:{path}")
+                history_media_paths = history_media_paths | {path}
+    return list(dict.fromkeys(tags))
+
+
 def _collect_history_media_paths(agent_history: list[dict[str, Any]]) -> set:
     """Dedup set of media paths already delivered (JSON-payload and assistant-message shapes alike).
 
