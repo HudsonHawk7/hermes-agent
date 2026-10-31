@@ -141,3 +141,66 @@ def test_chat_turn_hook_uses_agent_max_tokens_not_summary_cap():
 
     assert captured.get("max_tokens") is None
     assert captured.get("max_tokens") != 777
+
+
+def _wire_max(kwargs: dict) -> int | None:
+    """OpenAI-compat wire may use max_tokens or max_completion_tokens."""
+    if "max_tokens" in kwargs:
+        return kwargs["max_tokens"]
+    if "max_completion_tokens" in kwargs:
+        return kwargs["max_completion_tokens"]
+    return None
+
+
+@pytest.mark.parametrize(
+    "provider",
+    ["custom", "ollama"],
+)
+def test_build_call_kwargs_forwards_summary_cap_on_ollama_custom_compression(provider):
+    """Built request (not just call_llm kwargs) must carry the opt-in cap on Ollama.
+
+    Architect's measured 18,650-token summary used model.provider=ollama → custom alias
+    and base http://127.0.0.1:11434/v1. _forwards_max_tokens used to drop max_tokens on
+    that route even when task=compression set it explicitly.
+    """
+    from agent.auxiliary_client import _build_call_kwargs
+
+    msgs = [{"role": "user", "content": "summarize"}]
+    base = "http://127.0.0.1:11434/v1"
+
+    capped = _build_call_kwargs(
+        provider=provider,
+        model="architect:v8-9b",
+        messages=msgs,
+        max_tokens=800,
+        base_url=base,
+        task="compression",
+    )
+    assert _wire_max(capped) == 800
+
+    uncapped = _build_call_kwargs(
+        provider=provider,
+        model="architect:v8-9b",
+        messages=msgs,
+        max_tokens=None,
+        base_url=base,
+        task="compression",
+    )
+    assert _wire_max(uncapped) is None
+    assert "max_tokens" not in uncapped
+    assert "max_completion_tokens" not in uncapped
+
+
+def test_build_call_kwargs_does_not_forward_cap_for_non_compression_ollama_task():
+    """Compression-only exception: other aux tasks on Ollama/custom stay on the omit list."""
+    from agent.auxiliary_client import _build_call_kwargs
+
+    kwargs = _build_call_kwargs(
+        provider="custom",
+        model="architect:v8-9b",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=800,
+        base_url="http://127.0.0.1:11434/v1",
+        task="vision",
+    )
+    assert _wire_max(kwargs) is None

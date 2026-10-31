@@ -6537,7 +6537,11 @@ def _forwards_max_tokens(provider: str, provider_norm: str, model: str, effectiv
     quirks). Forward only where mandatory or honored: Anthropic Messages wire (400 without it);
     NVIDIA NIM (empty choices[] when omitted); MoA reference slots; Gemini native (fixed 65,535
     ceiling otherwise); OpenRouter (budgets the FULL window when omitted → 402 on low credit);
-    managed local llama-server (uncapped decode with no EOS burns the GPU to the context window).
+    managed local llama-server (uncapped decode with no EOS burns the GPU to the context window);
+    compression summary (opt-in compression.summary_max_tokens — Ollama/custom aliases omit
+    max_tokens by default, so without this the measured 18k-token runaway summary stays uncapped
+    on the wire even when call_llm was given the cap). Compression only; other aux tasks stay on
+    the omit list. Hosts that 400 on max_tokens still hit the existing parameter-strip retry.
     """
     return (
         _is_anthropic_compat_endpoint(provider, effective_base)
@@ -6545,6 +6549,7 @@ def _forwards_max_tokens(provider: str, provider_norm: str, model: str, effectiv
         or provider_norm in _NVIDIA_PROVIDER_NAMES
         or base_url_host_matches(effective_base, "integrate.api.nvidia.com")
         or str(task) == "moa_reference"
+        or str(task) == "compression"
         or _is_gemini_native_route(provider_norm, effective_base)
         or provider_norm == "openrouter"
         or base_url_host_matches(effective_base, "openrouter.ai")
