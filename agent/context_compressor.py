@@ -830,7 +830,9 @@ _SUMMARY_TOKENS_CEILING = 10_000
 _MICRO_COMPACT_MAX_CONSECUTIVE_FAILURES = 3
 
 # Prompt-side char cap on the serialized turn block (~40K tokens; head+tail kept,
-# see _bound_summary_input). NEVER add a max_tokens wire cap on the summary call.
+# see _bound_summary_input). The summary call stays uncapped on the wire by default
+# (Anthropic/NIM forward max_tokens; thinking models burn a hard cap on reasoning).
+# Opt-in wire cap is compression.summary_max_tokens only — never chat turns.
 _SUMMARY_INPUT_MAX_CHARS = 160_000
 
 _PRUNED_TOOL_PLACEHOLDER = "[Old tool output cleared to save context space]"
@@ -2815,6 +2817,7 @@ class ContextCompressor(
         base_url: str = "", api_key: str = "", config_context_length: int | None = None, provider: str = "",
         api_mode: str = "", abort_on_summary_failure: bool = False, max_tokens: int | None = None,
         model_thresholds: dict[str, float] | None = None, threshold_tokens_cap: Any = None,
+        summary_max_tokens: int | None = None,
         proactive_prune_tokens: int = 0, proactive_prune_min_result_chars: int = 8000,
         proactive_prune_min_reclaim_tokens: int = 4096, min_tail_user_messages: int = 1, tail_mode: str = "lean",
         custom_providers: list | None = None,
@@ -2854,6 +2857,10 @@ class ContextCompressor(
         self.quiet_mode = quiet_mode
         # Usable input = context_length - max_tokens; only a positive int counts as a reservation.
         self.max_tokens = self._coerce_max_tokens(max_tokens)
+        # Opt-in wire max_tokens for the compression SUMMARY call only (config:
+        # compression.summary_max_tokens). None = uncapped. Distinct from self.max_tokens
+        # (main-chat output reservation used for threshold math).
+        self.summary_max_tokens = self._coerce_max_tokens(summary_max_tokens)
         # True: summary failure aborts (messages unchanged); False: insert deterministic handoff and drop middle.
         # Output-token reservation: the provider carves max_tokens out of the context window, so the usable
         # input budget is context_length - max_tokens. None = provider default => assume no reservation.
@@ -3808,9 +3815,14 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
                 "api_mode": self.api_mode,
             },
             "messages": [{"role": "user", "content": prompt}], "route_info": _aux_route,
-            # NO max_tokens: Anthropic/NIM wires forward it and a hard cap truncates summaries
-            # (thinking models burn it on reasoning). Timeout comes from call_llm config.
+            # Default: NO max_tokens. Anthropic/NIM forward it and a hard cap truncates
+            # summaries (thinking models burn the budget on reasoning). Timeout comes from
+            # call_llm config. Opt-in wire cap is compression.summary_max_tokens only —
+            # never from self.max_tokens / chat turns.
         }
+        _summary_cap = self._coerce_max_tokens(getattr(self, "summary_max_tokens", None))
+        if _summary_cap is not None:
+            call_kwargs["max_tokens"] = _summary_cap
         # Pinned route (stall fallback) replaces task routing so the retry leaves the stalled backend.
         self._apply_summary_route(call_kwargs, _pinned_summary_call_kwargs())
         # Compression is atomic: protect the in-flight summary call from a mid-turn gateway interrupt.

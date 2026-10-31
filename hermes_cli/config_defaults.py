@@ -578,6 +578,11 @@ DEFAULT_CONFIG = {
         # lower of the ratio threshold and this count. Clamped to the model's context length.
         # Off by default: no single count suits windows from 64K to 1M+, so the ratio decides.
         "threshold_tokens": None,
+        # summary_max_tokens: optional wire max_tokens on the compression *summary* auxiliary
+        # call only (never chat turns). None/absent = uncapped (model decides when to stop).
+        # Set a positive int (e.g. 800) when a local model runs away (18k+ gen tokens observed).
+        # Prompt-side guidance still uses the internal summary budget; this only caps generation.
+        "summary_max_tokens": None,
         # "progress_notices": False,    # opt-in (#52995): when True, routine compression
         "target_ratio": 0.20,         # fraction of threshold to preserve as recent tail
         # tail_mode: "lean" = clamped 2.5%-of-window tail (10K floor / 25K cap) plus chunked
