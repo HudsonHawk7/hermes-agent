@@ -941,5 +941,43 @@ describe('actOnActivePreview (drive_preview tool)', () => {
       expect(result.success).toBe(false)
       expect(result.error).toContain('without a file')
     })
+
+    it('does not claim the file arrived when the page never answers', async () => {
+      // The upload is one trip — locate, decode, set — so silence after it is
+      // not "navigating after a successful click": nothing says the file landed.
+      vi.useFakeTimers()
+      withRunner(() => new Promise(() => {}))
+
+      try {
+        const pending = actOnActivePreview({ file: photo, kind: 'upload', selector: '#photo' })
+        await vi.advanceTimersByTimeAsync(8_000)
+        const result = await pending
+
+        expect(result.success).toBe(false)
+        expect(result.error).toContain('nothing confirms the file arrived')
+        expect(result.error).toContain('Call elements')
+        expect(result.file).toBeUndefined()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('embeds the file size in the script as data, never as code', async () => {
+      withUploadPage('<input id="photo" type="file">')
+      // A size that is valid JavaScript if pasted raw after `size: `.
+      const hostile = '0 }; window.__hermesPwned = true; result.file = { size: 0'
+      const pwned = () => (window as unknown as { __hermesPwned?: boolean }).__hermesPwned
+      cleanups.push(() => delete (window as unknown as { __hermesPwned?: boolean }).__hermesPwned)
+
+      const result = await actOnActivePreview({
+        file: { ...photo, size: hostile as unknown as number },
+        kind: 'upload',
+        selector: '#photo'
+      })
+
+      expect(pwned()).toBeUndefined()
+      expect(result.success).toBe(true)
+      expect(result.file?.size).toBe(hostile)
+    })
   })
 })

@@ -70,7 +70,29 @@ def test_the_profile_s_retained_attachments_count_once_they_exist(home):
 
     native.mkdir(parents=True)
 
-    assert (up.NATIVE_INPUTS, native) in _roots(home)
+    assert ("cache/documents/native-inputs", native) in _roots(home)
+
+
+def test_a_populated_legacy_document_cache_is_the_retained_attachments_folder(home):
+    """An older home keeps attachments under ``document_cache/`` (the gateway's own layout rule,
+    ``hermes_constants.get_hermes_dir``); the new ``cache/documents`` path only wins once the legacy one is empty."""
+    legacy = home["home"] / "document_cache" / "native-inputs"
+    legacy.mkdir(parents=True)
+    (legacy / "kept.png").write_bytes(PNG)
+
+    roots = _roots(home)
+
+    assert ("document_cache/native-inputs", legacy) in roots
+    assert all(not str(folder).endswith(os.path.join("cache", "documents", "native-inputs")) for _, folder in roots)
+    assert up.read_upload(str(legacy / "kept.png"), roots)["name"] == "kept.png"
+
+
+def test_an_empty_legacy_document_cache_does_not_shadow_the_new_layout(home):
+    (home["home"] / "document_cache").mkdir(parents=True)
+    native = home["home"] / "cache" / "documents" / "native-inputs"
+    native.mkdir(parents=True)
+
+    assert ("cache/documents/native-inputs", native) in _roots(home)
 
 
 def test_a_file_inside_an_allowed_folder_is_read_and_described(home):
@@ -198,3 +220,157 @@ def test_configured_roots_read_the_running_profile(home, monkeypatch):
     monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: home["home"])
 
     assert [Path(folder) for _, folder in up.configured_roots()] == [home["pictures"]]
+
+
+# ── the fence: where the path may point ──────────────────────────────────────
+
+
+def test_a_sibling_folder_sharing_the_allowed_folder_s_prefix_is_refused(home, tmp_path):
+    """``pictures2`` starts with ``pictures``; only a path-aware check tells them apart."""
+    sibling = tmp_path / "pictures2" / "judson.png"
+    sibling.parent.mkdir()
+    sibling.write_bytes(PNG)
+
+    with pytest.raises(up.UploadRefused) as refused:
+        up.read_upload(str(sibling), _roots(home))
+
+    assert "image_gen.sogni.image_input_dir" in str(refused.value)
+
+
+def test_dot_dot_that_leaves_the_allowed_folder_is_refused(home, tmp_path):
+    outside = tmp_path / "elsewhere" / "secret.png"
+    outside.parent.mkdir()
+    outside.write_bytes(PNG)
+    text = os.path.join(str(home["pictures"]), "..", "elsewhere", "secret.png")
+
+    with pytest.raises(up.UploadRefused) as refused:
+        up.read_upload(text, _roots(home))
+
+    assert "image_gen.sogni.image_input_dir" in str(refused.value)
+
+
+def test_dot_dot_that_stays_inside_the_allowed_folder_is_accepted(home):
+    source = home["pictures"] / "judson.png"
+    source.write_bytes(PNG)
+    text = os.path.join(str(home["pictures"]), "sub", "..", "judson.png")
+
+    assert up.read_upload(text, _roots(home))["name"] == "judson.png"
+
+
+@pytest.mark.skipif(os.path.normcase("A") == "A", reason="the path case only differs where paths are case-insensitive")
+def test_a_differently_cased_path_inside_the_allowed_folder_is_accepted(home):
+    source = home["pictures"] / "judson.png"
+    source.write_bytes(PNG)
+    text = str(home["pictures"]).upper() + os.sep + "JUDSON.PNG"
+
+    assert up.read_upload(text, _roots(home))["name"] == "judson.png"
+
+
+def test_a_path_that_is_not_a_local_file_never_touches_the_filesystem(home, monkeypatch):
+    """A link, a network or device path and a relative path are judged as text: on Windows even resolving
+    ``\\\\host\\share`` opens an SMB connection, so none of them may reach a filesystem call."""
+    def touched(*_args, **_kwargs):
+        raise AssertionError("the filesystem was touched")
+
+    cases = {
+        "judson.png": "is not a full path",
+        "https://example.com/judson.png": "is a link",
+        r"\\nas\share\judson.png": "network and device paths",
+        "//nas/share/judson.png": "network and device paths",
+        r"\\?\C:\pictures\judson.png": "network and device paths",
+        r"\\.\PhysicalDrive0": "network and device paths",
+    }
+    roots = _roots(home)
+    for text, reason in cases.items():
+        with monkeypatch.context() as patched:
+            patched.setattr(Path, "resolve", touched)
+            patched.setattr(os, "stat", touched)
+            patched.setattr("builtins.open", touched)
+            with pytest.raises(up.UploadRefused) as refused:
+                up.read_upload(text, roots)
+        assert reason in str(refused.value), text
+
+
+# ── what the filesystem can throw back ───────────────────────────────────────
+
+
+def test_a_nul_in_the_path_is_refused_not_raised(home):
+    text = str(home["pictures"] / "jud\x00son.png")
+
+    with pytest.raises(up.UploadRefused) as refused:
+        up.read_upload(text, _roots(home))
+
+    assert "NUL" in str(refused.value)
+
+
+def test_a_file_that_cannot_be_opened_is_refused_with_the_reason(home, monkeypatch):
+    """Windows holds a file another program has open; ``open`` raises PermissionError and the agent is told."""
+    source = home["pictures"] / "locked.png"
+    source.write_bytes(PNG)
+    locked = os.path.normcase(str(source.resolve()))
+    real_open = open
+
+    def open_unless_locked(file, *args, **kwargs):
+        if os.path.normcase(str(file)) == locked:
+            raise PermissionError(13, "The process cannot access the file because it is being used by another process")
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", open_unless_locked)
+
+    with pytest.raises(up.UploadRefused) as refused:
+        up.read_upload(str(source), _roots(home))
+
+    assert "cannot be read" in str(refused.value)
+    assert "being used by another process" in str(refused.value)
+
+
+def test_a_file_whose_stat_fails_is_refused_with_the_reason(home, monkeypatch):
+    source = home["pictures"] / "locked.png"
+    source.write_bytes(PNG)
+    locked = os.path.normcase(str(source.resolve()))
+    real_stat = Path.stat
+
+    def stat_unless_locked(self, *args, **kwargs):
+        if os.path.normcase(str(self)) == locked:
+            raise PermissionError(13, "Permission denied")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat_unless_locked)
+
+    with pytest.raises(up.UploadRefused) as refused:
+        up.read_upload(str(source), _roots(home))
+
+    assert "cannot be read" in str(refused.value)
+    assert "Permission denied" in str(refused.value)
+
+
+def test_a_file_that_grows_past_the_cap_while_being_read_is_refused(home, monkeypatch):
+    """``stat`` sizes the file before it is opened; the bytes actually read are what the page gets, so they
+    are capped again after the read."""
+    source = home["pictures"] / "growing.png"
+    source.write_bytes(PNG)
+    grown = os.path.normcase(str(source.resolve()))
+    monkeypatch.setattr(up, "MAX_UPLOAD_BYTES", len(PNG) + 8)
+    real_open = open
+
+    class Grown:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self, _limit=-1):
+            return PNG + b"\x00" * 16
+
+    def open_grown(file, *args, **kwargs):
+        if os.path.normcase(str(file)) == grown:
+            return Grown()
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", open_grown)
+
+    with pytest.raises(up.UploadRefused) as refused:
+        up.read_upload(str(source), _roots(home))
+
+    assert "read more than" in str(refused.value)

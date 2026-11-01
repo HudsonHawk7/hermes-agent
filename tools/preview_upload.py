@@ -12,8 +12,11 @@ renderer never touches a path.
 import base64
 import os
 import re
+import stat
 from pathlib import Path
 from typing import Any
+
+from hermes_constants import get_hermes_dir
 
 #: One bridge frame carries the file as base64 (x4/3) and the guest page decodes it in memory, so the cap keeps one
 #: upload to a few tens of MB on the wire: a phone photo or a PNG screenshot is under 10 MB, a short clip fits, and
@@ -39,8 +42,11 @@ UPLOAD_TYPES = {
 #: customer data), which the provider alone may read; ``upload`` hands a file to any site open in the pane.
 PROVIDER_FOLDER_KEYS = (("image_gen", "image_input_dir"), ("video_gen", "image_input_dir"))
 
-#: The profile's retained chat attachments, under the Hermes home (gateway/session_ingress_media.py).
-NATIVE_INPUTS = "cache/documents/native-inputs"
+#: The profile's retained chat attachments (gateway/session_ingress_media.py): ``native-inputs`` under the documents
+#: cache, which an older home keeps at ``document_cache/`` — ``hermes_constants.get_hermes_dir`` is the one rule for
+#: that, the same one ``gateway.platforms.base.get_document_cache_dir`` applies before it creates the folder.
+DOCUMENT_CACHE = ("cache/documents", "document_cache")
+NATIVE_INPUTS = "native-inputs"
 
 SETTINGS_HINT = "image_gen.<provider>.image_input_dir or video_gen.<provider>.image_input_dir"
 
@@ -64,9 +70,10 @@ def upload_roots(cfg: Any, hermes_home: Path) -> list[tuple[str, Path]]:
             value = settings.get(key) if isinstance(settings, dict) else None
             if isinstance(value, str) and value.strip():
                 roots.append((f"{section}.{provider}.{key}", Path(value.strip()).expanduser()))
-    native = Path(hermes_home) / NATIVE_INPUTS
+    home = Path(hermes_home)
+    native = get_hermes_dir(*DOCUMENT_CACHE, home=home) / NATIVE_INPUTS
     if native.is_dir():
-        roots.append((NATIVE_INPUTS, native))
+        roots.append((native.relative_to(home).as_posix(), native))
     return roots
 
 
@@ -98,6 +105,10 @@ def _mb(size: int) -> str:
     return f"{size / (1024 * 1024):.1f} MB"
 
 
+def _reason(exc: BaseException) -> str:
+    return getattr(exc, "strerror", None) or str(exc)
+
+
 def _header_family(head: bytes) -> str | None:
     if head.startswith(b"\x89PNG\r\n\x1a\n"):
         return "PNG"
@@ -123,6 +134,8 @@ def read_upload(path_text: str | None, roots: list[tuple[str, Path]]) -> dict[st
     text = (path_text or "").strip()
     if not text:
         raise UploadRefused("upload needs the path of one picture or video file.")
+    if "\x00" in text:
+        raise UploadRefused("the path contains a NUL character, which no file name can.")
     if text.replace("/", "\\").startswith("\\\\"):
         raise UploadRefused("network and device paths (\\\\host\\share, //host/share, \\\\?\\, \\\\.\\) "
                             "cannot be uploaded.")
@@ -143,21 +156,29 @@ def read_upload(path_text: str | None, roots: list[tuple[str, Path]]) -> dict[st
         source = path.resolve(strict=True)
     except FileNotFoundError:
         raise UploadRefused(f"There is no file at {text}.") from None
-    except OSError as exc:
-        raise UploadRefused(f"{text} cannot be read: {exc.strerror or exc}.") from None
+    except (OSError, ValueError) as exc:
+        raise UploadRefused(f"{text} cannot be read: {_reason(exc)}.") from None
     if not any(_inside(_normal(source), Path(folder).resolve()) for _, folder in roots):
         _refuse_outside(text, roots)
     if UPLOAD_TYPES.get(source.suffix.lower()) != kind:
         raise UploadRefused(f"{text} leads to {source.name}, which is not the same kind of file.")
-    if not source.is_file():
+    try:
+        status = source.stat()
+    except OSError as exc:
+        raise UploadRefused(f"{text} cannot be read: {_reason(exc)}.") from None
+    if not stat.S_ISREG(status.st_mode):
         raise UploadRefused(f"{text} is not a file.")
-    if source.stat().st_size > MAX_UPLOAD_BYTES:
-        raise UploadRefused(f"{source.name} is {_mb(source.stat().st_size)}, larger than the "
+    if status.st_size > MAX_UPLOAD_BYTES:
+        raise UploadRefused(f"{source.name} is {_mb(status.st_size)}, larger than the "
                             f"{_mb(MAX_UPLOAD_BYTES)} an upload may be.")
-    with open(source, "rb") as handle:
-        data = handle.read(MAX_UPLOAD_BYTES + 1)
+    try:
+        with open(source, "rb") as handle:
+            data = handle.read(MAX_UPLOAD_BYTES + 1)
+    except OSError as exc:
+        raise UploadRefused(f"{text} cannot be read: {_reason(exc)}.") from None
     if len(data) > MAX_UPLOAD_BYTES:
-        raise UploadRefused(f"{source.name} is larger than the {_mb(MAX_UPLOAD_BYTES)} an upload may be.")
+        raise UploadRefused(f"{source.name} read more than the {_mb(MAX_UPLOAD_BYTES)} an upload may be; "
+                            "it changed while being read.")
     mime, family = kind
     found = _header_family(data[:12])
     if found != family:

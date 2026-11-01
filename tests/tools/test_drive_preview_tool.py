@@ -201,3 +201,28 @@ def test_upload_is_offered_to_the_model():
     assert "upload" in schema["parameters"]["properties"]["action"]["enum"]
     assert "path" in schema["parameters"]["properties"]
     assert "upload" in schema["description"]
+
+
+def test_both_entry_points_forward_the_path(allowed):
+    """The model's call reaches the tool two ways: the agent's inline executor and the registry handler.
+    Either dropping ``path`` turns every upload into 'upload needs the path'."""
+    from types import SimpleNamespace
+
+    from agent.inline_tool_executors import INLINE_TOOL_EXECUTORS, InlineToolContext
+    from tools.registry import registry
+
+    seen = []
+
+    def cb(payload):
+        seen.append(payload)
+        return json.dumps({"success": True})
+
+    args = {"action": "upload", "ref": "inp-photo", "path": str(allowed / "judson.png")}
+    agent = SimpleNamespace(drive_preview_callback=cb)
+
+    inline = json.loads(INLINE_TOOL_EXECUTORS["drive_preview"](
+        agent, dict(args), InlineToolContext(effective_task_id="task-1", tool_call_id="call-1")))
+    registered = json.loads(registry.get_entry("drive_preview").handler(dict(args), callback=cb))
+
+    assert inline == registered == {"success": True}
+    assert [payload["file"]["name"] for payload in seen] == ["judson.png", "judson.png"]

@@ -104,6 +104,13 @@ const NAVIGATED =
 const UNANSWERED =
   'The page did not answer in time, so no input was sent. Call elements to see whether it is still the same page.'
 
+/** The upload is one trip — locate, decode, set the file — so a page that
+ *  never answers it has confirmed nothing: it may be navigating, hung, or
+ *  still chewing a large script. Unlike a click that went silent, there is no
+ *  gesture that is known to have landed. */
+const UPLOAD_UNANSWERED =
+  'The page did not answer in time, so nothing confirms the file arrived. Call elements to check whether the page took it.'
+
 /** A fingerprint of the overlay's source, so the guest page can tell that the
  *  code it is running has changed underneath it.
  *
@@ -461,7 +468,7 @@ ${preamble()}
     }
     result = { acted: 'dropped ' + meta.name + ' (' + meta.size + ') on ' + target, success: true };
   }
-  result.file = { name: meta.name, size: ${file.size} };
+  result.file = { name: meta.name, size: ${JSON.stringify(file.size)} };
   watch('strike');
   return wait(${settleMs}).then(function () {
     try {
@@ -966,9 +973,7 @@ export async function actOnActivePreview(
       return { error: trip.error, success: false }
     }
 
-    return trip.kind === 'answered'
-      ? trip.result
-      : { acted: 'uploaded ' + typed.file.name, note: NAVIGATED, success: true }
+    return trip.kind === 'answered' ? trip.result : { error: UPLOAD_UNANSWERED, success: false }
   }
 
   const input = activePreviewInput(owner)
