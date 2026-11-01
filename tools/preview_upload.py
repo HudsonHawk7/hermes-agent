@@ -35,15 +35,14 @@ UPLOAD_TYPES = {
 }
 
 #: ``(section, key)`` read under every provider of the section: ``image_gen.<provider>.image_input_dir``.
-PROVIDER_FOLDER_KEYS = (
-    ("image_gen", "image_input_dir"), ("image_gen", "screenshots_dir"), ("video_gen", "image_input_dir"),
-)
+#: A provider's ``screenshots_dir`` is deliberately absent: it holds live screen-share frames (work screens,
+#: customer data), which the provider alone may read; ``upload`` hands a file to any site open in the pane.
+PROVIDER_FOLDER_KEYS = (("image_gen", "image_input_dir"), ("video_gen", "image_input_dir"))
 
 #: The profile's retained chat attachments, under the Hermes home (gateway/session_ingress_media.py).
 NATIVE_INPUTS = "cache/documents/native-inputs"
 
-SETTINGS_HINT = ("image_gen.<provider>.image_input_dir, image_gen.<provider>.screenshots_dir or "
-                 "video_gen.<provider>.image_input_dir")
+SETTINGS_HINT = "image_gen.<provider>.image_input_dir or video_gen.<provider>.image_input_dir"
 
 # A URL scheme has two or more letters; a Windows drive letter has one.
 _LINK = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]+:")

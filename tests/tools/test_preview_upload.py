@@ -19,7 +19,8 @@ MP4 = b"\x00\x00\x00\x18ftypisom" + b"\x00" * 24
 
 @pytest.fixture
 def home(tmp_path):
-    """An isolated profile home whose config names one picture folder and one screenshot folder."""
+    """An isolated profile home whose config names one picture folder for the image provider and the
+    provider's screen-share frames folder, which is NOT an upload root (see the screenshots test)."""
     pictures = tmp_path / "pictures"
     shots = tmp_path / "shots"
     pictures.mkdir()
@@ -43,9 +44,24 @@ def test_roots_come_from_every_configured_provider_folder(home):
 
     assert [name for name, _ in roots] == [
         "image_gen.sogni.image_input_dir",
-        "image_gen.sogni.screenshots_dir",
         "video_gen.sogni.image_input_dir",
     ]
+
+
+def test_screen_share_frames_are_never_an_upload_root(home):
+    """``screenshots_dir`` holds one frame a second of whatever is on the user's screen — work screens,
+    customer data. The image provider may read it because its only destination is that provider;
+    ``upload`` hands a file to ANY site open in the pane, so for upload that folder would be an
+    exfiltration path and the setting is refused unless the file is also inside an allowed folder."""
+    frame = home["shots"] / "frame-0001.png"
+    frame.write_bytes(PNG)
+
+    assert all(folder != home["shots"] for _, folder in _roots(home))
+    with pytest.raises(up.UploadRefused) as refused:
+        up.read_upload(str(frame), _roots(home))
+
+    assert "screenshots_dir" not in str(refused.value)
+    assert "image_gen.sogni.image_input_dir" in str(refused.value)
 
 
 def test_the_profile_s_retained_attachments_count_once_they_exist(home):
@@ -58,7 +74,7 @@ def test_the_profile_s_retained_attachments_count_once_they_exist(home):
 
 
 def test_a_file_inside_an_allowed_folder_is_read_and_described(home):
-    source = home["shots"] / "judson.png"
+    source = home["pictures"] / "judson.png"
     source.write_bytes(PNG)
 
     got = up.read_upload(str(source), _roots(home))
@@ -83,7 +99,7 @@ def test_a_file_outside_every_allowed_folder_is_refused_naming_them(home, tmp_pa
 
     assert "image_gen.sogni.image_input_dir" in str(refused.value)
     assert str(home["pictures"]) in str(refused.value)
-    assert str(home["shots"]) in str(refused.value)
+    assert str(home["shots"]) not in str(refused.value)
 
 
 def test_a_relative_path_a_url_and_a_network_path_never_reach_the_filesystem(home):
@@ -181,4 +197,4 @@ def test_configured_roots_read_the_running_profile(home, monkeypatch):
     monkeypatch.setattr("hermes_cli.config.load_config", lambda: home["cfg"])
     monkeypatch.setattr("hermes_constants.get_hermes_home", lambda: home["home"])
 
-    assert [Path(folder) for _, folder in up.configured_roots()] == [home["pictures"], home["shots"]]
+    assert [Path(folder) for _, folder in up.configured_roots()] == [home["pictures"]]
