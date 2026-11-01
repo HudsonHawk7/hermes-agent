@@ -371,6 +371,24 @@ describe('preview pop-out forwarding', () => {
     expect(JSON.parse(respond.mock.calls[0][0].value)).toMatchObject({ acted: 'elements', success: true })
   })
 
+  it('carries an upload as the checked file the backend sent, never a path', async () => {
+    requestPopoutPreviewAct.mockResolvedValue({ acted: 'uploaded judson.png', success: true })
+    const file = { data: 'iVBORw0KGgo=', mime: 'image/png', name: 'judson.png', size: 8 }
+
+    const { respond } = deliver(
+      'preview.act',
+      { action: 'upload', file, ref: 'inp-photo', session_id: 'session-a' },
+      'session-a'
+    )
+
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1), { timeout: 30_000 })
+    expect(requestPopoutPreviewAct).toHaveBeenCalledWith(
+      expect.objectContaining({ file, kind: 'upload', ref: 'inp-photo' }),
+      sessionAOwner
+    )
+    expect(JSON.parse(respond.mock.calls[0][0].value)).toMatchObject({ acted: 'uploaded judson.png', success: true })
+  })
+
   it('runs the act locally when this window has a live surface', async () => {
     hasLivePreviewSurface.mockReturnValue(true)
 

@@ -574,6 +574,9 @@ const previewAct: Handler = ({ deps, isActiveSession, request, sessionId }) => {
   const action = {
     allowShortcut: p.allow_shortcut === true,
     amount: p.amount as never,
+    // Bytes the backend already checked against the profile's folders; a path
+    // never crosses this bridge.
+    file: p.file as never,
     key: p.key as never,
     kind: (str(p.action) || '') as never,
     max: p.max as never,

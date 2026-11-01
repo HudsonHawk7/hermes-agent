@@ -47,7 +47,8 @@ export type {
   PreviewActHolder,
   PreviewActResult,
   PreviewElement,
-  PreviewElementChange
+  PreviewElementChange,
+  PreviewUploadFile
 } from './types'
 
 /** Everything the core needs that it cannot define for itself. */
