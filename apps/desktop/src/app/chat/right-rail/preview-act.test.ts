@@ -745,4 +745,201 @@ describe('actOnActivePreview (drive_preview tool)', () => {
       send.mock.calls.map(([event]) => event).some(event => event.type === 'keyDown' && event.keyCode === 'Escape')
     ).toBe(true)
   })
+
+  describe('upload (hand the page a checked local file, no picker)', () => {
+    // A PNG header, as the backend sends it: already checked, base64, never a path.
+    const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...new Array(24).fill(0)])
+
+    const photo = {
+      data: btoa(String.fromCharCode(...pngBytes)),
+      mime: 'image/png',
+      name: 'judson.png',
+      size: pngBytes.length
+    }
+
+    /** jsdom has no `DataTransfer`, no `DragEvent`, and its `input.files` setter
+     *  only takes its own FileList. The script under test uses exactly those
+     *  Chromium APIs, so the page here gets stand-ins for the two jsdom lacks
+     *  and a plain `files` slot; the script itself runs unmodified, in jsdom,
+     *  through the same `new Function` path the thenable test uses. */
+    const withUploadPage = (html: string) => {
+      document.body.innerHTML = html
+
+      class StandInDataTransfer {
+        files: File[] = []
+        types: string[] = []
+        items = { add: (file: File) => void (this.files.push(file), (this.types = ['Files'])) }
+      }
+
+      const win = window as unknown as { DataTransfer?: unknown }
+      const hadTransfer = win.DataTransfer
+      win.DataTransfer = StandInDataTransfer
+
+      const filesSlot = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'files')!
+      Object.defineProperty(HTMLInputElement.prototype, 'files', {
+        configurable: true,
+        get(this: HTMLInputElement & { __files?: unknown }) {
+          return this.__files ?? null
+        },
+        set(this: HTMLInputElement & { __files?: unknown }, value: unknown) {
+          this.__files = value
+        }
+      })
+
+      const rect = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue({
+        bottom: 40,
+        height: 40,
+        left: 0,
+        right: 40,
+        top: 0,
+        width: 40,
+        x: 0,
+        y: 0,
+        toJSON: () => ({})
+      })
+
+      withRunner(async code => {
+        const raw = new Function('return ' + code)()
+
+        return types.isPromise(raw) ? await raw : raw
+      })
+
+      cleanups.push(() => {
+        rect.mockRestore()
+        Object.defineProperty(HTMLInputElement.prototype, 'files', filesSlot)
+        win.DataTransfer = hadTransfer
+        document.body.replaceChildren()
+        delete (window as unknown as { __hermesActHolder?: unknown }).__hermesActHolder
+      })
+    }
+
+    const filesOf = (input: HTMLInputElement) => (input.files as unknown as File[] | null) ?? []
+
+    it('puts the file in a file input and fires input and change, as a picker would', async () => {
+      withUploadPage('<input id="photo" type="file" accept="image/*">')
+      const input = document.getElementById('photo') as HTMLInputElement
+      const inputEvent = vi.fn()
+      const changeAtRoot = vi.fn()
+      input.addEventListener('input', inputEvent)
+      // At the document, the way React's root listener hears a change.
+      document.addEventListener('change', changeAtRoot)
+
+      try {
+        const result = await actOnActivePreview({ file: photo, kind: 'upload', selector: '#photo' })
+
+        expect(result).toMatchObject({ file: { name: 'judson.png', size: 32 }, success: true })
+        expect(result.acted).toBe('uploaded judson.png (32 B) into input')
+        expect(result.note).toBeUndefined()
+        expect(filesOf(input)).toHaveLength(1)
+        expect(filesOf(input)[0].name).toBe('judson.png')
+        expect(filesOf(input)[0].type).toBe('image/png')
+        expect(new Uint8Array(await filesOf(input)[0].arrayBuffer())).toEqual(pngBytes)
+        expect(inputEvent).toHaveBeenCalledOnce()
+        expect(changeAtRoot).toHaveBeenCalledOnce()
+      } finally {
+        document.removeEventListener('change', changeAtRoot)
+      }
+    })
+
+    it('finds the file input hidden behind the button the agent can see', async () => {
+      withUploadPage('<div><button id="pick">Upload photo</button><input type="file" hidden></div>')
+      const hidden = document.querySelector('input[type=file]') as HTMLInputElement
+      const changed = vi.fn()
+      hidden.addEventListener('change', changed)
+
+      const inventory = await actOnActivePreview({ kind: 'elements' })
+      const button = inventory.elements!.find(element => element.label === 'Upload photo')!
+      expect(button).toBeDefined()
+
+      const result = await actOnActivePreview({ file: photo, kind: 'upload', ref: button.ref })
+
+      expect(result.success).toBe(true)
+      expect(result.acted).toBe('uploaded judson.png (32 B) into the file input behind button "Upload photo"')
+      expect(filesOf(hidden)[0]?.name).toBe('judson.png')
+      expect(changed).toHaveBeenCalledOnce()
+    })
+
+    it('warns when the input says it accepts something else', async () => {
+      withUploadPage('<input id="doc" type="file" accept=".pdf,application/pdf">')
+
+      const result = await actOnActivePreview({ file: photo, kind: 'upload', selector: '#doc' })
+
+      expect(result.success).toBe(true)
+      expect(result.note).toContain('accepts .pdf,application/pdf, not image/png')
+    })
+
+    it('drops the file on a drop zone, in the order a real drag arrives', async () => {
+      withUploadPage('<div id="zone" role="button" tabindex="0">Drop your photo here</div>')
+      const zone = document.getElementById('zone')!
+      const seen: string[] = []
+      let dropped: File | undefined
+
+      for (const type of ['dragenter', 'dragover', 'drop']) {
+        zone.addEventListener(type, event => {
+          seen.push(type)
+          // What a drop zone does: take the file and stop the browser opening it.
+          event.preventDefault()
+
+          if (type === 'drop') {
+            dropped = (event as DragEvent).dataTransfer?.files[0]
+          }
+        })
+      }
+
+      const inventory = await actOnActivePreview({ kind: 'elements' })
+      const target = inventory.elements!.find(element => element.label === 'Drop your photo here')!
+
+      const result = await actOnActivePreview({ file: photo, kind: 'upload', ref: target.ref })
+
+      expect(result).toMatchObject({ file: { name: 'judson.png', size: 32 }, success: true })
+      expect(result.acted).toBe('dropped judson.png (32 B) on div "Drop your photo here"')
+      expect(seen).toEqual(['dragenter', 'dragover', 'drop'])
+      expect(dropped?.name).toBe('judson.png')
+      expect(dropped?.type).toBe('image/png')
+    })
+
+    it('says so when the target is neither a file input nor a drop zone', async () => {
+      withUploadPage('<p id="text">Just some text</p>')
+      const changed = vi.fn()
+      document.addEventListener('change', changed)
+
+      try {
+        const result = await actOnActivePreview({ file: photo, kind: 'upload', selector: '#text' })
+
+        expect(result.success).toBe(false)
+        expect(result.error).toMatch(/^p "Just some text" is neither a file input nor a drop zone/)
+        expect(result.error).toContain('drop on it went unhandled')
+        expect(changed).not.toHaveBeenCalled()
+      } finally {
+        document.removeEventListener('change', changed)
+      }
+    })
+
+    it('refuses a ref the inventory never handed out instead of guessing at a target', async () => {
+      withUploadPage('<input id="photo" type="file">')
+      await actOnActivePreview({ kind: 'elements' })
+
+      const result = await actOnActivePreview({ file: photo, kind: 'upload', ref: 'inp-portrait' })
+
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('Unknown element inp-portrait')
+      expect(filesOf(document.getElementById('photo') as HTMLInputElement)).toHaveLength(0)
+    })
+
+    it('tells the agent to open a page when no pane is live', async () => {
+      const result = await actOnActivePreview({ file: photo, kind: 'upload', selector: '#photo' })
+
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('open_preview')
+    })
+
+    it('refuses an upload that arrived without its file', async () => {
+      withRunner(async () => JSON.stringify({ success: true }))
+
+      const result = await actOnActivePreview({ kind: 'upload', selector: '#photo' })
+
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('without a file')
+    })
+  })
 })
