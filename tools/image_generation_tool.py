@@ -601,12 +601,15 @@ def _provider_result(result, contract_error: str) -> str:
     return json.dumps(result)
 
 
-def _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale, model=None, controls=None) -> dict[str, Any]:
+def _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale, model=None, controls=None,
+                         extras=None) -> dict[str, Any]:
     """Add the optional ``provider.generate(**kwargs)`` args in place (edit args only when supplied)."""
     if model:
         kwargs["model"] = model
     if controls:
         kwargs.update(controls)
+    if extras:
+        kwargs.update(extras)
     if isinstance(image_url, str) and image_url.strip():
         kwargs["image_url"] = image_url.strip()
     if reference_image_urls is not None:
@@ -633,10 +636,76 @@ def _declared_controls(provider, controls: Optional[dict[str, Any]]) -> Optional
     return {name: value for name, value in controls.items() if name in declared} or None
 
 
+def _declared_extras(provider, extras: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """The subset of ``extras`` whose names the provider advertises in ``extra_parameters``.
+
+    Unknown keys are dropped so a narrow ``generate()`` never sees them; only advertised names
+    reach the provider (NULL / empty map = nothing forwarded)."""
+    if not extras:
+        return None
+    try:
+        declared = (provider.capabilities() or {}).get("extra_parameters") or {}
+    except Exception:
+        return None
+    if not isinstance(declared, dict):
+        return None
+    return {name: value for name, value in extras.items() if name in declared} or None
+
+
+def _normalize_extra_parameters(raw: Any) -> tuple[dict[str, Any], list[str]]:
+    """``capabilities()['extra_parameters']`` → (schema properties, required names).
+
+    Each map value is a JSON-schema property snippet plus an optional boolean ``required`` flag
+    (stripped from the property object — it belongs on the parent ``required`` array). Empty /
+    missing / non-dict input → ``({}, [])``. Reserved tool names are skipped so a provider cannot
+    shadow ``prompt`` / edit args / creative controls.
+    """
+    if not isinstance(raw, dict) or not raw:
+        return {}, []
+    reserved = (
+        {"prompt", "aspect_ratio", "image_url", "reference_image_urls", "upscale"}
+        | set(_CREATIVE_CONTROL_PARAMS)
+    )
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+    for name, spec in raw.items():
+        if not isinstance(name, str) or not name or name in reserved or not isinstance(spec, dict):
+            continue
+        prop = {k: v for k, v in spec.items() if k != "required"}
+        if not prop:
+            continue
+        properties[name] = prop
+        if spec.get("required") is True:
+            required.append(name)
+    return properties, required
+
+
+def _collect_extra_args(args: dict, extra_specs: Any) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    """Pull advertised extra keys from the tool call. Missing required → (None, error message).
+
+    Presence-only: a value of ``\"none\"`` / ``0`` / ``False`` still counts (scenery / off)."""
+    if not isinstance(extra_specs, dict) or not extra_specs:
+        return None, None
+    extras: dict[str, Any] = {}
+    missing: list[str] = []
+    for name, spec in extra_specs.items():
+        if not isinstance(name, str) or not isinstance(spec, dict):
+            continue
+        if name in args:
+            extras[name] = args[name]
+        elif spec.get("required") is True:
+            missing.append(name)
+    if missing:
+        if len(missing) == 1:
+            return None, f"{missing[0]} is required for image generation"
+        return None, f"{', '.join(missing)} are required for image generation"
+    return (extras or None), None
+
+
 def _dispatch_to_plugin_provider(
     prompt: str, aspect_ratio: str, image_url: Optional[str] = None,
     reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None,
-    controls: Optional[dict[str, Any]] = None):
+    controls: Optional[dict[str, Any]] = None, extras: Optional[dict[str, Any]] = None):
     """JSON result from the selected plugin provider, or ``None`` to fall through to in-tree FAL
     (provider unset / ``"fal"`` / ``"nous"``). Providers without ``upscale`` ignore it via ``**kwargs``."""
     configured = _plugin_provider_name()
@@ -661,8 +730,12 @@ def _dispatch_to_plugin_provider(
     pname = getattr(provider, "name", "?")
     kwargs: dict[str, Any] = {"prompt": prompt, "aspect_ratio": aspect_ratio}
     try:
-        _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale,
-                             model=_read_configured_image_model(), controls=_declared_controls(provider, controls))
+        _add_provider_kwargs(
+            kwargs, image_url, reference_image_urls, upscale,
+            model=_read_configured_image_model(),
+            controls=_declared_controls(provider, controls),
+            extras=_declared_extras(provider, extras),
+        )
         result = provider.generate(**kwargs)
     except Exception as exc:
         # A TypeError from generate() predating image_url support (third-party plugin not yet
@@ -680,7 +753,6 @@ def _dispatch_to_plugin_provider(
                        " TypeError" if is_type_error else "", exc)
         return _provider_error(f"Provider '{pname}' error: {exc}", "provider_exception")
     return _provider_result(result, "Provider returned a non-dict result")
-
 
 def _normalize_krea_model(model_id: Optional[str]) -> Optional[str]:
     """Return ``model_id`` when it is one of the Krea plugin's model ids, else ``None``."""
@@ -703,7 +775,8 @@ def _managed_model_plugin() -> Optional[tuple]:
 def _maybe_route_managed_model(
     prompt: str, aspect_ratio: str, image_url: Optional[str] = None,
     reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None,
-    controls: Optional[dict[str, Any]] = None) -> Optional[str]:
+    controls: Optional[dict[str, Any]] = None,
+    extras: Optional[dict[str, Any]] = None) -> Optional[str]:
     """JSON result from the Krea or Portal gateway the stored model belongs to, or ``None`` to fall
     through to FAL.
 
@@ -731,14 +804,16 @@ def _maybe_route_managed_model(
             f"available. Pick another model via `hermes tools` → Image Generation.", "provider_not_registered")
     kwargs: dict[str, Any] = {"prompt": prompt, "aspect_ratio": aspect_ratio, "model": model_id}
     try:
-        _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale,
-                             controls=_declared_controls(provider, controls))
+        _add_provider_kwargs(
+            kwargs, image_url, reference_image_urls, upscale,
+            controls=_declared_controls(provider, controls),
+            extras=_declared_extras(provider, extras),
+        )
         result = provider.generate(**kwargs)
     except Exception as exc:
         logger.warning("Managed %s routing failed: %s", plugin_name, exc)
         return _provider_error(f"Managed {provider.display_name} generation error: {exc}", "provider_exception")
     return _provider_result(result, f"{provider.display_name} provider returned a non-dict result")
-
 
 def _confine_source_images(image_url, reference_image_urls, task_id, *, permitted: tuple = ("image",)):
     """Resolve path-like sources to ``data:`` URLs under a non-local terminal backend.
@@ -778,20 +853,26 @@ def _handle_image_generate(args, **kw):
         args.get("image_url"), args.get("reference_image_urls"), task_id)
     if confine_error is not None:
         return confine_error
+    # Provider-advertised extras (e.g. who=): only names in capabilities.extra_parameters; required
+    # ones missing → refuse and name them. Unknown keys never join the kwargs.
+    extras, extra_err = _collect_extra_args(args, _active_image_capabilities().get("extra_parameters"))
+    if extra_err is not None:
+        return tool_error(extra_err)
     # Order matters: explicit plugin provider, then the model-driven managed gateways (Krea /
     # Portal — only under the "nous"/unset selection, so BYO/direct FAL stays untouched), then FAL.
     sources = dict(image_url=image_url, reference_image_urls=reference_image_urls,
                    upscale=upscale if isinstance(upscale, bool) else None)
     controls = {name: args[name] for name in _CREATIVE_CONTROL_PARAMS if name in args}
-    raw = _dispatch_to_plugin_provider(prompt, aspect_ratio, controls=controls or None, **sources)
+    raw = _dispatch_to_plugin_provider(
+        prompt, aspect_ratio, controls=controls or None, extras=extras, **sources)
     if raw is None:
-        raw = _maybe_route_managed_model(prompt, aspect_ratio, controls=controls or None, **sources)
+        raw = _maybe_route_managed_model(
+            prompt, aspect_ratio, controls=controls or None, extras=extras, **sources)
         if raw is not None:
             raw = _fall_back_to_fal(raw, prompt, aspect_ratio, sources)
     if raw is None:
         raw = image_generate_tool(prompt, aspect_ratio, **sources)
     return _postprocess_image_generate_result(raw, task_id=task_id)
-
 
 def _fall_back_to_fal(raw: str, prompt: str, aspect_ratio: str, sources: dict[str, Any]) -> str:
     """Rerun a managed Krea request on FAL's default model when Krea refused it before creating a job.
@@ -862,6 +943,10 @@ def _active_image_capabilities() -> dict[str, Any]:
                 info["supports_upscale"] = bool(caps.get("supports_upscale"))
                 if caps.get("creative_controls"):
                     info["creative_controls"] = list(caps["creative_controls"])
+                # Provider-defined schema snippets (e.g. who=); omit / empty = off (no schema change).
+                extra_params = caps.get("extra_parameters")
+                if isinstance(extra_params, dict) and extra_params:
+                    info["extra_parameters"] = extra_params
                 if caps.get("source_image_role") == "style":
                     info["source_image_role"] = "style"
                 return info
@@ -990,9 +1075,11 @@ def _build_dynamic_image_schema() -> dict[str, Any]:
     for name in info.get("creative_controls") or []:
         if name in _CREATIVE_CONTROL_PARAMS:
             properties[name] = _CREATIVE_CONTROL_PARAMS[name]
+    extra_props, extra_required = _normalize_extra_parameters(info.get("extra_parameters"))
+    properties.update(extra_props)
+    required = ["prompt", *extra_required]
     return {"description": base_desc.format(edit_clause=edit_clause),
-            "parameters": {"type": "object", "properties": properties, "required": ["prompt"]}}
-
+            "parameters": {"type": "object", "properties": properties, "required": required}}
 
 registry.register(
     name="image_generate", toolset="image_gen", schema=IMAGE_GENERATE_SCHEMA,
