@@ -50,7 +50,8 @@ test('both SOUL editors explain a missing file and save it without changing pers
     await dialog.locator('.cm-content').fill(instructions)
     await dialog.getByRole('button', { name: 'Save SOUL.md' }).click()
     await expect(dialog).toBeHidden()
-    expect(fs.readFileSync(soulPath, 'utf8')).toBe(instructions)
+    // Windows editors may persist CRLF; compare on normalized newlines.
+    expect(fs.readFileSync(soulPath, 'utf8').replace(/\r\n/g, '\n')).toBe(instructions)
     expect(fs.readFileSync(configPath, 'utf8')).toBe(config)
 
     await page.getByRole('button', { name: 'Manage profiles…' }).click()

@@ -12,6 +12,7 @@
 
 import { $groupChats } from './group-chat'
 import { groupMemberKey, groupSessionMemberKey } from './group-membership'
+import { isGenuineMissingSessionError } from './group-turns'
 import { requestForBot } from './routing'
 import type { GroupMember } from './types'
 
@@ -72,9 +73,9 @@ export async function compressGroupMemberHistory(
 
       runtime = resumed?.session_id || null
     } catch (error: any) {
-      // 4007 = the gateway genuinely has no such session; anything else is a
-      // real failure the caller should see.
-      if (error?.code !== 4007) {
+      // 4007 / bare not_found = the gateway genuinely has no such session;
+      // anything else is a real failure the caller should see.
+      if (!isGenuineMissingSessionError(error)) {
         throw error
       }
     }

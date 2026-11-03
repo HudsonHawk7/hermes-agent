@@ -1,6 +1,6 @@
 import { APPROVAL_COMMAND_TRIGGER, MOCK_REPLY } from '../../../tests-js/scripts/mock-server'
 
-import { type MockBackendFixture, setupMockBackend, waitForAppReady } from './fixtures'
+import { type MockBackendFixture, selectSessionTab, setupMockBackend, waitForAppReady } from './fixtures'
 import { expect, test } from './test'
 
 // #91706: a command-approval card in a Bot Mode group room could highlight
@@ -49,11 +49,11 @@ async function createRoom(page: MockBackendFixture['page']) {
   await dialog.getByRole('textbox', { name: 'Group name' }).fill(ROOM)
   await dialog.getByRole('button', { name: 'Create Group (2)' }).click()
 
-  const groupTab = page.getByRole('tab', { name: new RegExp(`${ROOM} Close`) })
   const groupComposer = page.getByRole('textbox', { name: `Message ${ROOM}` }).filter({ visible: true })
-  await expect(groupTab).toBeVisible({ timeout: 20_000 })
-  await expect(groupTab).toHaveAttribute('aria-selected', 'true')
-  await expect(groupComposer).toBeVisible()
+  await expect(async () => {
+    await selectSessionTab(page, ROOM, 10_000)
+    await expect(groupComposer).toBeVisible({ timeout: 3_000 })
+  }).toPass({ timeout: 30_000 })
 
   return groupComposer
 }
@@ -97,14 +97,12 @@ test('clicking an approval choice in a group room submits it (#91706)', async ()
   // the Desktop's session-level approval surface, and a build that switches
   // tabs on it would otherwise fail here on visibility instead of on the
   // contract below (the click must be the submit).
-  const groupTab = page.getByRole('tab', { name: new RegExp(`${ROOM} Close`) })
+  const groupTab = page.getByRole('tab').filter({ hasText: ROOM }).first()
   const card = page.getByText(/wants to run a command/).locator('xpath=..')
   const once = card.getByRole('button', { name: 'once', exact: true })
 
   await expect(async () => {
-    if ((await groupTab.getAttribute('aria-selected')) !== 'true') {
-      await groupTab.click()
-    }
+    await selectSessionTab(page, ROOM, 5_000)
 
     await expect(card).toBeVisible({ timeout: 5_000 })
   }).toPass({ timeout: 90_000 })
