@@ -14,6 +14,8 @@ export interface ConfigFieldSchema {
   /** When true, a searchable select prepends a "clear" item that resets the
    *  value to ''. Matches the existing <Select> EMPTY_SELECT_VALUE pattern. */
   clearable?: boolean
+  /** Number fields: empty/NULL means the setting is off, not zero. */
+  nullMeansOff?: boolean
   type?: 'boolean' | 'list' | 'number' | 'select' | 'string' | 'text'
 }
 

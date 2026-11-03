@@ -134,6 +134,8 @@ def _tick_admitted(
         if headless:
             from cron.scheduler_gateway_gate import refuse_agent_jobs_without_gateway
             due_jobs = refuse_agent_jobs_without_gateway(due_jobs)
+        from cron.scheduler_interactive_hold import hold_agent_jobs_while_chatting
+        due_jobs = hold_agent_jobs_while_chatting(due_jobs)
 
         if not due_jobs:
             # Idle tick: skip config load + pool setup, but still reap crashed jobs' MCP orphans.

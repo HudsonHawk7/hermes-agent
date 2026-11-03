@@ -409,11 +409,28 @@ export function routineDetailRows(
 /** Why a job is not doing what the user expects. The row only ever showed
  *  "paused"; the scheduler's own reason and the last fire/delivery failures
  *  had no surface in Bot Mode at all. */
+function issueText(value: unknown): null | string {
+  if (typeof value === 'string' && value.trim()) {
+    return value.trim()
+  }
+  if (value && typeof value === 'object' && 'detail' in value) {
+    const detail = (value as { detail?: unknown }).detail
+    if (typeof detail === 'string' && detail.trim()) {
+      return detail.trim()
+    }
+  }
+  return null
+}
+
 export function routineDetailIssue(job: RoutineJob | null | undefined): null | string {
   const reasons = [job?.last_fire_error, job?.last_delivery_error, job?.paused_reason]
-  const first = reasons.find(value => typeof value === 'string' && value.trim())
-
-  return first ? first.trim() : null
+  for (const value of reasons) {
+    const text = issueText(value)
+    if (text) {
+      return text
+    }
+  }
+  return null
 }
 
 interface RoutineDetailDialogProps {

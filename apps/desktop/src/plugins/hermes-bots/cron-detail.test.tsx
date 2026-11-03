@@ -106,6 +106,12 @@ describe('the facts the row never showed', () => {
       })
       // The run that never happened outranks the delivery of a run that did.
     ).toBe('model timeout')
+    expect(
+      routineDetailIssue({
+        ...activeJob,
+        last_fire_error: { detail: "waiting: you're chatting with her" }
+      })
+    ).toBe("waiting: you're chatting with her")
   })
 })
 
