@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 import sqlite3
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -55,6 +56,18 @@ def _stub_process(monkeypatch, fired):
     )
 
 
+def _session_turn_leases_ddl() -> str:
+    """The production CREATE TABLE, not a homegrown lease shape."""
+    from hermes_state_common import SCHEMA_SQL
+
+    start = SCHEMA_SQL.index("CREATE TABLE IF NOT EXISTS session_turn_leases")
+    end = SCHEMA_SQL.index(";", start) + 1
+    ddl = SCHEMA_SQL[start:end]
+    for col in ("conversation_id", "holder", "acquired_at", "expires_at"):
+        assert col in ddl, ddl
+    return ddl
+
+
 def _write_state(path, *, sessions=(), messages=(), leases=()):
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path))
@@ -73,14 +86,9 @@ def _write_state(path, *, sessions=(), messages=(), leases=()):
             role TEXT,
             timestamp REAL
         );
-        CREATE TABLE session_turn_leases (
-            conversation_id TEXT PRIMARY KEY,
-            owner_pid INTEGER,
-            created_monotonic REAL,
-            heartbeat_monotonic REAL
-        );
         """
     )
+    conn.executescript(_session_turn_leases_ddl())
     conn.executemany(
         "INSERT INTO sessions (id, source, last_activity_at, profile_name, archived) "
         "VALUES (?, ?, ?, ?, ?)",
@@ -91,7 +99,7 @@ def _write_state(path, *, sessions=(), messages=(), leases=()):
         messages,
     )
     conn.executemany(
-        "INSERT INTO session_turn_leases (conversation_id, owner_pid, created_monotonic, heartbeat_monotonic) "
+        "INSERT INTO session_turn_leases (conversation_id, holder, acquired_at, expires_at) "
         "VALUES (?, ?, ?, ?)",
         leases,
     )
@@ -258,10 +266,11 @@ def test_quiet_window_uses_recent_user_message_not_cron(tmp_path, monkeypatch):
 
 def test_durable_lease_holds_interactive_not_cron(tmp_path, monkeypatch):
     db = tmp_path / "state.db"
+    now = time.time()
     _write_state(
         db,
         sessions=[("chat-1", "local", 1.0, "probe", 0), ("cron-1", "cron", 1.0, "probe", 0)],
-        leases=[("cron-1", 1, 1.0, 1.0)],
+        leases=[("cron-1", "pid=1:turn=a", now - 1, now + 60)],
     )
     monkeypatch.setattr(hold, "_state_db_path", lambda: db)
     monkeypatch.setattr(hold, "_lookup_gateway_runner", lambda: None)
@@ -271,7 +280,94 @@ def test_durable_lease_holds_interactive_not_cron(tmp_path, monkeypatch):
     _write_state(
         tmp_path / "state2.db",
         sessions=[("chat-1", "local", 1.0, "probe", 0)],
-        leases=[("chat-1", 1, 1.0, 1.0)],
+        leases=[("chat-1", "pid=1:turn=a", now - 1, now + 60)],
     )
     monkeypatch.setattr(hold, "_state_db_path", lambda: tmp_path / "state2.db")
     assert hold.profile_is_live_interactive(quiet_minutes=0) is True
+
+
+def test_expired_turn_lease_does_not_hold(tmp_path, monkeypatch):
+    now = time.time()
+    monkeypatch.setattr(hold, "_lookup_gateway_runner", lambda: None)
+    monkeypatch.setattr(hold, "_voice_turn_open", lambda: False)
+
+    expired = tmp_path / "expired.db"
+    _write_state(
+        expired,
+        sessions=[("chat-1", "local", now, "probe", 0)],
+        leases=[("chat-1", "pid=1:turn=a", now - 120, now - 1)],
+    )
+    monkeypatch.setattr(hold, "_state_db_path", lambda: expired)
+    assert hold.profile_is_live_interactive(quiet_minutes=0) is False
+
+    live = tmp_path / "live.db"
+    _write_state(
+        live,
+        sessions=[("chat-1", "local", now, "probe", 0)],
+        leases=[("chat-1", "pid=1:turn=a", now - 1, now + 60)],
+    )
+    monkeypatch.setattr(hold, "_state_db_path", lambda: live)
+    assert hold.profile_is_live_interactive(quiet_minutes=0) is True
+
+
+def test_real_session_state_turn_agent_holds(monkeypatch):
+    """Live detection walks SessionState.turn.agent — the object has no .agent."""
+    from gateway.run import _AGENT_PENDING_SENTINEL
+    from gateway.session_state import SessionState
+
+    class _Runner:
+        def __init__(self, sessions):
+            self._sessions = sessions
+
+        def _sessions_map(self):
+            return self._sessions
+
+    live = SessionState()
+    assert not hasattr(live, "agent")
+    live.turn.agent = object()
+    idle = SessionState()
+    pending = SessionState()
+    pending.turn.agent = _AGENT_PENDING_SENTINEL
+
+    monkeypatch.setattr(hold, "_voice_turn_open", lambda: False)
+    monkeypatch.setattr(hold, "_durable_turn_lease", lambda: False)
+    monkeypatch.setattr(hold, "_recent_user_message", lambda *a: False)
+    monkeypatch.setattr(hold, "_current_profile_name", lambda: "probe")
+    key = "agent:probe:telegram:dm:1"
+
+    monkeypatch.setattr(hold, "_lookup_gateway_runner", lambda: _Runner({key: live}))
+    assert hold.profile_is_live_interactive(quiet_minutes=0) is True
+
+    monkeypatch.setattr(hold, "_lookup_gateway_runner", lambda: _Runner({key: idle}))
+    assert hold.profile_is_live_interactive(quiet_minutes=0) is False
+
+    monkeypatch.setattr(hold, "_lookup_gateway_runner", lambda: _Runner({key: pending}))
+    assert hold.profile_is_live_interactive(quiet_minutes=0) is True
+
+
+def test_real_voicehub_paused_call_holds_jobs(monkeypatch):
+    """A paused call is idle + stop_reason paused; snapshot still names the owner."""
+    import tui_gateway.voice_hub as voice_hub_mod
+    from tui_gateway.voice_hub import VoiceHub
+
+    hub = VoiceHub()
+    transport = object()
+    hub.armed("desktop", transport)
+    monkeypatch.setattr(voice_hub_mod, "_hub", hub)
+    monkeypatch.setattr(hold, "_lookup_gateway_runner", lambda: None)
+    monkeypatch.setattr(hold, "_durable_turn_lease", lambda: False)
+    monkeypatch.setattr(hold, "_recent_user_message", lambda *a: False)
+
+    # Wake-word listening is not a call.
+    assert hub.state()["status"] == "armed"
+    assert hold.profile_is_live_interactive(quiet_minutes=0) is False
+
+    assert hub.pause(transport, "paused") is True
+    published = hub.state()
+    assert published["status"] == "idle"
+    assert published["stop_reason"] == "paused"
+    assert hub.snapshot()[0] is transport
+    assert hold.profile_is_live_interactive(quiet_minutes=0) is True
+
+    assert hub.release(transport, "user_stop") is True
+    assert hold.profile_is_live_interactive(quiet_minutes=0) is False

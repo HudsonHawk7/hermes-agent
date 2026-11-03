@@ -4,8 +4,10 @@ NULL ``cron.pause_while_chatting_minutes`` means the feature is off (no auto-def
 When the setting is 0 or more, due *agent* jobs wait (not failed, due instant unmoved)
 while any of these is true on this profile:
 
-- a Desktop/gateway chat turn is in flight (in-process or a durable turn lease)
-- a voice/call turn has the mic Hub paused
+- a Desktop/gateway chat turn is in flight (``SessionState.turn.agent``, including the
+  pending sentinel, or an unexpired ``session_turn_leases`` row)
+- a voice/call turn has the mic Hub paused (``state()`` is idle with
+  ``stop_reason == "paused"``; ``snapshot()`` still names the owner)
 - (when N > 0) a user message landed in the last N minutes on an interactive session
 
 The job list shows ``waiting: you're chatting with her``. no_agent scripts still fire.
@@ -153,7 +155,9 @@ def _in_process_interactive_turn() -> bool:
         if not _session_key_is_interactive(key):
             continue
         try:
-            agent = state.turn.agent
+            # Real SessionState has no .agent; the running turn lives on turn.agent
+            # (None = idle, object or _AGENT_PENDING_SENTINEL = in flight).
+            agent = getattr(getattr(state, "turn", None), "agent", None)
         except Exception:
             continue
         if agent is not None:
@@ -162,9 +166,11 @@ def _in_process_interactive_turn() -> bool:
 
 
 def _voice_turn_open() -> bool:
-    """Mic Hub paused with a claim = a voice turn, not mere wake-word listening.
+    """Mic Hub paused for a voice/call turn, not mere wake-word listening.
 
     Do not call ``hub()`` — that would create a Hub in processes that never listened.
+    Published ``state()`` is only armed/idle/stopped; a voice turn pauses to idle
+    with ``stop_reason == "paused"`` and ``snapshot()`` still names the owner.
     """
     try:
         from tui_gateway import voice_hub as vh
@@ -172,10 +178,11 @@ def _voice_turn_open() -> bool:
         existing = getattr(vh, "_hub", None)
         if existing is None:
             return False
-        snap = existing.state()
+        published = existing.state()
+        owner, _surface = existing.snapshot()
     except Exception:
         return False
-    return bool(snap.get("paused") and snap.get("claim"))
+    return owner is not None and published.get("stop_reason") == "paused"
 
 
 def _state_db_path() -> Optional[Path]:
@@ -215,11 +222,14 @@ def _durable_turn_lease() -> bool:
     conn = _connect_state_ro(path)
     if conn is None:
         return False
+    now = time.time()
     try:
         rows = conn.execute(
             "SELECT l.conversation_id, s.source "
             "FROM session_turn_leases l "
-            "LEFT JOIN sessions s ON s.id = l.conversation_id"
+            "LEFT JOIN sessions s ON s.id = l.conversation_id "
+            "WHERE l.expires_at > ?",
+            (now,),
         ).fetchall()
     except sqlite3.Error:
         return False
