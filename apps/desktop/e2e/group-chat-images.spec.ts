@@ -13,10 +13,15 @@ import { MOCK_REPLY } from '../../../tests-js/scripts/mock-server'
 import { type MockBackendFixture, setupMockBackend, waitForAppReady } from './fixtures'
 import { expect, test } from './test'
 
+// Isolated Electron `gateway ensure` has been measured at ~117s before hermes_cli
+// logs (75s product deadline kills it). beforeEach waitForAppReady must cover that.
+// test.setTimeout() inside the test body does not cover the hook.
+test.describe.configure({ timeout: 300_000 })
+
 const PNG_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAKAAAABkCAIAAACO1KzYAAAA30lEQVR42u3dwQ2AIBAAQTAWAx1iBXYI7diCuWhEMvP2dZsj+CL30hLr2oxAYARGYARGYARGYIERGIH53n7nozpOk5rQqIcNdkQjMAIjMNPeomP3N54V+5exwY5oBEZgBEZgBEZggREYgREYgREYgQVGYARGYARGYARGYIERGIERGIERGIEFRmAERmAERmAEFhiBERiBERiBERiBBUZgBEZgBEZgBBYYgREYgREYgRFYYCMQGIERmPSj94Njb9ligxEYgRFYYJaQe2mmYIMRGIERGIERGIEFRmAERmDedAFtjAtAGWDnoAAAAABJRU5ErkJggg=='
 
-const SHOTS = path.join(os.tmpdir(), 'group-chat-images-e2e')
+const SHOTS = process.env.HERMES_E2E_SHOTS || path.join(os.tmpdir(), 'group-chat-images-e2e')
 let fixture: MockBackendFixture | null = null
 
 async function openBots(page: MockBackendFixture['page']): Promise<void> {
@@ -117,7 +122,7 @@ test.beforeEach(async () => {
       replyForPrompt: () => MOCK_REPLY
     }
   })
-  await waitForAppReady(fixture, 120_000)
+  await waitForAppReady(fixture, 210_000)
 })
 
 test.afterEach(async () => {
@@ -126,7 +131,7 @@ test.afterEach(async () => {
 })
 
 test('group room file drop puts the image in the pending tray', async () => {
-  test.setTimeout(180_000)
+  test.setTimeout(300_000)
   const page = fixture!.page
   await createRoom(page)
 
