@@ -311,8 +311,12 @@ def test_expired_turn_lease_does_not_hold(tmp_path, monkeypatch):
 
 
 def test_real_session_state_turn_agent_holds(monkeypatch):
-    """Live detection walks SessionState.turn.agent — the object has no .agent."""
-    from gateway.run import _AGENT_PENDING_SENTINEL
+    """Live detection walks SessionState.turn.agent — the object has no .agent.
+
+    Do not import gateway.run here: that boots hermes_bootstrap restore_interrupted_pull,
+    which stats the live install's worktree pull marker and fails tests/home_io_guard
+    on a linked worktree. Pending-in-flight is any non-None turn.agent.
+    """
     from gateway.session_state import SessionState
 
     class _Runner:
@@ -327,7 +331,7 @@ def test_real_session_state_turn_agent_holds(monkeypatch):
     live.turn.agent = object()
     idle = SessionState()
     pending = SessionState()
-    pending.turn.agent = _AGENT_PENDING_SENTINEL
+    pending.turn.agent = object()  # any non-None counts as in-flight
 
     monkeypatch.setattr(hold, "_voice_turn_open", lambda: False)
     monkeypatch.setattr(hold, "_durable_turn_lease", lambda: False)
