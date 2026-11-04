@@ -188,21 +188,36 @@ export function ConfigField({
   }
 
   if (schema.type === 'number') {
+    const nullMeansOff = Boolean(schema.nullMeansOff)
+    const unset = nullMeansOff && (value === undefined || value === null)
     return row(
-      <Input
-        className={CONTROL_TEXT}
-        onChange={e => {
-          const raw = e.target.value
-          const n = raw === '' ? 0 : Number(raw)
+      <div className="flex min-w-0 flex-col gap-1">
+        {unset ? (
+          <p className="text-[0.8125rem] font-medium text-red-600 dark:text-red-400">
+            {c.notSet}
+            <span className="ml-2 font-normal text-(--ui-text-tertiary)">(off)</span>
+          </p>
+        ) : null}
+        <Input
+          className={CONTROL_TEXT}
+          min={nullMeansOff ? 0 : undefined}
+          onChange={e => {
+            const raw = e.target.value
+            if (nullMeansOff && raw === '') {
+              onChange(null)
+              return
+            }
+            const n = raw === '' ? 0 : Number(raw)
 
-          if (!Number.isNaN(n)) {
-            onChange(n)
-          }
-        }}
-        placeholder={c.notSet}
-        type="number"
-        value={value === undefined || value === null ? '' : String(value)}
-      />
+            if (!Number.isNaN(n)) {
+              onChange(n)
+            }
+          }}
+          placeholder={nullMeansOff ? `${c.notSet} (off)` : c.notSet}
+          type="number"
+          value={value === undefined || value === null ? '' : String(value)}
+        />
+      </div>
     )
   }
 

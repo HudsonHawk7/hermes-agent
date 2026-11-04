@@ -189,6 +189,17 @@ _SCHEMA_OVERRIDES: dict[str, dict[str, Any]] = {
             "0 disables the deadline; values above 600 are clamped."
         ),
     },
+    "cron.pause_while_chatting_minutes": {
+        "type": "number",
+        "nullMeansOff": True,
+        "description": (
+            "Pause while chatting: this profile's scheduled agent jobs wait while you are "
+            "in a live chat or call, then run once it goes quiet. Empty / NULL = off "
+            "(jobs never wait). 0 = wait only during a live turn or call. A number N "
+            "also waits N minutes after your last message. Named honestly; no auto-default."
+        ),
+        "category": "cron",
+    },
 }
 
 # Small categories fold into a bigger tab to avoid one-field orphan tabs. Several sources
