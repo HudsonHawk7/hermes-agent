@@ -91,6 +91,18 @@ _RESPAWN_GUARD_PR_URL_RE = re.compile(
 DEFAULT_PRE_HEARTBEAT_STALL_WARN_SECONDS = 5 * 60
 DEFAULT_PRE_HEARTBEAT_STALL_KILL_SECONDS = 15 * 60
 
+# Stall-warn → critical-thinking-unstick (t_76eca68b): advisory pointer only.
+# The warn tick never completes/blocks/kills; reclaim timeout stays at kill_s.
+STALL_UNSTICK_SKILL_NAME = "critical-thinking-unstick"
+STALL_UNSTICK_SKILL_RELPATH = "skills/thinking/critical-thinking-unstick/SKILL.md"
+STALL_UNSTICK_POINTER_TEXT = (
+    "No progress for 5 minutes. Load the `critical-thinking-unstick` skill now, "
+    "answer Step 0 (say what you already tried and what you only assumed), then act."
+)
+STALL_UNSTICK_POINTER_EVENT = "stall_unstick_pointer"
+STALL_UNSTICK_MISSING_EVENT = "stall_unstick_skill_missing"
+STALL_UNSTICK_DELIVERED_EVENT = "stall_unstick_delivered"
+
 # Log markers that mean the agent got past the worker_bound hang class.
 # Match real progress only. Bare "agent_init" is too loose — a hang log like
 # "still waiting before agent_init" would false-positive and skip the stall kill.
@@ -621,6 +633,159 @@ def _has_event_kind_for_run(
     return row is not None
 
 
+def stall_unstick_skill_path(assignee: Optional[str]) -> Optional[Path]:
+    """Profile-local path to ``critical-thinking-unstick`` SKILL.md, or None.
+
+    Matches the AC path under the assignee's profile home. Never raises: a bad
+    assignee name or missing profile is treated as "no skill file".
+    """
+    name = (assignee or "").strip()
+    if not name:
+        return None
+    try:
+        from hermes_cli.profiles import get_profile_dir
+
+        return get_profile_dir(name) / STALL_UNSTICK_SKILL_RELPATH
+    except Exception:
+        return None
+
+
+def _emit_stall_unstick_pointer(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    run_id: Optional[int],
+    assignee: Optional[str],
+    age_seconds: int,
+    warn_after_seconds: int,
+) -> str:
+    """Record the stall→unstick pointer (or missing-skill warning) as a card event.
+
+    Returns the event kind written. Advisory only — never changes task status.
+    A missing skill file logs a named warning and still completes the tick.
+    """
+    skill_path = stall_unstick_skill_path(assignee)
+    path_str = str(skill_path) if skill_path is not None else None
+    present = bool(skill_path is not None and skill_path.is_file())
+    if not present:
+        payload = {
+            "skill": STALL_UNSTICK_SKILL_NAME,
+            "skill_relpath": STALL_UNSTICK_SKILL_RELPATH,
+            "skill_path": path_str,
+            "assignee": (assignee or "").strip() or None,
+            "age_seconds": int(age_seconds),
+            "warn_after_seconds": int(warn_after_seconds),
+            "reason": "skill_file_missing",
+        }
+        _kb._append_event(
+            conn, task_id, STALL_UNSTICK_MISSING_EVENT, payload, run_id=run_id,
+        )
+        _kb._log.warning(
+            "kanban stall unstick: skill missing for task %s (assignee=%s path=%s) — "
+            "tick continues without pointer",
+            task_id, assignee or "(none)", path_str or "(unresolved)",
+        )
+        return STALL_UNSTICK_MISSING_EVENT
+
+    payload = {
+        "skill": STALL_UNSTICK_SKILL_NAME,
+        "skill_relpath": STALL_UNSTICK_SKILL_RELPATH,
+        "skill_path": path_str,
+        "assignee": (assignee or "").strip() or None,
+        "age_seconds": int(age_seconds),
+        "warn_after_seconds": int(warn_after_seconds),
+        "message": STALL_UNSTICK_POINTER_TEXT,
+        "delivered": False,
+    }
+    _kb._append_event(
+        conn, task_id, STALL_UNSTICK_POINTER_EVENT, payload, run_id=run_id,
+    )
+    _kb._log.info(
+        "kanban stall unstick: pointer queued for task %s (skill=%s)",
+        task_id, STALL_UNSTICK_SKILL_NAME,
+    )
+    return STALL_UNSTICK_POINTER_EVENT
+
+
+def pending_stall_unstick_pointer(
+    conn: sqlite3.Connection, task_id: str, *, run_id: Optional[int] = None,
+) -> Optional[dict]:
+    """Latest undelivered ``stall_unstick_pointer`` payload for this task/run.
+
+    A matching ``stall_unstick_delivered`` after the pointer event means the
+    worker already got the pointer and must not be injected again.
+    """
+    if run_id is not None:
+        row = conn.execute(
+            "SELECT id, payload FROM task_events "
+            "WHERE task_id = ? AND run_id = ? AND kind = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id, int(run_id), STALL_UNSTICK_POINTER_EVENT),
+        ).fetchone()
+        if row is None:
+            return None
+        delivered = conn.execute(
+            "SELECT 1 FROM task_events "
+            "WHERE task_id = ? AND run_id = ? AND kind = ? AND id > ? LIMIT 1",
+            (task_id, int(run_id), STALL_UNSTICK_DELIVERED_EVENT, int(row["id"])),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT id, payload, run_id FROM task_events "
+            "WHERE task_id = ? AND kind = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id, STALL_UNSTICK_POINTER_EVENT),
+        ).fetchone()
+        if row is None:
+            return None
+        delivered = conn.execute(
+            "SELECT 1 FROM task_events "
+            "WHERE task_id = ? AND kind = ? AND id > ? LIMIT 1",
+            (task_id, STALL_UNSTICK_DELIVERED_EVENT, int(row["id"])),
+        ).fetchone()
+    if delivered is not None:
+        return None
+    raw = row["payload"]
+    if isinstance(raw, str):
+        import json as _json
+        try:
+            data = _json.loads(raw)
+        except Exception:
+            data = {"message": STALL_UNSTICK_POINTER_TEXT}
+    elif isinstance(raw, dict):
+        data = dict(raw)
+    else:
+        data = {"message": STALL_UNSTICK_POINTER_TEXT}
+    data.setdefault("message", STALL_UNSTICK_POINTER_TEXT)
+    data.setdefault("skill", STALL_UNSTICK_SKILL_NAME)
+    data["_event_id"] = int(row["id"])
+    if run_id is None and "run_id" in row.keys():
+        data["_run_id"] = row["run_id"]
+    return data
+
+
+def mark_stall_unstick_delivered(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    run_id: Optional[int],
+    pointer_event_id: Optional[int] = None,
+    via: str = "inject",
+) -> None:
+    """Record that the worker received the stall unstick pointer."""
+    _kb._append_event(
+        conn,
+        task_id,
+        STALL_UNSTICK_DELIVERED_EVENT,
+        {
+            "skill": STALL_UNSTICK_SKILL_NAME,
+            "pointer_event_id": pointer_event_id,
+            "via": via,
+        },
+        run_id=run_id,
+    )
+
+
 def detect_pre_heartbeat_stalls(
     conn: sqlite3.Connection,
     *,
@@ -640,7 +805,11 @@ def detect_pre_heartbeat_stalls(
     - Age is from the active run's ``started_at`` (else the task's).
     - A worker log that already shows ``agent_init`` is past this hang class;
       leave it to heartbeat / 4h stale / max_runtime paths.
-    - Warn once per run at ``warn_seconds`` (``stall_warned`` event).
+    - Warn once per run at ``warn_seconds`` (``stall_warned`` event). On that
+      same advisory tick, queue a ``stall_unstick_pointer`` (or
+      ``stall_unstick_skill_missing``) so the worker's next turn loads
+      ``critical-thinking-unstick``. Never auto-complete, auto-block, or kill
+      on the warn tick — reclaim stays at ``kill_seconds``.
     - At ``kill_seconds``: terminate the worker tree, reclaim to retry status,
       emit a loud ``stalled`` event naming the last log line, and book a
       failure so the breaker can trip on a repeated hang.
@@ -712,6 +881,15 @@ def detect_pre_heartbeat_stalls(
                         "reason": "no_heartbeat",
                     },
                     run_id=run_id,
+                )
+                # Advisory only: pointer for the worker's next turn + named card
+                # event. Never complete/block/kill here.
+                _emit_stall_unstick_pointer(
+                    conn, tid,
+                    run_id=run_id,
+                    assignee=row["assignee"],
+                    age_seconds=int(age),
+                    warn_after_seconds=warn_s,
                 )
             continue
 

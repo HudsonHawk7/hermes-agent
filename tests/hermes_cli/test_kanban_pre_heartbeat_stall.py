@@ -247,3 +247,148 @@ def test_detect_pre_heartbeat_stall_noop_before_warn(conn, monkeypatch):
     ) == []
     assert get_task(conn, tid).status == "running"
     assert not any(e.kind.startswith("stall") for e in list_events(conn, tid))
+
+
+def test_stall_warn_queues_critical_thinking_unstick_pointer(conn, monkeypatch, tmp_path):
+    """Warn tick queues a named stall_unstick_pointer and leaves the task running.
+
+    Drives the real detect_pre_heartbeat_stalls path (no probe script). Skill
+    file is present under a fake profile path so the pointer event fires.
+    """
+    from hermes_cli.kanban_db_dispatch import (
+        STALL_UNSTICK_POINTER_EVENT,
+        STALL_UNSTICK_POINTER_TEXT,
+        STALL_UNSTICK_SKILL_NAME,
+        pending_stall_unstick_pointer,
+    )
+
+    skill = tmp_path / "skills" / "thinking" / "critical-thinking-unstick" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# critical-thinking-unstick\n", encoding="utf-8")
+
+    tid, _ = _seed_running(conn, started_ago=6 * 60, heartbeat_ago=None)
+    monkeypatch.setattr(kb, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(
+        "hermes_cli.kanban_db_dispatch.stall_unstick_skill_path",
+        lambda assignee: skill,
+    )
+
+    stalled = detect_pre_heartbeat_stalls(
+        conn, warn_seconds=5 * 60, kill_seconds=15 * 60, signal_fn=_NoopKill(),
+    )
+    assert stalled == []
+    task = get_task(conn, tid)
+    assert task is not None
+    assert task.status == "running", "warn must stay advisory — no block/complete/kill"
+
+    kinds = [e.kind for e in list_events(conn, tid)]
+    assert "stall_warned" in kinds
+    assert STALL_UNSTICK_POINTER_EVENT in kinds
+    assert "stalled" not in kinds
+    assert "done" not in kinds
+    assert "blocked" not in kinds
+
+    pointer_events = [e for e in list_events(conn, tid) if e.kind == STALL_UNSTICK_POINTER_EVENT]
+    assert len(pointer_events) == 1
+    payload = pointer_events[0].payload or {}
+    assert payload.get("skill") == STALL_UNSTICK_SKILL_NAME
+    assert payload.get("message") == STALL_UNSTICK_POINTER_TEXT
+    assert "critical-thinking-unstick" in (payload.get("message") or "")
+
+    pending = pending_stall_unstick_pointer(conn, tid)
+    assert pending is not None
+    assert pending.get("skill") == STALL_UNSTICK_SKILL_NAME
+
+    ctx = kb.build_worker_context(conn, tid)
+    assert "## Stall unstick pointer" in ctx
+    assert STALL_UNSTICK_SKILL_NAME in ctx
+    assert STALL_UNSTICK_POINTER_TEXT in ctx
+
+
+def test_stall_warn_missing_skill_logs_named_event_and_continues(conn, monkeypatch, tmp_path, caplog):
+    """Missing skill file → stall_unstick_skill_missing event; tick still completes."""
+    import logging
+
+    from hermes_cli.kanban_db_dispatch import (
+        STALL_UNSTICK_MISSING_EVENT,
+        STALL_UNSTICK_POINTER_EVENT,
+        STALL_UNSTICK_SKILL_NAME,
+    )
+
+    missing = tmp_path / "no-such-profile" / "skills" / "thinking" / "critical-thinking-unstick" / "SKILL.md"
+    tid, _ = _seed_running(conn, started_ago=6 * 60, heartbeat_ago=None)
+    monkeypatch.setattr(kb, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(
+        "hermes_cli.kanban_db_dispatch.stall_unstick_skill_path",
+        lambda assignee: missing,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        stalled = detect_pre_heartbeat_stalls(
+            conn, warn_seconds=5 * 60, kill_seconds=15 * 60, signal_fn=_NoopKill(),
+        )
+
+    assert stalled == []
+    assert get_task(conn, tid).status == "running"
+    kinds = [e.kind for e in list_events(conn, tid)]
+    assert "stall_warned" in kinds
+    assert STALL_UNSTICK_MISSING_EVENT in kinds
+    assert STALL_UNSTICK_POINTER_EVENT not in kinds
+
+    missing_events = [e for e in list_events(conn, tid) if e.kind == STALL_UNSTICK_MISSING_EVENT]
+    assert len(missing_events) == 1
+    assert missing_events[0].payload.get("skill") == STALL_UNSTICK_SKILL_NAME
+    assert missing_events[0].payload.get("reason") == "skill_file_missing"
+
+    assert any(
+        "stall unstick" in r.message.lower() and "missing" in r.message.lower()
+        for r in caplog.records
+    )
+
+    # No pointer section when skill was missing.
+    ctx = kb.build_worker_context(conn, tid)
+    assert "## Stall unstick pointer" not in ctx
+
+
+def test_stall_warn_recover_still_running_after_pointer(conn, monkeypatch, tmp_path):
+    """After the pointer, a recovering task is not blocked or completed by the stall rule."""
+    from hermes_cli.kanban_db_dispatch import STALL_UNSTICK_POINTER_EVENT
+
+    skill = tmp_path / "SKILL.md"
+    skill.write_text("# unstick\n", encoding="utf-8")
+    tid, _ = _seed_running(conn, started_ago=6 * 60, heartbeat_ago=None)
+    monkeypatch.setattr(kb, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(
+        "hermes_cli.kanban_db_dispatch.stall_unstick_skill_path",
+        lambda assignee: skill,
+    )
+
+    detect_pre_heartbeat_stalls(
+        conn, warn_seconds=5 * 60, kill_seconds=15 * 60, signal_fn=_NoopKill(),
+    )
+    assert any(e.kind == STALL_UNSTICK_POINTER_EVENT for e in list_events(conn, tid))
+    assert get_task(conn, tid).status == "running"
+
+    # Simulate recovery: first heartbeat lands. Further stall ticks must leave it alone.
+    now = int(time.time())
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET last_heartbeat_at = ? WHERE id = ?",
+            (now, tid),
+        )
+        conn.execute(
+            "UPDATE task_runs SET last_heartbeat_at = ? WHERE id = "
+            "(SELECT current_run_id FROM tasks WHERE id = ?)",
+            (now, tid),
+        )
+
+    stalled = detect_pre_heartbeat_stalls(
+        conn, warn_seconds=5 * 60, kill_seconds=15 * 60, signal_fn=_NoopKill(),
+    )
+    assert stalled == []
+    task = get_task(conn, tid)
+    assert task.status == "running"
+    assert task.last_heartbeat_at is not None
+    # Still exactly one pointer; warn path did not re-fire or escalate.
+    assert sum(1 for e in list_events(conn, tid) if e.kind == STALL_UNSTICK_POINTER_EVENT) == 1
+    assert not any(e.kind == "stalled" for e in list_events(conn, tid))
