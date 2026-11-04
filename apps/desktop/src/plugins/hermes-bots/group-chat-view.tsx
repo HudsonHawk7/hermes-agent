@@ -1647,10 +1647,7 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
                 data-testid="group-vision-miss"
                 title={entry.vision.reason || undefined}
               >
-                {b.group.missedImage(
-                  entry.from.name || 'Member',
-                  entry.vision.reason || b.group.missedImageFallback
-                )}
+                {b.group.missedImage(entry.from.name || 'Member', entry.vision.reason || b.group.missedImageFallback)}
               </div>
             )
           ) : null}
@@ -1767,7 +1764,11 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
             <DialogHeader>
               <DialogTitle>{previewImage.alt}</DialogTitle>
             </DialogHeader>
-            <img alt={previewImage.alt} className="mx-auto max-h-[80vh] max-w-full object-contain" src={previewImage.src} />
+            <img
+              alt={previewImage.alt}
+              className="mx-auto max-h-[80vh] max-w-full object-contain"
+              src={previewImage.src}
+            />
           </DialogContent>
         </Dialog>
       ) : null}
