@@ -122,6 +122,14 @@ def _show_compression_section(config: dict[str, Any]) -> None:
             print(f"  Token cap:    {int(tt):,} tokens (takes lower of ratio vs absolute)")
     except (TypeError, ValueError):
         pass
+    smt = compression.get('summary_max_tokens')
+    try:
+        if smt is not None and int(smt) > 0:
+            print(f"  Summary max:  {int(smt):,} tokens (wire cap on summary call only)")
+        else:
+            print("  Summary max:  uncapped (set compression.summary_max_tokens to cap)")
+    except (TypeError, ValueError):
+        print("  Summary max:  uncapped (set compression.summary_max_tokens to cap)")
     print(f"  Target ratio: {compression.get('target_ratio', 0.20) * 100:.0f}% of threshold preserved")
     print(f"  Protect last: {compression.get('protect_last_n', 20)} messages")
     print(f"  Protect first: {compression.get('protect_first_n', 3)} non-system head messages")

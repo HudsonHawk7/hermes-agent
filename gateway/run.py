@@ -5108,6 +5108,12 @@ def _guard_corrupt_user_config() -> None:
 
 def main():
     """CLI entry point for the gateway."""
+    # FIRST, before any config-dependent startup: a gateway started from inside an agent/Kanban
+    # session inherits that session's HERMES_DELEGATED_CHILD_CONTEXT + board pins, and
+    # kanban_path_is_fenced() would then deny every dispatcher tick. The gateway owns its boards.
+    from hermes_cli.gateway_worker_env import strip_worker_markers
+
+    strip_worker_markers()
     # Before any config-dependent startup (watchdog, DB opens, provider resolution).
     _guard_corrupt_user_config()
 

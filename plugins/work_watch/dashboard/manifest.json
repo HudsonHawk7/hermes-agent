@@ -1,0 +1,9 @@
+{
+  "name": "work_watch",
+  "label": "Work watch",
+  "description": "Read-only work mail + Teams watcher (delegated Graph, local judge).",
+  "icon": "Mail",
+  "version": "0.1.0",
+  "tab": { "path": "/work-watch", "position": "after:kanban", "hidden": true },
+  "api": "plugin_api.py"
+}

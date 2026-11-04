@@ -376,13 +376,13 @@ export async function ensureGroupChatSession(
           }
         }
       } catch (error: any) {
-        if (error?.code !== 4007) {
+        if (!isGenuineMissingSessionError(error)) {
           const detail = error instanceof Error && error.message ? ` (${error.message})` : ''
           throw new Error(
             `Could not check ${member?.name || 'member'}'s group session${detail} — not starting a new one`
           )
         }
-        /* genuinely doesn't exist (4007) — try the next target / fall through to create */
+        /* genuinely doesn't exist (4007 / not_found) — try next target / create */
       }
     }
 
@@ -518,9 +518,49 @@ function waitForTurnSignal(runtimeIds: string[], ms: number): Promise<boolean> {
 /** A gateway rejection as it reaches the room engine: an `Error`, a raw
  *  JSON-RPC error object, or (across a realm boundary) a bare string. */
 interface GatewayErrorLike {
+  cause?: unknown
   code?: number
   data?: { reason?: unknown }
   message?: unknown
+}
+
+/** True when the gateway says this target never existed, so group session bind
+ *  may try the next target / fall through to session.create.
+ *
+ *  TUI path uses JSON-RPC 4007 ("session not found"). The live gateway authority
+ *  maps RuntimeStoreError('not_found') to code 4001 with message/reason
+ *  `not_found` (session_controls._refusal_data). IPC may also strip the code and
+ *  leave only the bare message. All three mean "no such session" for bind. */
+export function isGenuineMissingSessionError(error: GatewayErrorLike | null | undefined): boolean {
+  if (!error) {
+    return false
+  }
+
+  if (error.code === 4007) {
+    return true
+  }
+
+  const reason =
+    error.data && typeof error.data === 'object' ? (error.data as { reason?: unknown }).reason : undefined
+
+  const message = typeof error.message === 'string'
+    ? error.message.trim()
+    : typeof error === 'string'
+      ? error.trim()
+      : ''
+
+  // Live gateway: 4001 + reason/message not_found is the store miss (not a
+  // transport failure). Other 4001 reasons (invalid_params, session_busy, …)
+  // must stay fail-closed.
+  if (reason === 'not_found' || message === 'not_found') {
+    return true
+  }
+
+  if (error.cause && error.cause !== error && typeof error.cause === 'object') {
+    return isGenuineMissingSessionError(error.cause as GatewayErrorLike)
+  }
+
+  return false
 }
 
 /** 4001-class "the runtime session was reaped" failure. Distinct from 4007

@@ -45,6 +45,7 @@ import { AvatarPicker } from './avatar-picker'
 import { $selectedBot } from './bot-state'
 import { createCanonicalChat } from './canonical-chat'
 import {
+  e2eLegacyGroupsPinned,
   groupCreationSource,
   groupExecutionMode,
   seatableGroupBots,
@@ -1252,6 +1253,13 @@ async function revalidateGroupCreationMode(
   unavailableMessage: string
 ) {
   const sourceCurrent = groupCreationSource(route, capability?.activationEpoch ?? -1)
+
+  // E2E pin: keep the legacy create path without a second capabilities round-trip
+  // that would flip mode back to canonical on modern gateways. Also skip the
+  // live-gateway source fence so a mid-create reconnect cannot block Create Group.
+  if (e2eLegacyGroupsPinned()) {
+    return { mode: 'legacy' as const, sourceCurrent: () => true }
+  }
 
   if (!capability || capability.source !== source || !sourceCurrent()) {
     throw new Error(unavailableMessage)

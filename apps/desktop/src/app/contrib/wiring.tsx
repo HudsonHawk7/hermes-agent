@@ -96,6 +96,10 @@ import {
 import { reportPendingUpdateRun } from '@/store/shared-metrics'
 import { $archivedSessions } from '@/store/sidebar-archive'
 import { $titlebarAppActionsSide, titlebarAppActionsClusterCounts } from '@/store/titlebar-app-actions'
+import {
+  startVoiceHubPolling,
+  stopVoiceHubPolling
+} from '@/store/voice-hub'
 import { armWakeWord, stopClientCapture } from '@/store/wake-word'
 import { isAuxiliaryWindow, isBrowserWindow, isHudWindow, isMainWindow } from '@/store/windows'
 import { useSkinCommand } from '@/themes/use-skin-command'
@@ -872,6 +876,13 @@ export function ContribWiring({ children }: { children: ReactNode }) {
       // Status-then-arm, syncing $wakeWord so the composer toggle reflects the
       // same listener this auto-arm claims.
       void armWakeWord(requestGateway)
+      // VH8: poll voice_hub.state so the listening light tracks arm/stop within 1 s.
+      startVoiceHubPolling(requestGateway)
+    } else {
+      stopVoiceHubPolling()
+    }
+    return () => {
+      stopVoiceHubPolling()
     }
   }, [gatewayState, requestGateway])
 

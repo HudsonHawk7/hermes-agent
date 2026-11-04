@@ -10,6 +10,21 @@ afterEach(() => {
   vi.resetModules()
 })
 
+test('isElectronCmdline matches electron binaries and helpers', async () => {
+  const { isElectronCmdline } = await import('./process-census')
+
+  expect(isElectronCmdline(String.raw`C:\foo\electron.exe --no-sandbox`)).toBe(true)
+  expect(isElectronCmdline('/usr/lib/electron/dist/electron --no-sandbox')).toBe(true)
+  expect(isElectronCmdline('Hermes.exe --disable-gpu')).toBe(false)
+  expect(isElectronCmdline('node gateway run --quiet')).toBe(false)
+})
+
+test('orphanSandboxProcesses requires a sandbox root marker (never bare gateway)', async () => {
+  const { orphanSandboxProcesses } = await import('./process-census')
+  // Empty roots → nothing matches, even if the machine has a live gateway.
+  expect(orphanSandboxProcesses([])).toEqual([])
+})
+
 // The terminal tool runs commands through a POSIX shell (bash; Git Bash on Windows).
 test.skipIf(process.platform === 'win32')('shellQuote keeps a path with spaces and quotes one argument', async () => {
   const { shellQuote } = await import('./process-census')
@@ -40,11 +55,13 @@ test.skipIf(process.platform === 'win32').each(['procfs', 'ps'])(
     const { sandboxProcessesOf, processesTagged } = await import('./process-census')
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'core census home '))
     const tag = `core-census-${process.pid}-${mode}`
+
     // A stand-in gateway whose child is tagged; the child's environment carries the home too.
     const gateway = spawn('bash', ['-c', '(exec -a "$CORE_TAG" sleep 60) & wait'], {
       env: { ...process.env, HERMES_HOME: home, CORE_TAG: tag },
       stdio: 'ignore'
     })
+
     fs.writeFileSync(path.join(home, 'gateway.lock'), JSON.stringify({ pid: gateway.pid }))
 
     try {

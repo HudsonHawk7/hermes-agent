@@ -432,6 +432,9 @@ export const FIELD_LABELS: Record<string, string> = defineFieldCopy({
     repoScanRoots: 'Repository Discovery Roots',
     repoScanExcludePaths: 'Excluded Repository Paths'
   },
+  kanban: {
+    workerTempRoot: 'Worker temp root'
+  },
   agent: {
     maxTurns: 'Max Agent Steps',
     imageInputMode: 'Image Attachments',
@@ -618,6 +621,10 @@ export const FIELD_DESCRIPTIONS: Record<string, string> = defineFieldCopy({
     repoScanRoots: 'Folders to scan. Leave empty to scan your home directory.',
     repoScanExcludePaths: 'Folders and their descendants to skip during repository discovery.'
   },
+  kanban: {
+    workerTempRoot:
+      'Folder every kanban worker uses for TEMP/TMP/TMPDIR. Leave unset to keep the inherited path — Hermes will not invent a drive letter for you. Example: S:\\ForceAgents\\_tmp.'
+  },
   timezone: 'IANA timezone identifier. Blank uses the system timezone.',
   browser: {
     useRealProfile:
@@ -741,6 +748,9 @@ export const SECTIONS: DesktopConfigSection[] = [
     icon: Monitor,
     keys: [
       'terminal.cwd',
+      'kanban.worker_temp_root',
+      'kanban.worker_temp_max_age_hours',
+      'kanban.worker_temp_janitor_minutes',
       'desktop.repo_scan_enabled',
       'desktop.repo_scan_roots',
       'desktop.repo_scan_exclude_paths',

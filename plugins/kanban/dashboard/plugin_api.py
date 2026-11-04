@@ -809,6 +809,65 @@ def add_comment(task_id: str, payload: CommentBody, board: Optional[str] = Query
         return {"ok": True}
 
 
+# --- GM asks (one-tap approvals) --------------------------------------------
+
+class AnswerBody(BaseModel):
+    """POST /tasks/{id}/answer — pick a key or send the card back."""
+
+    key: Optional[str] = None
+    sent_back: bool = False
+    note: Optional[str] = None
+    by: Optional[str] = "gm"
+
+
+@router.get("/needs-you")
+def needs_you():
+    """Open asks across ALL boards (structured + legacy needs_input)."""
+    from hermes_cli import kanban_db_gm_asks as gm
+
+    def _image_url(slug: str, task_id: str, image: str) -> Optional[str]:
+        try:
+            with closing(_conn(board=slug)) as conn:
+                return gm.resolve_attachment_image_url(slug, task_id, image, conn=conn)
+        except Exception:
+            return None
+
+    with _errors_to_500("needs-you"):
+        items = gm.list_needs_you(attachment_url=_image_url)
+    return {"items": items, "count": len(items)}
+
+
+@router.post("/tasks/{task_id}/answer")
+def answer_task(task_id: str, payload: AnswerBody, board: Optional[str] = Query(None)):
+    """One-tap answer or send-back for a structured GM ask."""
+    from hermes_cli import kanban_db_gm_asks as gm
+
+    with _board_conn(board) as (board, conn):
+        _require_task(conn, task_id)
+        with _map_errors(400, gm.GmAskError, ValueError):
+            result = gm.answer_gm_ask(
+                conn, task_id,
+                key=None if payload.sent_back else payload.key,
+                sent_back=bool(payload.sent_back),
+                note=payload.note,
+                by=(payload.by or "gm"),
+                via="button",
+            )
+        return {"ok": True, **result}
+
+
+@router.post("/tasks/{task_id}/undo")
+def undo_answer(task_id: str, board: Optional[str] = Query(None), by: Optional[str] = Query("gm")):
+    """Re-open the last GM decision if no run has started since."""
+    from hermes_cli import kanban_db_gm_asks as gm
+
+    with _board_conn(board) as (board, conn):
+        _require_task(conn, task_id)
+        with _map_errors(400, gm.GmAskError, ValueError):
+            result = gm.undo_gm_decision(conn, task_id, by=by or "gm")
+        return {"ok": True, **result}
+
+
 class LinkBody(BaseModel):
     parent_id: str
     child_id: str

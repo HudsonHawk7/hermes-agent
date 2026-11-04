@@ -3032,6 +3032,7 @@ export interface WakeStartResult {
 export interface WakeStopParams {
   persist?: boolean | null
   profile?: string | null
+  reason?: string | null
 }
 export interface WakeStopResult {
   reason?: string | null
@@ -5035,6 +5036,7 @@ export interface CanonicalCreateParams {
   editor?: Record<string, unknown> | null
   title?: string | null
   hidden?: boolean
+  room_plumbing?: boolean
   follow_profile_config?: boolean | null
   service_tier?: string | null
   cwd_explicit?: boolean | null
@@ -5540,6 +5542,14 @@ export interface PreviewActRequestParams {
   amount?: number | null
   max?: number | null
   allow_shortcut?: boolean | null
+  file?: PreviewUploadFile | null
+}
+/** One checked local file for ``action='upload'`` (``tools/preview_upload.py``): the renderer builds a ``File`` from ``data`` (base64) and never sees a path. */
+export interface PreviewUploadFile {
+  name: string
+  mime: string
+  size: number
+  data: string
 }
 /** ``tools/tour_tool.py`` field set. */
 export interface TourRequestParams {

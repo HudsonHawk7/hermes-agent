@@ -19,6 +19,7 @@ import {
 
 import {
   buildAppEnv,
+  closeDesktopApp,
   createSandbox,
   launchDesktop,
   type MockBackendFixture,
@@ -41,7 +42,7 @@ async function setupSeededMockBackend(): Promise<MockBackendFixture> {
     '\ncompression:\n  threshold_tokens: 1\n',
     'utf8',
   )
-  writeEnvFile(sandbox.hermesHome)
+  writeEnvFile(sandbox.hermesHome, 'e2e-mock-key', mock.url)
   const builder = await RealSessionBuilder.start(sandbox.hermesHome)
 
   try {
@@ -72,6 +73,7 @@ async function setupSeededMockBackend(): Promise<MockBackendFixture> {
   }
 }
 
+// eslint-disable-next-line no-empty-pattern -- Playwright requires fixture-object destructuring
 test('resume hides real context-compaction handoffs', async ({}, testInfo) => {
   const fixture = await setupSeededMockBackend()
 
@@ -97,7 +99,10 @@ test('resume hides real context-compaction handoffs', async ({}, testInfo) => {
   }
 })
 
+// eslint-disable-next-line no-empty-pattern -- Playwright requires fixture-object destructuring
 test('live verify-on-stop continuations stay out of the transcript', async ({}, testInfo) => {
+  // Boot + scripted verify-on-stop tool round needs more than the suite's 90s default.
+  test.setTimeout(240_000)
   const sandbox = createSandbox('live-verification-nudge')
   const projectRoot = path.join(sandbox.root, 'project')
   const changedFile = path.join(projectRoot, 'e2e-verification-target.py')
@@ -109,20 +114,19 @@ test('live verify-on-stop continuations stay out of the transcript', async ({}, 
   )
 
   const mock = await startMockServer({ verificationWritePath: changedFile })
-  writeMockProviderConfig(sandbox.hermesHome, mock.url)
-  fs.appendFileSync(path.join(sandbox.hermesHome, 'config.yaml'), '\nagent:\n  verify_on_stop: true\n', 'utf8')
+  // Merge via writeMockProviderConfig (not appendFileSync) so agent/auxiliary
+  // never duplicate-key the YAML into an unloadable config → onboarding.
   // Auto session titling (feat f726090d48) fires an auxiliary title_generation
   // LLM call whose user snippet CONTAINS the trigger keyword, so the mock's
   // isVerificationStopTrigger matches it and the title call steals a scripted
-  // verify-on-stop turn (the transcript then ends on 'The code edit is
-  // complete.' instead of the exhausted-verifier final). Disable the
-  // model-backed title upgrade so script indices track real chat turns.
-  fs.appendFileSync(
-    path.join(sandbox.hermesHome, 'config.yaml'),
-    '\nauxiliary:\n  title_generation:\n    enabled: false\n',
-    'utf8',
+  // verify-on-stop turn. Keep the model-backed title upgrade off.
+  writeMockProviderConfig(
+    sandbox.hermesHome,
+    mock.url,
+    undefined,
+    'agent:\n  verify_on_stop: true\nauxiliary:\n  title_generation:\n    enabled: false\n',
   )
-  writeEnvFile(sandbox.hermesHome)
+  writeEnvFile(sandbox.hermesHome, 'e2e-mock-key', mock.url)
   const { app, page } = await launchDesktop(buildAppEnv(sandbox))
 
   const fixture: MockBackendFixture = {
@@ -132,7 +136,7 @@ test('live verify-on-stop continuations stay out of the transcript', async ({}, 
     mockUrl: mock.url,
     sandbox,
     cleanup: async () => {
-      await app.close().catch(() => undefined)
+      await closeDesktopApp(app, { hermesHome: sandbox.hermesHome, userDataDir: sandbox.userDataDir })
       await mock.close()
       sandbox.cleanup()
     },

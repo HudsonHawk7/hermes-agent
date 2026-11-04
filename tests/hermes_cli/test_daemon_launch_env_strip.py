@@ -16,6 +16,9 @@ LEAKS = {'HERMES_ACCEPT_HOOKS': '1', 'HERMES_KANBAN_TASK': 't_1', 'HERMES_KANBAN
          'HERMES_INTERACTIVE': '1', 'HERMES_GATEWAY_SESSION': '1', 'HERMES_SINGLE_QUERY_SESSION': '1',
          'HERMES_SESSION_ID': 'launching-turn', 'HERMES_SESSION_KEY': 'agent:main:tui:x',
          'HERMES_SESSION_PLATFORM': 'tui', 'HERMES_SESSION_CHAT_ID': 'c1', 'HERMES_CRON_SESSION': '1',
+         # A client process running inside a delegate_task child: inherited, the daemon's dispatcher
+         # would be fenced off every board it owns and every tick would die with PermissionError.
+         'HERMES_DELEGATED_CHILD_CONTEXT': '/x/.hermes',
          # A terminal running under a systemd service: not the daemon's own supervisor.
          'INVOCATION_ID': 'terminal-scope', 'JOURNAL_STREAM': '8:1'}
 
