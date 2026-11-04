@@ -507,12 +507,24 @@ export function buildAppEnv(sandbox: Sandbox, extra: Record<string, string> = {}
     ? path.join(REPO_ROOT, '.venv', 'Scripts')
     : path.join(REPO_ROOT, '.venv', 'bin')
 
-  const pathKey = process.platform === 'win32' && clean.Path && !clean.PATH ? 'Path' : 'PATH'
-  const priorPath = clean[pathKey] ?? clean.PATH ?? clean.Path ?? ''
-
+  // Windows spawn() reads `Path`; Node also copies `PATH`. If only one is
+  // updated, Electron still finds the live install's hermes first. A worktree
+  // `venv` symlink into the live install then becomes the backend interpreter.
+  const priorPath = clean.PATH ?? clean.Path ?? ''
   const nextPath = priorPath
     ? `${venvBin}${path.delimiter}${priorPath}`
     : venvBin
+  clean.PATH = nextPath
+  if (process.platform === 'win32') {
+    clean.Path = nextPath
+  }
+
+  const worktreePython = process.platform === 'win32'
+    ? path.join(REPO_ROOT, '.venv', 'Scripts', 'python.exe')
+    : path.join(REPO_ROOT, '.venv', 'bin', 'python')
+  if (!clean.HERMES_DESKTOP_PYTHON && fs.existsSync(worktreePython)) {
+    clean.HERMES_DESKTOP_PYTHON = worktreePython
+  }
 
   // Windows/Electron resolve userData via APPDATA + name. Point them at the
   // sandbox so a faked HOME never leaves Electron unable to resolve paths
@@ -524,7 +536,6 @@ export function buildAppEnv(sandbox: Sandbox, extra: Record<string, string> = {}
 
   return {
     ...clean,
-    [pathKey]: nextPath,
     HERMES_HOME: sandbox.hermesHome,
     HERMES_DESKTOP_USER_DATA_DIR: sandbox.userDataDir,
     HERMES_DESKTOP_IGNORE_EXISTING: '1',

@@ -10,12 +10,24 @@ import { hiddenWindowsChildOptions, windowsShellCommand } from './windows-child-
 // and verdict output, so a slow-but-valid cold start is never reported as "produced no result".
 const GATEWAY_ENSURE_PROTOCOL_DEADLINE_MS = 60_000
 const GATEWAY_ENSURE_CLIENT_GRACE_MS = 15_000
+// Isolated e2e sandboxes spawn python from Electron with CREATE_NO_WINDOW; cold interpreter
+// start has been measured at ~117s before hermes_cli logs, so 75s kills a still-valid client.
+const GATEWAY_ENSURE_ISOLATED_TIMEOUT_MS = 210_000
+
+function defaultEnsureTimeoutMs(env: NodeJS.ProcessEnv): number {
+  if (env.HERMES_DESKTOP_ISOLATED_BACKEND === '1' || process.env.HERMES_DESKTOP_ISOLATED_BACKEND === '1') {
+    return GATEWAY_ENSURE_ISOLATED_TIMEOUT_MS
+  }
+
+  return GATEWAY_ENSURE_PROTOCOL_DEADLINE_MS + GATEWAY_ENSURE_CLIENT_GRACE_MS
+}
 
 /** Run one bounded `hermes ... gateway <verb>` client (`ensure` by default; `restart` for a stale owner). */
 export function runGatewayEnsure(
   backend, cwd: string, home: string, parentEnv: NodeJS.ProcessEnv = process.env,
-  { timeoutMs = GATEWAY_ENSURE_PROTOCOL_DEADLINE_MS + GATEWAY_ENSURE_CLIENT_GRACE_MS, label = 'hermes gateway ensure' }: { timeoutMs?: number; label?: string } = {}
+  { timeoutMs, label = 'hermes gateway ensure' }: { timeoutMs?: number; label?: string } = {}
 ): Promise<{ code: number; stdout: string; stderr: string }> {
+  timeoutMs = timeoutMs ?? defaultEnsureTimeoutMs(parentEnv)
   return new Promise((resolve, reject) => {
     // shell: true hands cmd.exe one command line it cuts at the first unquoted space,
     // so an install under `C:\Users\John Doe\...` must arrive quoted (#74064).

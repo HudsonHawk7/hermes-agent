@@ -286,6 +286,14 @@ export type BotsMessages = {
     replyCount: (replies: number) => string
     dropToThread: string
     dropToRoom: string
+    /** Click-to-enlarge affordance for a user image thumbnail in the log. */
+    enlargeImage: string
+    /** Chip under a member reply when native vision attached the image(s). */
+    sawImages: (count: number) => string
+    /** Red inline error when a member did not get native vision. */
+    missedImage: (name: string, reason: string) => string
+    /** Fallback reason when the gateway left reason empty. */
+    missedImageFallback: string
     waitingForAnswer: string
     memberThinking: (name: string) => string
     roomWorking: string
