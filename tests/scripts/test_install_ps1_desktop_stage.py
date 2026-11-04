@@ -16,7 +16,9 @@ functions (New-Object intercepting WScript.Shell, icacls, ie4uinit.exe)
 and then DOT-SOURCES the real install.ps1 with -Stage desktop — the full
 stage runs in one real PowerShell process against a temp home/install
 dir, with every external effect either fake (compiled external bootstrap python)
-or logged instead of written. Nothing touches the user's known folders.
+or logged instead of written. Nothing touches the user's known folders
+or the real HKCU user PATH (Set-LauncherUserPath is stubbed after the
+dotsource; an autouse snapshot fails the test if HKCU Path still changes).
 If the artifact check fails, the assertion message carries the fake
 python's actual logged arguments for debugging.
 """
@@ -32,6 +34,7 @@ from pathlib import Path
 import pytest
 
 from tests.installation_launcher_fixture import publish_fixture_launcher
+from tests.user_path_guard import read_user_path
 
 pytestmark = pytest.mark.platforms("windows")
 
@@ -130,6 +133,11 @@ function ie4uinit.exe {
 # Load the definitions, then execute the real stage dispatcher.
 . $InstallerPath -InstallDir $InstallDir -HermesHome $HermesHome
 function Get-BootstrapPython { return $env:FAKE_BOOT_PY }
+# After dotsource so this replaces install.ps1's writer. The real
+# Set-LauncherUserPath prepends $HermesHome\bin to HKCU Path.
+function Set-LauncherUserPath([string]$binDir) {
+    Add-Content -Path $env:PATH_LOG -Value $binDir
+}
 Invoke-StageByName 'desktop'
 exit $LASTEXITCODE
 '''
@@ -236,6 +244,7 @@ def test_desktop_stage_uses_pm_sync_and_product_cli(tmp_path: Path) -> None:
     py_log = tmp_path / "fake-python.log"
     wsh_log = tmp_path / "wsh.log"
     icacls_log = tmp_path / "icacls.log"
+    path_log = tmp_path / "path.log"
     fake_python = scripts / "python.exe"
     _compile_fake_python(powershell, fake_python)
 
@@ -255,7 +264,9 @@ def test_desktop_stage_uses_pm_sync_and_product_cli(tmp_path: Path) -> None:
         "FAKE_INSTALL_DIR": str(install_dir),
         "WSH_LOG": str(wsh_log),
         "ICACLS_LOG": str(icacls_log),
+        "PATH_LOG": str(path_log),
     }
+    path_before = read_user_path()
     run = subprocess.run(
         [powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
          "-File", str(wrapper),
@@ -297,3 +308,9 @@ def test_desktop_stage_uses_pm_sync_and_product_cli(tmp_path: Path) -> None:
         assert line.startswith("SAVED:"), shortcuts
         target = line.split("|")[0][len("SAVED:"):]
         assert target == str(exe), shortcuts
+    # 7. Stage-Desktop still calls Set-LauncherUserPath; the stub logs the
+    #    bin dir and HKCU Path must be unchanged.
+    assert path_log.read_text().splitlines() == [
+        str(tmp_path / "hermes-home" / "bin")
+    ]
+    assert read_user_path() == path_before
