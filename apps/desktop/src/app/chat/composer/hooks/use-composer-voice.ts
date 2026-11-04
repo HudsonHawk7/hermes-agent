@@ -261,6 +261,7 @@ export function useComposerVoice({
   // requests addressed to THIS composer. The owner is the only writer: a
   // plugin can read the state and ask for a toggle, never assert one.
   const sessionStates = useStore($sessionStates)
+
   const voiceDoorSessionKey = sessionId
     ? sessionStates[sessionId]?.storedSessionId ?? sessionId
     : freshDraftScope()
