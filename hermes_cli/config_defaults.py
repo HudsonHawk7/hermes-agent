@@ -1898,6 +1898,10 @@ DEFAULT_CONFIG = {
         # silences a signature for good. 0 = re-alert on every failing run. Keep in sync with
         # cron.scheduler.DEFAULT_FAILURE_REPEAT_ALERT_HOURS.
         "failure_repeat_alert_hours": 6,
+        # Minutes of quiet after a user message before this profile's agent jobs may fire.
+        # None = off (jobs never wait for chat). 0 = wait only while a chat turn or voice/call
+        # is live. >0 also waits N minutes after the last user message. No auto-default.
+        "pause_while_chatting_minutes": None,
     },
     # Kanban multi-agent coordination. The dispatcher ticks every N seconds, reclaims stale claims,
     # promotes dependency-satisfied todos to ready, and fires `hermes -p <assignee> chat -q ...` per
