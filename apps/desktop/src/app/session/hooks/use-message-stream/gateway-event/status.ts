@@ -20,6 +20,9 @@ import { clearActiveSessionTodos } from '@/store/todos'
 
 import type { GatewayEventContext } from './types'
 
+/** Two notes in the same millisecond must not share a message id. */
+let sessionNoteSeq = 0
+
 /** Lifecycle text that announces the session left its selected model for a fallback. */
 export function isFallbackSwitchStatus(kind: string | undefined, text: string): boolean {
   if (kind === 'fallback') {
@@ -205,6 +208,35 @@ export function handleStatusEvent(ctx: GatewayEventContext): boolean {
             id: `review-summary-${Date.now()}`,
             role: 'system',
             parts: [textPart(`review:${text}`, occurredAt)],
+            timestamp: occurredAt
+          }
+        ]
+      }))
+    }
+
+    return true
+  }
+
+  if (event.type === 'session.note') {
+    // `session.note` RPC (the plugin voice door `host.voice.note`, e.g. the
+    // "Call ended · 2:14" line). A plugin may only append ONE system line —
+    // never a user or assistant message — so this paints a plain transcript
+    // row and nothing else. Live-only by design: the gateway writes no message
+    // row, so resume does not replay it (a persisted variant would need the
+    // display_kind + hydration path, which is a separate change).
+    const text = coerceGatewayText(payload?.text).trim()
+    const source = coerceGatewayText((payload as { source?: unknown } | undefined)?.source).trim()
+
+    if (text && sessionId) {
+      flushQueuedDeltas(sessionId)
+      updateSessionState(sessionId, state => ({
+        ...state,
+        messages: [
+          ...state.messages,
+          {
+            id: `session-note-${Date.now()}-${sessionNoteSeq++}`,
+            role: 'system',
+            parts: [textPart(source ? `${source}: ${text}` : text, occurredAt)],
             timestamp: occurredAt
           }
         ]

@@ -370,6 +370,20 @@ class ReviewSummaryPayload(Payload):
 event("review.summary", ReviewSummaryPayload, doc="Background review of the last turn finished.")
 
 
+class SessionNotePayload(Payload):
+    """``methods_session`` ``session.note``: a plugin-authored line for this session's transcript.
+
+    Live-only — no message row is written, so the line paints once and never replays on resume. The
+    role is fixed server-side: a note is always a system line, never the user's or the agent's voice.
+    """
+
+    text: str
+    source: str | None = None
+
+
+event("session.note", SessionNotePayload, doc="A plugin added one system line to this session's transcript.")
+
+
 class AgentPrintPayload(Payload):
     """A session-authority local-viewer turn: one line the agent printed through ``_print_fn``
     (subagent completion, compaction, errors, budget notices), which main's classic CLI rendered
