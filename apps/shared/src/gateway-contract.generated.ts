@@ -5697,6 +5697,7 @@ export interface MessageCompletePayload {
   error_surface?: ErrorSurface | null
   partial?: boolean | null
   persisted_turn?: PersistedTurn | null
+  image_routing?: ImageRoutingReceipt | null
 }
 /** ``prompt_turn._result_status``. */
 export type TurnStatus = 'complete' | 'error' | 'interrupted'
@@ -5751,6 +5752,13 @@ export interface PersistedTurn {
   final_assistant_row_id?: number | null
   user_row_ids?: number[] | null
   submission_id?: string | null
+}
+/** ``prompt_turn._route_turn_images`` → ``message.complete.image_routing``. Real gateway decision for this turn's user-attached images — never client-assumed. */
+export interface ImageRoutingReceipt {
+  mode: 'native' | 'text'
+  count: number
+  reason?: string | null
+  attached?: number | null
 }
 /** ``server._status_update`` and the direct emitters (goal / loop / heartbeat / process). */
 export interface StatusUpdatePayload {

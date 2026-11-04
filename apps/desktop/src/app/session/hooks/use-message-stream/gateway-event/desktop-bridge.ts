@@ -1,5 +1,6 @@
 import { writeAgentTerminalChunk } from '@/app/right-sidebar/terminal/agent-terminal-stream'
 import { closeAgentTerminalByProc } from '@/app/right-sidebar/terminal/terminals'
+import { refreshBackgroundProcesses } from '@/store/composer-status'
 import { revealDesktopPane } from '@/store/pane-focus'
 import { reactionOverlayScope, recordAgentReaction } from '@/store/reactions-local'
 import { setMessages } from '@/store/session'
@@ -13,10 +14,16 @@ const DESKTOP_BRIDGE_HANDLERS: Record<string, (ctx: GatewayEventContext) => void
     writeAgentTerminalChunk(payload?.process_id ?? '', payload?.chunk ?? '')
   },
 
-  'terminal.close': ({ payload }) => {
+  'terminal.close': ({ payload, sessionId }) => {
     // Agent closed its own read-only tab via the desktop-gated close_terminal tool.
-    // The process is untouched — this only drops the view.
+    // process_registry.on_close also lands here when a background process exits —
+    // re-sync process.list so the sidebar bg dot clears even when this session's
+    // pane is hidden (status-stack poll only runs for the visible pane).
     closeAgentTerminalByProc(payload?.process_id ?? '')
+
+    if (sessionId) {
+      void refreshBackgroundProcesses(sessionId)
+    }
   },
 
   'tip.show': ({ payload, isActiveEvent }) => {

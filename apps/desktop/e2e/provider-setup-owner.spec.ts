@@ -40,11 +40,28 @@ interface RpcReceipt {
 function isolatedEnv(home: string, hermesHome: string): Record<string, string> {
   // Allowlist rather than inheriting real provider keys, profile selection,
   // browser account state, live desktop overrides, or the host session bus.
+  const appDataDir = path.join(home, 'appdata')
+  const localAppDataDir = path.join(home, 'localappdata')
+  const userDataDir = path.join(home, 'electron-user-data')
+  fs.mkdirSync(appDataDir, { recursive: true })
+  fs.mkdirSync(localAppDataDir, { recursive: true })
+  fs.mkdirSync(userDataDir, { recursive: true })
+
   const env: Record<string, string> = {
     PATH: process.env.PATH ?? '',
     HOME: home,
     USERPROFILE: home,
+    APPDATA: appDataDir,
+    LOCALAPPDATA: localAppDataDir,
     HERMES_HOME: hermesHome,
+    HERMES_DESKTOP_USER_DATA_DIR: userDataDir,
+    HERMES_DESKTOP_IGNORE_EXISTING: '1',
+    HERMES_DESKTOP_ISOLATED_BACKEND: '1',
+    HERMES_DESKTOP_HERMES_ROOT: REPO_ROOT,
+    HERMES_DESKTOP_SKIP_QUIT_CONFIRM: '1',
+    HERMES_DESKTOP_SKIP_PROTOCOL_REGISTRATION: '1',
+    HERMES_DESKTOP_E2E_HIDDEN: process.env.HERMES_DESKTOP_E2E_HIDDEN === '0' ? '0' : '1',
+    HERMES_DESKTOP_PYTHON: pythonBinary(),
     PYTHONPATH: REPO_ROOT,
     PYTHONNOUSERSITE: '1',
     PYTHONDONTWRITEBYTECODE: '1',
@@ -121,11 +138,18 @@ function seedConfig(home: string, endpoint: string, model: string): void {
 }
 
 function configModel(python: string, env: Record<string, string>, home: string): unknown {
+  // After the UI writes config it is real YAML (not the JSON seed). Prefer
+  // ruamel.yaml — the worktree venv ships that, not PyYAML.
   const read = spawnSync(
     python,
     [
       '-c',
-      'import json, pathlib, sys, yaml; print(json.dumps(yaml.safe_load(pathlib.Path(sys.argv[1]).read_text())["model"]))',
+      [
+        'import json, pathlib, sys',
+        'from ruamel.yaml import YAML',
+        'data = YAML(typ="safe").load(pathlib.Path(sys.argv[1]).read_text())',
+        'print(json.dumps(data["model"]))',
+      ].join('; '),
       path.join(home, 'config.yaml')
     ],
     { cwd: REPO_ROOT, env, encoding: 'utf8', timeout: 10_000 }
@@ -242,13 +266,60 @@ const gatewayGroup = (page: Page, id: string) =>
 async function selectGateway(page: Page, id: string, label: string, profile: string): Promise<void> {
   const group = gatewayGroup(page, id)
   await expect(group).toBeVisible({ timeout: 60_000 })
-  await group.getByRole('button', { name: `${profile} · ${label}`, exact: true }).click()
-  await expect(page.getByRole('button', { name: /^Registered gateways: / })).toHaveAttribute(
-    'aria-label',
-    `Registered gateways: ${label}`,
-    { timeout: 90_000 }
-  )
+
+  // At-rest local default is the long "This device (...)" pill (data-slot
+  // profile-rail-local-device), not "default · This device". Named rest
+  // profiles use "name · gateway"; the active strip uses bare profile names.
+  const candidates = [
+    group.getByRole('button', { name: `${profile} · ${label}`, exact: true }),
+    group.getByRole('button', { name: profile, exact: true }),
+    group.locator('[data-slot="profile-rail-local-device"]'),
+    group.getByRole('button', { name: new RegExp(`^${label}\\b`) }),
+  ]
+
+  let clicked = false
+
+  for (const candidate of candidates) {
+    if (await candidate.isVisible().catch(() => false)) {
+      await candidate.click()
+      clicked = true
+
+      break
+    }
+  }
+
+  if (!clicked) {
+    // Last resort: any button in the group (logs which labels were present).
+    const names = await group.getByRole('button').allTextContents()
+    throw new Error(`selectGateway(${id}, ${profile}): no matching control; buttons=${JSON.stringify(names)}`)
+  }
+
+  // Cross-gateway hops open "Switch to …?" — the dialog can take several
+  // seconds after the pill click under a cold remote hop. Poll until either
+  // the dialog is confirmed or the Registered-gateways label already matches.
+  const switchConfirm = page.getByRole('dialog').getByRole('button', { name: 'Switch', exact: true })
+  const registered = page.getByRole('button', { name: /^Registered gateways: / })
+  await expect
+    .poll(
+      async () => {
+        if (await switchConfirm.isVisible().catch(() => false)) {
+          await switchConfirm.click()
+
+          return 'confirmed'
+        }
+
+        const al = await registered.getAttribute('aria-label').catch(() => null)
+
+        return al === `Registered gateways: ${label}` ? 'done' : 'waiting'
+      },
+      { timeout: 30_000 }
+    )
+    .toMatch(/confirmed|done/)
+  await expect(registered).toHaveAttribute('aria-label', `Registered gateways: ${label}`, {
+    timeout: 90_000
+  })
   await expect(group).toHaveAttribute('data-active', 'true')
+  // Active strip uses bare profile name for the pressed pill.
   await expect(group.getByRole('button', { name: profile, exact: true })).toHaveAttribute('aria-pressed', 'true')
   await expect(page.locator('[data-slot="statusbar"]').getByText('ready', { exact: true })).toBeVisible({
     timeout: 60_000

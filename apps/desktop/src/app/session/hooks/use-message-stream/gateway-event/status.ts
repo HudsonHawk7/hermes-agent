@@ -115,8 +115,13 @@ export function handleStatusEvent(ctx: GatewayEventContext): boolean {
       }
     } else if (sessionId && payload?.kind === 'process') {
       // The gateway's notification poller announces background process
-      // completions / watch matches here — re-sync the status stack.
+      // completions / watch matches here — re-sync the status stack. Exit can
+      // lag the notify by a tick, so one delayed follow-up covers the race
+      // before the status-stack safety-net poll (5s) would.
       void refreshBackgroundProcesses(sessionId)
+      window.setTimeout(() => {
+        void refreshBackgroundProcesses(sessionId)
+      }, 750)
     } else if (sessionId && payload?.kind === 'goal') {
       applyGoalStatusText(sessionId, coerceGatewayText(payload?.text))
     } else if (sessionId && isFallbackSwitchStatus(payload?.kind, coerceGatewayText(payload?.text))) {

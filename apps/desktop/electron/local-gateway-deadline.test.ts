@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events'
 
 import { afterEach, expect, test, vi } from 'vitest'
 
-afterEach(() => { vi.useRealTimers(); vi.doUnmock('node:child_process'); vi.resetModules() })
+afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); vi.doUnmock('node:child_process'); vi.resetModules() })
 
 test('an ensure client that ignores termination is killed and its promise rejects within a second deadline', async () => {
   vi.useFakeTimers()
@@ -67,6 +67,24 @@ test('a stale-owner restart client that times out but obeys SIGTERM is logged an
 // `hermes gateway ensure` owns a 60 s startup deadline (hermes_cli/gateway_runtime.py
 // DEFAULT_ENSURE_TIMEOUT) and always answers with a protocol verdict by then. Killing the client
 // earlier turned a slow-but-valid cold start into "produced no result … Update Hermes".
+test('isolated-backend ensure waits the long sandbox deadline before killing the client', async () => {
+  vi.useFakeTimers()
+  vi.stubEnv('HERMES_DESKTOP_ISOLATED_BACKEND', '1')
+
+  const child = Object.assign(new EventEmitter(), {
+    stdout: new EventEmitter(), stderr: new EventEmitter(), kill: vi.fn(() => true)
+  })
+
+  vi.doMock('node:child_process', () => ({ spawn: () => child }))
+  const { runGatewayEnsure } = await import('./local-gateway')
+  const result = runGatewayEnsure({ command: 'owned-client', args: [], env: {}, shell: false }, '.', 'profile', { HERMES_DESKTOP_ISOLATED_BACKEND: '1' })
+  await vi.advanceTimersByTimeAsync(75_000)
+  expect(child.kill).not.toHaveBeenCalled()
+  child.stdout.emit('data', Buffer.from('{"state":"ready"}'))
+  child.emit('close', 0)
+  await expect(result).resolves.toEqual({ code: 0, stdout: '{"state":"ready"}', stderr: '' })
+})
+
 test('the default ensure client outlives the protocol deadline and reads a late verdict', async () => {
   vi.useFakeTimers()
 
