@@ -239,8 +239,13 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             # Capture [[as_document]] before extract_media strips it: images then go via send_document.
             force_document_attachments = "[[as_document]]" in response
             from gateway.platforms.base import BasePlatformAdapter, should_send_media_as_audio
+            from pathlib import Path as _Path
             media_files, cleaned = adapter.extract_media(response)
-            media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
+            dropped: list[dict] = []
+            media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files, dropped=dropped)
+            # Named error in chat for paths the host cannot show (Local no-op send would hide them).
+            if dropped:
+                await self._report_dropped_media_paths(adapter, event.source.chat_id, dropped, thread_metadata)
             # Strip image URLs (parity with the non-streaming chain); no extract_local_files here.
             # Do NOT deduplicate explicit MEDIA tags against prior turns here (#73771). This rescan is
             # already EXPLICIT-ONLY (see docstring): a MEDIA: directive in the final streamed reply is the
@@ -258,7 +263,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
             chat_id = event.source.chat_id
             # Images go out as one batch (e.g. Signal's multi-attachment RPC) unless [[as_document]].
             def _is_photo(media_path: str, is_voice: bool) -> bool:
-                ext = Path(media_path).suffix.lower()
+                ext = _Path(media_path).suffix.lower()
                 return ext in _IMAGE_EXTS and not is_voice and not force_document_attachments
 
             image_paths = [p for p, v in media_files if _is_photo(p, v)]
@@ -271,7 +276,7 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                     logger.warning("[%s] Post-stream image batch delivery failed: %s", adapter.name, e)
             for media_path, is_voice in non_image_media:
                 try:
-                    ext = Path(media_path).suffix.lower()
+                    ext = _Path(media_path).suffix.lower()
                     if should_send_media_as_audio(event.source.platform, ext, is_voice=is_voice):
                         await adapter.send_voice(
                             chat_id=chat_id, audio_path=media_path, metadata=_thread_meta, is_voice=is_voice,
@@ -283,6 +288,24 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                 except Exception as e:
                     logger.warning("[%s] Post-stream media delivery failed: %s", adapter.name, e)
 
+    async def _report_dropped_media_paths(
+        self, adapter, chat_id, dropped: list[dict], thread_metadata=None,
+    ) -> None:
+        """Surface filter-dropped MEDIA paths as named chat errors (not only log lines)."""
+        from pathlib import Path as _Path
+        for item in dropped or []:
+            raw = str(item.get("path") or "")
+            reason = str(item.get("reason") or "unavailable")
+            name = _Path(raw).name if raw else "file"
+            text = f"Couldn't show the image: {reason} ({name})"
+            report = getattr(adapter, "report_media_drop", None)
+            try:
+                if callable(report):
+                    await report(chat_id, text, metadata=thread_metadata)
+                else:
+                    await adapter.emit_warning(chat_id, text, metadata=thread_metadata)
+            except Exception as err:
+                logger.warning("[%s] dropped-media notice failed: %s", getattr(adapter, "name", "?"), err)
 
     async def _deliver_queued_first_response(
         self, response: str, source: SessionSource, adapter,
