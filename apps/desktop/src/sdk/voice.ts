@@ -22,12 +22,13 @@
  * (stored or runtime) = that session's composer, `'new'` = the fresh draft. An
  * address with no live surface yields `null` — never a broadcast.
  */
-import { type ComposerTarget, requestComposerVoiceMute } from '@/app/chat/composer/focus'
+import { activeComposerTarget, type ComposerTarget, requestComposerVoiceMute } from '@/app/chat/composer/focus'
 import { $sessionTiles, requestForOwnedSession } from '@/store/session-states'
 import {
   subscribeVoiceConversation,
   type VoiceConversationChange,
   voiceConversationFor,
+  voiceConversationForTarget,
   type VoiceConversationSnapshot
 } from '@/store/voice-conversation'
 
@@ -71,8 +72,22 @@ const runtimeIdForNote = (id: string): string => {
  *  aggregate passes its own `request`, so this module never imports it back). */
 export const createVoiceHost = (ambientRequest: AmbientRequest) => ({
   /** The conversation light for one composer, or null when nothing holds it. */
-  conversation: (sessionId: null | string = null): null | VoiceConversationSnapshot =>
-    voiceConversationFor(resolveComposerAddress(sessionId).ids),
+  conversation: (sessionId: null | string = null): null | VoiceConversationSnapshot => {
+    const { ids, target } = resolveComposerAddress(sessionId)
+
+    if (ids.length) {
+      return voiceConversationFor(ids)
+    }
+
+    // null/empty is the active composer — the same surface toggleMic() with no
+    // id reaches. Empty ids is not "no conversation". Null only when that
+    // surface has not published, or no mounted surface can own the address.
+    if (target !== 'active') {
+      return null
+    }
+
+    return voiceConversationForTarget(activeComposerTarget())
+  },
 
   /** One transcript line (system role, live-only). Resolves with the gateway's
    *  result; rejects when the session's owner cannot be resolved — the same
@@ -97,8 +112,12 @@ export const createVoiceHost = (ambientRequest: AmbientRequest) => ({
     })
   },
 
-  /** Every conversation publish/clear in this window. Filter on
-   *  `change.snapshot.sessionId`. Returns the unsubscribe. */
+  /** Every conversation publish or clear in this window.
+   *  Key a session's light on `change.storedSessionId`, not
+   *  `change.snapshot.sessionId`: a clear (session switch or unmount) emits
+   *  `{ snapshot: null, storedSessionId }`, and `snapshot === null` means that
+   *  light dropped. Filtering on `snapshot.sessionId` keeps the old speaking
+   *  light. Returns the unsubscribe. */
   subscribe: (listener: (change: VoiceConversationChange) => void): (() => void) =>
     subscribeVoiceConversation(listener),
 

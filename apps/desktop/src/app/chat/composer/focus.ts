@@ -234,6 +234,11 @@ export const markActiveComposer = (target: ComposerTarget) => {
   activeTarget = target
 }
 
+/** The composer `'active'` currently names, without healing a stale claim.
+ *  A status read must not move the focus bus; {@link getActiveComposer} heals.
+ *  `toggleMic()` with no id reaches this same target. */
+export const activeComposerTarget = (): ComposerTarget => activeTarget
+
 /** Hand the routing key back when a composer unmounts, so `'active'` can never
  *  resolve to a composer that no longer has a subscriber — such a request is
  *  dispatched and then dropped by every mounted composer's target filter, and

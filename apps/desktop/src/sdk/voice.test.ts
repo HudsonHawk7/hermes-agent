@@ -7,14 +7,22 @@
 // rather than broadcasting to whichever composer happens to be mounted.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { requestComposerVoiceMute } from '@/app/chat/composer/focus'
+import { activeComposerTarget, requestComposerVoiceMute } from '@/app/chat/composer/focus'
 import { requestForOwnedSession } from '@/store/session-states'
-import { publishVoiceConversation, resetVoiceConversations } from '@/store/voice-conversation'
+import {
+  publishVoiceConversation,
+  resetVoiceConversations,
+  type VoiceConversationChange
+} from '@/store/voice-conversation'
 
 import { resolveComposerAddress } from './composer'
+import type * as ComposerModule from './composer'
 import { createVoiceHost } from './voice'
 
-vi.mock('@/app/chat/composer/focus', () => ({ requestComposerVoiceMute: vi.fn() }))
+vi.mock('@/app/chat/composer/focus', () => ({
+  activeComposerTarget: vi.fn(() => 'main'),
+  requestComposerVoiceMute: vi.fn()
+}))
 vi.mock('@/store/session-states', () => ({
   $sessionTiles: { get: () => [] },
   requestForOwnedSession: vi.fn()
@@ -29,6 +37,8 @@ const door = createVoiceHost(ambientRequest)
 beforeEach(() => {
   resetVoiceConversations()
   vi.mocked(resolveComposerAddress).mockReset()
+  vi.mocked(activeComposerTarget).mockReset()
+  vi.mocked(activeComposerTarget).mockReturnValue('main')
   vi.mocked(requestComposerVoiceMute).mockReset()
   vi.mocked(requestForOwnedSession).mockReset()
 })
@@ -56,6 +66,90 @@ describe('host.voice.conversation — the call-status light', () => {
     vi.mocked(resolveComposerAddress).mockReturnValue({ ids: ['stored-2'], stored: 'stored-2', target: 'main' })
 
     expect(door.conversation('stored-2')).toBeNull()
+  })
+
+  it('returns the snapshot the active composer published when no session id is given', async () => {
+    // The real empty-id address is `{ ids: [], target: 'active' }`. A mock that
+    // invents a session id never hits the path a plugin's `conversation()` uses.
+    const actual = await vi.importActual<typeof ComposerModule>('./composer')
+    const empty = actual.resolveComposerAddress(null)
+
+    expect(empty).toEqual({ ids: [], stored: '', target: 'active' })
+    vi.mocked(resolveComposerAddress).mockImplementation(actual.resolveComposerAddress)
+    vi.mocked(activeComposerTarget).mockReturnValue('tile:call')
+
+    publishVoiceConversation({
+      active: true,
+      muted: false,
+      sessionId: 'runtime-1',
+      status: 'speaking',
+      storedSessionId: 'stored-1',
+      target: 'tile:call'
+    })
+    // Another surface is also live. The no-id read must not pick it.
+    publishVoiceConversation({
+      active: false,
+      muted: true,
+      sessionId: 'runtime-other',
+      status: 'idle',
+      storedSessionId: 'stored-other',
+      target: 'main'
+    })
+
+    expect(door.conversation()).toMatchObject({
+      sessionId: 'runtime-1',
+      status: 'speaking',
+      storedSessionId: 'stored-1'
+    })
+  })
+
+  it('returns null when the active composer has not published, even if another surface has', async () => {
+    const actual = await vi.importActual<typeof ComposerModule>('./composer')
+
+    vi.mocked(resolveComposerAddress).mockImplementation(actual.resolveComposerAddress)
+    vi.mocked(activeComposerTarget).mockReturnValue('main')
+
+    publishVoiceConversation({
+      active: true,
+      muted: false,
+      sessionId: 'runtime-other',
+      status: 'speaking',
+      storedSessionId: 'stored-other',
+      target: 'tile:other'
+    })
+
+    expect(door.conversation()).toBeNull()
+  })
+
+  it('keys a dropped speaking light on storedSessionId, and a null snapshot means it dropped', () => {
+    const seen: VoiceConversationChange[] = []
+    const off = door.subscribe(change => seen.push(change))
+
+    publishVoiceConversation({
+      active: true,
+      muted: false,
+      sessionId: 'runtime-1',
+      status: 'speaking',
+      storedSessionId: 'stored-1',
+      target: 'main'
+    })
+    // Session switch on the same surface: the old light clears before the new one publishes.
+    publishVoiceConversation({
+      active: true,
+      muted: false,
+      sessionId: 'runtime-2',
+      status: 'listening',
+      storedSessionId: 'stored-2',
+      target: 'main'
+    })
+
+    const dropped = seen.filter(change => change.storedSessionId === 'stored-1' && change.snapshot === null)
+
+    expect(dropped).toEqual([{ snapshot: null, storedSessionId: 'stored-1' }])
+    // snapshot.sessionId is undefined on a clear, so that filter keeps the old light.
+    expect(seen.filter(change => change.snapshot?.sessionId === 'runtime-1').every(change => change.snapshot !== null)).toBe(true)
+
+    off()
   })
 
   it('exposes no setter for the status', () => {
