@@ -432,6 +432,12 @@ export const FIELD_LABELS: Record<string, string> = defineFieldCopy({
     repoScanRoots: 'Repository Discovery Roots',
     repoScanExcludePaths: 'Excluded Repository Paths'
   },
+  kanban: {
+    workerTempRoot: 'Worker temp root'
+  },
+  cron: {
+    pauseWhileChattingMinutes: 'Pause while chatting'
+  },
   agent: {
     maxTurns: 'Max Agent Steps',
     imageInputMode: 'Image Attachments',
@@ -618,6 +624,14 @@ export const FIELD_DESCRIPTIONS: Record<string, string> = defineFieldCopy({
     repoScanRoots: 'Folders to scan. Leave empty to scan your home directory.',
     repoScanExcludePaths: 'Folders and their descendants to skip during repository discovery.'
   },
+  kanban: {
+    workerTempRoot:
+      'Folder every kanban worker uses for TEMP/TMP/TMPDIR. Leave unset to keep the inherited path — Hermes will not invent a drive letter for you. Example: S:\\ForceAgents\\_tmp.'
+  },
+  cron: {
+    pauseWhileChattingMinutes:
+      "This profile's scheduled agent jobs wait while you are in a live chat or call, then run once it goes quiet. Empty / NULL = off. 0 = wait only during a live turn or call. A number N also waits N minutes after your last message. No auto-default."
+  },
   timezone: 'IANA timezone identifier. Blank uses the system timezone.',
   browser: {
     useRealProfile:
@@ -727,7 +741,13 @@ export const SECTIONS: DesktopConfigSection[] = [
     id: 'chat',
     label: 'Chat',
     icon: MessageCircle,
-    keys: ['display.personality', 'timezone', 'display.show_reasoning', 'agent.image_input_mode']
+    keys: [
+      'display.personality',
+      'timezone',
+      'display.show_reasoning',
+      'cron.pause_while_chatting_minutes',
+      'agent.image_input_mode'
+    ]
   },
   {
     id: 'appearance',
@@ -741,6 +761,9 @@ export const SECTIONS: DesktopConfigSection[] = [
     icon: Monitor,
     keys: [
       'terminal.cwd',
+      'kanban.worker_temp_root',
+      'kanban.worker_temp_max_age_hours',
+      'kanban.worker_temp_janitor_minutes',
       'desktop.repo_scan_enabled',
       'desktop.repo_scan_roots',
       'desktop.repo_scan_exclude_paths',

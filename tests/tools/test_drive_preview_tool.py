@@ -1,6 +1,9 @@
 """Tests for the GUI-surface ``drive_preview`` tool."""
 
+import base64
 import json
+
+import pytest
 
 from tools import drive_preview_tool as ap
 
@@ -119,3 +122,107 @@ def test_empty_answer_distinguishes_no_tab_from_a_stale_app():
 
     assert "no preview tab is open" in result["error"]
     assert "older than this backend" in result["error"]
+
+
+# ── upload: hand the page an allowed local picture or video ─────────────────
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
+
+
+@pytest.fixture
+def allowed(tmp_path, monkeypatch):
+    """One allowed folder, as the running profile would configure it, with a PNG inside."""
+    from tools import preview_upload
+
+    folder = tmp_path / "pictures"
+    folder.mkdir()
+    (folder / "judson.png").write_bytes(PNG)
+    monkeypatch.setattr(preview_upload, "configured_roots", lambda: [("image_gen.sogni.image_input_dir", folder)])
+    return folder
+
+
+def test_upload_needs_a_target_and_a_path(allowed):
+    calls = []
+
+    def cb(payload):
+        calls.append(payload)
+        return "{}"
+
+    assert "ref" in json.loads(ap.drive_preview_tool(action="upload", path=str(allowed / "judson.png"), callback=cb))["error"]
+    assert "path" in json.loads(ap.drive_preview_tool(action="upload", ref="inp-photo", callback=cb))["error"]
+    assert calls == []
+
+
+def test_upload_outside_the_allowed_folders_never_reaches_the_renderer(allowed, tmp_path):
+    outside = tmp_path / "secret.png"
+    outside.write_bytes(PNG)
+    calls = []
+
+    result = json.loads(ap.drive_preview_tool(
+        action="upload", ref="inp-photo", path=str(outside), callback=lambda p: calls.append(p) or "{}"))
+
+    assert str(allowed) in result["error"]
+    assert "image_gen.sogni.image_input_dir" in result["error"]
+    assert calls == []
+
+
+def test_upload_sends_the_checked_file_over_the_bridge(allowed):
+    seen = {}
+    answer = {"success": True, "acted": 'uploaded judson.png (56 B) into input "Photo"'}
+
+    result = json.loads(ap.drive_preview_tool(
+        action="upload", ref="inp-photo", path=str(allowed / "judson.png"),
+        callback=lambda p: seen.update(p) or json.dumps(answer)))
+
+    assert seen == {
+        "action": "upload",
+        "ref": "inp-photo",
+        "file": {"name": "judson.png", "mime": "image/png", "size": len(PNG), "data": base64.b64encode(PNG).decode()},
+    }
+    assert result == answer
+
+
+def test_upload_with_no_configured_folder_names_the_setting(monkeypatch):
+    from tools import preview_upload
+
+    monkeypatch.setattr(preview_upload, "configured_roots", list)
+    calls = []
+
+    result = json.loads(ap.drive_preview_tool(
+        action="upload", selector="input[type=file]", path="C:/anywhere/judson.png",
+        callback=lambda p: calls.append(p) or "{}"))
+
+    assert "image_gen.<provider>.image_input_dir" in result["error"]
+    assert calls == []
+
+
+def test_upload_is_offered_to_the_model():
+    schema = ap.ACT_PREVIEW_SCHEMA
+    assert "upload" in schema["parameters"]["properties"]["action"]["enum"]
+    assert "path" in schema["parameters"]["properties"]
+    assert "upload" in schema["description"]
+
+
+def test_both_entry_points_forward_the_path(allowed):
+    """The model's call reaches the tool two ways: the agent's inline executor and the registry handler.
+    Either dropping ``path`` turns every upload into 'upload needs the path'."""
+    from types import SimpleNamespace
+
+    from agent.inline_tool_executors import INLINE_TOOL_EXECUTORS, InlineToolContext
+    from tools.registry import registry
+
+    seen = []
+
+    def cb(payload):
+        seen.append(payload)
+        return json.dumps({"success": True})
+
+    args = {"action": "upload", "ref": "inp-photo", "path": str(allowed / "judson.png")}
+    agent = SimpleNamespace(drive_preview_callback=cb)
+
+    inline = json.loads(INLINE_TOOL_EXECUTORS["drive_preview"](
+        agent, dict(args), InlineToolContext(effective_task_id="task-1", tool_call_id="call-1")))
+    registered = json.loads(registry.get_entry("drive_preview").handler(dict(args), callback=cb))
+
+    assert inline == registered == {"success": True}
+    assert [payload["file"]["name"] for payload in seen] == ["judson.png", "judson.png"]

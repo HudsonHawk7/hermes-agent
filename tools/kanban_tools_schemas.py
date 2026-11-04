@@ -173,7 +173,9 @@ KANBAN_BLOCK_SCHEMA = _schema(
         "Stop work on this task and route it according to WHY you're stuck. "
         "Set ``kind`` to say which: 'dependency' (waiting on another task — "
         "goes to todo and auto-resumes when that task finishes, no human "
-        "needed), 'needs_input' (you need a human decision/answer), "
+        "needed), 'needs_input' (you need a human decision/answer — "
+        "REQUIRES a structured ``ask`` object so the GM can one-tap Yes/No "
+        "or A/B from the card alone; free-text reason alone is not enough), "
         "'capability' (a hard wall: no access, missing credentials, an action "
         "no agent can do), or 'transient' (a flaky failure that may clear). "
         "``reason`` is shown to the human on the board. If a task keeps "
@@ -186,7 +188,9 @@ KANBAN_BLOCK_SCHEMA = _schema(
         "reason": _prop("string", (
                 "What you need answered or what stopped you, in one or "
                 "two sentences. Don't paste the whole conversation; the "
-                "human has the board and can ask follow-ups via comments."
+                "human has the board and can ask follow-ups via comments. "
+                "For kind=needs_input this becomes the short block reason; "
+                "the structured decision lives in ``ask``."
         )),
         "kind": {
             "type": "string",
@@ -197,6 +201,19 @@ KANBAN_BLOCK_SCHEMA = _schema(
                 "if no parent is open it is recorded as needs_input instead. "
                 "The others surface to a human. Omit only if none apply."
             ),
+        },
+        "ask": {
+            "type": "object",
+            "description": (
+                "Required when kind=needs_input. Structured GM ask so the "
+                "human can decide from the card alone: "
+                "{question (one line), context (≤2 sentences), options: "
+                "2-4 of {key, label, effect} (effect = what happens if "
+                "picked; optional image = attachment filename), pick = "
+                "recommended key or null}. Missing or invalid ask returns "
+                "a tool error naming exactly what to fix — never a crash."
+            ),
+            "additionalProperties": True,
         },
     },
     ["reason"],

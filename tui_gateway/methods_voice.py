@@ -690,10 +690,20 @@ def _(rid, params: dict) -> dict:
         **_frame_fields(frame)})
 
 
+# stop_reason values the Hub + listening light understand. Unknown client values fall back
+# to user_stop so a typo can't invent a permanent "listening" state.
+_WAKE_STOP_REASONS = frozenset({
+    "user_stop", "paused", "detected", "reclaimed", "start_failed", "capture_failed",
+})
+
+
 @method("wake.stop")
 def _(rid, params: dict) -> dict:
     """Stop this surface's listener; ``persist: true`` also writes ``wake_word.enabled: false``."""
-    stopped = _release_wake_for_transport(_caller_transport(), reason="user_stop")
+    reason = params.get("reason") or "user_stop"
+    if not isinstance(reason, str) or reason not in _WAKE_STOP_REASONS:
+        reason = "user_stop"
+    stopped = _release_wake_for_transport(_caller_transport(), reason=reason)
     disabled_persisted = False
     if params.get("persist"):
         try:
@@ -772,8 +782,31 @@ def _(rid, params: dict) -> dict:
 @method("voice_hub.state")
 def _(rid, params: dict) -> dict:
     """The listening light's only input — the Hub's four fields (VH1 AC4). No session, no probe:
-    it answers from memory, so a client can poll it while every agent is mid-turn."""
-    return _ok(rid, _wake_hub().state())
+    it answers from memory, so a client can poll it while every agent is mid-turn.
+
+    VH8 heal: while the detector is actually running under our claim, publish ``armed``.
+    A bare ``idle`` drift (no intentional pause/detect handoff) must not blank the light
+    on the client's 500 ms poll while ``wake.status`` still says LISTENING.
+    """
+    hub = _wake_hub()
+    try:
+        from tools.wake_word import is_listening, owns_listener
+
+        owner, surface = hub.snapshot()
+        st = hub.state()
+        intentional_quiet = st.get("stop_reason") in ("paused", "detected")
+        if (
+            owner is not None
+            and is_listening()
+            and owns_listener(owner)
+            and st.get("status") != "armed"
+            and not intentional_quiet
+        ):
+            # A repaint, not a new arm: the guard in force (and its ownership) stays put.
+            hub.republish_armed(surface or "auto")
+    except Exception:
+        pass
+    return _ok(rid, hub.state())
 
 
 @method("voice_hub.guard")

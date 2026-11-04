@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useRef, useState } from 'react'
+import { type ChangeEvent, type ReactNode, useEffect, useRef, useState } from 'react'
 
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -188,21 +188,36 @@ export function ConfigField({
   }
 
   if (schema.type === 'number') {
+    const nullMeansOff = Boolean(schema.nullMeansOff)
+    const unset = nullMeansOff && (value === undefined || value === null)
     return row(
-      <Input
-        className={CONTROL_TEXT}
-        onChange={e => {
-          const raw = e.target.value
-          const n = raw === '' ? 0 : Number(raw)
+      <div className="flex min-w-0 flex-col gap-1">
+        {unset ? (
+          <p className="text-[0.8125rem] font-medium text-red-600 dark:text-red-400">
+            {c.notSet}
+            <span className="ml-2 font-normal text-(--ui-text-tertiary)">(off)</span>
+          </p>
+        ) : null}
+        <Input
+          className={CONTROL_TEXT}
+          min={nullMeansOff ? 0 : undefined}
+          onChange={e => {
+            const raw = e.target.value
+            if (nullMeansOff && raw === '') {
+              onChange(null)
+              return
+            }
+            const n = raw === '' ? 0 : Number(raw)
 
-          if (!Number.isNaN(n)) {
-            onChange(n)
-          }
-        }}
-        placeholder={c.notSet}
-        type="number"
-        value={value === undefined || value === null ? '' : String(value)}
-      />
+            if (!Number.isNaN(n)) {
+              onChange(n)
+            }
+          }}
+          placeholder={nullMeansOff ? `${c.notSet} (off)` : c.notSet}
+          type="number"
+          value={value === undefined || value === null ? '' : String(value)}
+        />
+      </div>
     )
   }
 
@@ -225,6 +240,38 @@ export function ConfigField({
         spellCheck={false}
         value={JSON.stringify(value, null, 2)}
       />
+    )
+  }
+
+  // kanban.worker_temp_root: NULL means off — show "Not set" in red with a
+  // plain one-line hint (no silent C: default). When set, show the resolved path.
+  if (schemaKey === 'kanban.worker_temp_root') {
+    const unset = value == null || String(value).trim() === ''
+    const pathText = unset ? '' : String(value)
+
+    return wideRow(
+      <div className="flex flex-col gap-1.5">
+        {unset ? (
+          <p className="text-[0.8125rem] font-medium text-red-600 dark:text-red-400">
+            {c.notSet}
+            <span className="ml-2 font-normal text-(--ui-text-tertiary)">
+              Workers inherit the gateway temp path until you set a root (for example
+              S:\ForceAgents\_tmp).
+            </span>
+          </p>
+        ) : (
+          <p className={cn('font-mono text-[0.8125rem] text-(--ui-text-secondary)', CONTROL_TEXT)}>{pathText}</p>
+        )}
+        <Input
+          className={cn(CONTROL_TEXT, 'font-mono', unset ? 'border-red-500/50' : undefined)}
+          onChange={(e: ChangeEvent<HTMLInputElement>) =>
+            onChange(e.target.value.trim() === '' ? null : e.target.value)
+          }
+          placeholder={c.notSet}
+          spellCheck={false}
+          value={pathText}
+        />
+      </div>
     )
   }
 

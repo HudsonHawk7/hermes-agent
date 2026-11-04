@@ -445,6 +445,9 @@ method("wake.start", params=WakeStartParams, result=WakeStartResult,
 class WakeStopParams(Params):
     persist: bool | None = None
     profile: str | None = None
+    # Named Hub stop_reason (defaults to user_stop). Capture death uses capture_failed so
+    # the listening light can show an honest failure instead of "listening" forever.
+    reason: str | None = None
 
 
 class WakeOwnerResult(Result):
@@ -685,5 +688,3 @@ class VoiceHubSpeakerResult(Result):
 
 method("voice_hub.speaker", params=VoiceHubSpeakerParams, result=VoiceHubSpeakerResult,
        doc="Who the speaker gate will accept, what it has dropped, and its named refusal.")
-
-

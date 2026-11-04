@@ -27,7 +27,12 @@
  * out of the boot path.
  */
 
-import { actEngineSource, type PreviewActAction, type PreviewActResult } from '@/lib/preview-act/act-in-page'
+import {
+  actEngineSource,
+  type PreviewActAction,
+  type PreviewActResult,
+  type PreviewUploadFile
+} from '@/lib/preview-act/act-in-page'
 import { watchInPage } from '@/lib/preview-act/watch-in-page'
 import type { PreviewOwner } from '@/store/preview-ownership'
 
@@ -98,6 +103,13 @@ const NAVIGATED =
  *  navigation: nothing this action did could have moved the page. */
 const UNANSWERED =
   'The page did not answer in time, so no input was sent. Call elements to see whether it is still the same page.'
+
+/** The upload is one trip — locate, decode, set the file — so a page that
+ *  never answers it has confirmed nothing: it may be navigating, hung, or
+ *  still chewing a large script. Unlike a click that went silent, there is no
+ *  gesture that is known to have landed. */
+const UPLOAD_UNANSWERED =
+  'The page did not answer in time, so nothing confirms the file arrived. Call elements to check whether the page took it.'
 
 /** A fingerprint of the overlay's source, so the guest page can tell that the
  *  code it is running has changed underneath it.
@@ -327,6 +339,141 @@ ${preamble()}
       watch('sweep');
       // One or the other, never both: a re-read answers with the whole
       // inventory only when it is the first look at this page.
+      result.elements = after.elements;
+      result.delta = after.delta;
+      result.url = after.url;
+      result.title = after.title;
+    } catch (err) {
+      result.note = 'The page changed before it could be re-read: ' + err;
+    }
+    return JSON.stringify(result);
+  });
+})()`
+}
+
+/** Byte count the way a person reads it, for the agent's log of what it handed over. */
+function describeSize(bytes: number): string {
+  if (bytes >= 1024 * 1024) {
+    return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+  }
+
+  return bytes >= 1024 ? Math.round(bytes / 1024) + ' KB' : bytes + ' B'
+}
+
+const NOT_AN_UPLOAD_TARGET =
+  ' is neither a file input nor a drop zone: no file input is in or beside it, and a drop on it went unhandled. ' +
+  'Call elements and target the upload control itself.'
+
+/** Hand the page a file with no dialog. The bytes arrive already checked by
+ *  the backend; here they become a `File` in a `DataTransfer`, which is set on
+ *  the target's file input (`input` + `change` fired, as a picker would) or
+ *  dropped on the target when it is the page's drop zone.
+ *
+ *  The visible control is rarely the input itself — pages hide
+ *  `<input type=file>` behind a styled button or a label — so the input is
+ *  looked for in, behind and right beside the target before the drop path.
+ *
+ *  The drop witness is the page's own: a drop zone handles `drop` with
+ *  preventDefault (a browser would otherwise navigate to the file), so a drop
+ *  nobody prevented means nothing on the page took it, and the agent is told
+ *  so rather than handed a success. */
+function buildUploadScript(action: PreviewActAction, file: PreviewUploadFile, settleMs: number): string {
+  const locate = { kind: 'locate', ref: action.ref, selector: action.selector }
+  const meta = { mime: file.mime, name: file.name, size: describeSize(file.size) }
+
+  return `(function () {
+${preamble()}
+  var found = act(${JSON.stringify(locate)});
+  if (!found.success) { return Promise.resolve(JSON.stringify(found)); }
+  var el = holder.aimed;
+  var meta = ${JSON.stringify(meta)};
+  var target = String(found.acted || 'it').replace(/^looking at /, '');
+  var isFileInput = function (node) {
+    return !!node && node.tagName === 'INPUT' && String(node.type).toLowerCase() === 'file';
+  };
+  var findInput = function (node) {
+    if (isFileInput(node)) { return node; }
+    if (node.tagName === 'LABEL' && isFileInput(node.control)) { return node.control; }
+    var inside = node.querySelector('input[type=file]');
+    if (inside) { return inside; }
+    var label = node.closest('label');
+    if (label && isFileInput(label.control)) { return label.control; }
+    // The button-beside-a-hidden-input pattern: only an unambiguous neighbour,
+    // and only close by — a page's one global picker three levels up is not
+    // "the input behind this button".
+    var up = node.parentElement;
+    for (var depth = 0; up && depth < 2; depth++, up = up.parentElement) {
+      var near = up.querySelectorAll('input[type=file]');
+      if (near.length === 1) { return near[0]; }
+    }
+    return null;
+  };
+  var accepts = function (accept) {
+    var wanted = accept.split(',').map(function (s) { return s.trim().toLowerCase(); }).filter(Boolean);
+    if (!wanted.length) { return true; }
+    var ext = meta.name.slice(meta.name.lastIndexOf('.')).toLowerCase();
+    return wanted.some(function (rule) {
+      if (rule.charAt(0) === '.') { return rule === ext; }
+      if (rule.slice(-2) === '/*') { return meta.mime.indexOf(rule.slice(0, -1)) === 0; }
+      return rule === meta.mime;
+    });
+  };
+  var raw = atob(${JSON.stringify(file.data)});
+  var bytes = new Uint8Array(raw.length);
+  for (var i = 0; i < raw.length; i++) { bytes[i] = raw.charCodeAt(i); }
+  var handed = new File([bytes], meta.name, { type: meta.mime });
+  var transfer = new DataTransfer();
+  transfer.items.add(handed);
+  var dragEvent = function (type) {
+    var event = null;
+    try {
+      if (typeof DragEvent === 'function') {
+        event = new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: transfer });
+      }
+    } catch (err) { event = null; }
+    if (!event || !event.dataTransfer) {
+      event = new Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'dataTransfer', { value: transfer });
+    }
+    return event;
+  };
+  watch('aim');
+  var result;
+  var input = findInput(el);
+  if (input) {
+    if (input.disabled) {
+      return Promise.resolve(JSON.stringify({
+        error: 'The file input behind ' + target + ' is disabled, so nothing was uploaded.',
+        success: false
+      }));
+    }
+    input.files = transfer.files;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    result = {
+      acted: 'uploaded ' + meta.name + ' (' + meta.size + ') into ' + (input === el ? target : 'the file input behind ' + target),
+      success: true
+    };
+    var accept = String(input.getAttribute('accept') || '');
+    if (accept && !accepts(accept)) {
+      result.note = 'That input accepts ' + accept + ', not ' + meta.mime + ', so the page may reject the file.';
+    }
+  } else {
+    el.dispatchEvent(dragEvent('dragenter'));
+    el.dispatchEvent(dragEvent('dragover'));
+    var drop = dragEvent('drop');
+    el.dispatchEvent(drop);
+    if (!drop.defaultPrevented) {
+      return Promise.resolve(JSON.stringify({ error: target + ${JSON.stringify(NOT_AN_UPLOAD_TARGET)}, success: false }));
+    }
+    result = { acted: 'dropped ' + meta.name + ' (' + meta.size + ') on ' + target, success: true };
+  }
+  result.file = { name: meta.name, size: ${JSON.stringify(file.size)} };
+  watch('strike');
+  return wait(${settleMs}).then(function () {
+    try {
+      var after = act({ kind: 'elements' });
+      watch('sweep');
       result.elements = after.elements;
       result.delta = after.delta;
       result.url = after.url;
@@ -811,6 +958,22 @@ export async function actOnActivePreview(
     }
 
     return trip.kind === 'answered' ? trip.result : { acted: typed.kind, note: NAVIGATED, success: true }
+  }
+
+  // A file is handed over by script, never by real input: there is no pointer
+  // gesture that puts a file into a page without the OS picker.
+  if (typed.kind === 'upload') {
+    if (!typed.file) {
+      return { error: 'upload arrived without a file, so nothing was handed to the page.', success: false }
+    }
+
+    const trip = await runJson(run, buildUploadScript(typed, typed.file, SETTLE_MS))
+
+    if (trip.kind === 'failed') {
+      return { error: trip.error, success: false }
+    }
+
+    return trip.kind === 'answered' ? trip.result : { error: UPLOAD_UNANSWERED, success: false }
   }
 
   const input = activePreviewInput(owner)

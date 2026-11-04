@@ -315,7 +315,9 @@ function fetchLinkTitle(rawUrl) {
 // the host key means Linear's docs page and Linear's MCP endpoint cost one
 // lookup between them.
 
-const FAVICON_CACHE_PATH = path.join(app.getPath('userData'), 'favicon-cache.json')
+// Lazy: app.getPath('userData') must not run at import time. Electron can throw
+// "Failed to get 'userData' path" before main.ts applies HERMES_DESKTOP_USER_DATA_DIR
+// (or when a faked HOME/APPDATA folder was never created). Resolve on first use.
 const FAVICON_CACHE_LIMIT = 400
 const FAVICON_TTL_MS = 30 * 24 * 60 * 60 * 1000
 // A miss is cheap to re-check and expensive to be wrong about (a site that
@@ -328,6 +330,10 @@ const FAVICON_WRITE_DEBOUNCE_MS = 3000
 let faviconCache: Map<string, { at: number; icon: string }> | null = null
 let faviconWriteTimer: null | ReturnType<typeof setTimeout> = null
 const faviconInflight = new Map<string, Promise<string>>()
+
+function faviconCachePath(): string {
+  return path.join(app.getPath('userData'), 'favicon-cache.json')
+}
 
 function faviconCacheKey(rawUrl: string): string {
   try {
@@ -345,7 +351,7 @@ function loadFaviconCache(): Map<string, { at: number; icon: string }> {
   faviconCache = new Map()
 
   try {
-    const raw = JSON.parse(fs.readFileSync(FAVICON_CACHE_PATH, 'utf8'))
+    const raw = JSON.parse(fs.readFileSync(faviconCachePath(), 'utf8'))
 
     for (const [host, entry] of Object.entries(raw?.icons ?? {})) {
       const at = Number((entry as { at?: number })?.at)
@@ -373,7 +379,7 @@ function saveFaviconCacheSoon() {
     try {
       const icons = Object.fromEntries(loadFaviconCache())
 
-      fs.writeFileSync(FAVICON_CACHE_PATH, JSON.stringify({ icons }), 'utf8')
+      fs.writeFileSync(faviconCachePath(), JSON.stringify({ icons }), 'utf8')
     } catch {
       // Cache is an optimization; failing to persist it costs one refetch.
     }

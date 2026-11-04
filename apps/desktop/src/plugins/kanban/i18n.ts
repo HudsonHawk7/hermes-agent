@@ -222,6 +222,27 @@ type KanbanMessages = {
     openKanban: string
     artifacts: (n: number) => string
   }
+  // Amber Needs you column (GM one-tap approvals, part 2)
+  needsYouLabel: string
+  needsYouHelp: string
+  needsYouEmpty: string
+  needsYouAskerPick: string
+  needsYouSendBack: string
+  needsYouNotePlaceholder: string
+  needsYouSendNote: string
+  needsYouUndo: string
+  needsYouJustNow: string
+  needsYouYouSaid: (label: string) => string
+  needsYouSentBack: string
+  needsYouAnswered: string
+  needsYouLegacyHint: string
+  needsYouPick: string
+  needsYouDecisionBadge: (label: string) => string
+  needsYouRecommend: string
+  needsYouDetails: string
+  needsYouDetailsMeta: (comments: number, rows: number, folded: number) => string
+  needsYouFoldAria: (count: number, when: string) => string
+  needsYouFoldCount: (count: number) => string
 }
 
 export const en: KanbanMessages = {
@@ -449,7 +470,30 @@ export const en: KanbanMessages = {
     timedOutTitle: 'Task took too long — Hermes will retry it automatically',
     openKanban: 'Open Kanban',
     artifacts: (n: number) => `${n} artifacts`
-  }
+  },
+  needsYouLabel: 'Needs you',
+  needsYouHelp: 'Open asks from every board — tap an option to answer. Nothing here is buried in Blocked.',
+  needsYouEmpty: 'Nothing needs you right now.',
+  needsYouAskerPick: 'Asker’s pick',
+  needsYouSendBack: 'Send back with a note',
+  needsYouNotePlaceholder: 'What should the agent change?',
+  needsYouSendNote: 'Send note',
+  needsYouUndo: 'Undo',
+  needsYouJustNow: 'just now',
+  needsYouYouSaid: label => `You said ${label}`,
+  needsYouSentBack: 'sent back',
+  needsYouAnswered: 'answered',
+  needsYouLegacyHint: 'No buttons: ask the agent to re-ask with options.',
+  needsYouPick: 'Pick',
+  needsYouDecisionBadge: label => `You said ${label} · just now`,
+  needsYouRecommend: 'Recommend',
+  needsYouDetails: 'Details',
+  needsYouDetailsMeta: (comments, rows, folded) =>
+    folded > 0
+      ? `${comments} comments · ${rows} rows · 1 repeat ×${folded} folded`
+      : `${comments} comments · ${rows} rows`,
+  needsYouFoldAria: (count, when) => `Show ${count} identical comments, last ${when}`,
+  needsYouFoldCount: count => `×${count}`
 }
 
 const ja: KanbanMessages = {
@@ -669,14 +713,37 @@ const ja: KanbanMessages = {
   notify: {
     completedTitle: 'タスク完了',
     blockedTitle: 'タスクがブロック中 — 入力が必要です',
-    blockLoopTitle: 'タスクをトリアージへ移動 — 判断が必要です',
-    gaveUpTitle: 'タスクが停止しました',
-    gaveUpBody: 'Hermes はこのタスクを完了できませんでした。かんばんを開いて原因を確認し、再割り当てしてください。',
-    crashedTitle: 'タスクで問題が発生 — Hermes が自動で再試行します',
-    timedOutTitle: 'タスクに時間がかかりすぎました — Hermes が自動で再試行します',
+    blockLoopTitle: 'トリアージへ — 判断が必要です',
+    gaveUpTitle: 'タスク停止',
+    gaveUpBody: '完了できませんでした。かんばんを開いて確認し、再割り当てしてください。',
+    crashedTitle: '問題発生 — 自動で再試行します',
+    timedOutTitle: '時間切れ — 自動で再試行します',
     openKanban: 'かんばんを開く',
     artifacts: (n: number) => `成果物 ${n} 件`
-  }
+  },
+  needsYouLabel: '要対応',
+  needsYouHelp: '全ボードの未回答の問い。選択肢をタップして答える。Blocked には出ません。',
+  needsYouEmpty: 'いま対応が必要なものはありません。',
+  needsYouAskerPick: '推奨',
+  needsYouSendBack: 'メモを付けて差し戻す',
+  needsYouNotePlaceholder: 'エージェントに直してほしい点は？',
+  needsYouSendNote: 'メモを送る',
+  needsYouUndo: '取り消す',
+  needsYouJustNow: 'たった今',
+  needsYouYouSaid: label => `「${label}」と答えました`,
+  needsYouSentBack: '差し戻し',
+  needsYouAnswered: '回答済み',
+  needsYouLegacyHint: 'ボタンなし: エージェントに選択肢付きで再質問させてください。',
+  needsYouPick: '選ぶ',
+  needsYouDecisionBadge: label => `「${label}」· たった今`,
+  needsYouRecommend: 'おすすめ',
+  needsYouDetails: '詳細',
+  needsYouDetailsMeta: (comments, rows, folded) =>
+    folded > 0
+      ? `${comments} 件のコメント · ${rows} 行 · 繰り返し ×${folded}`
+      : `${comments} 件のコメント · ${rows} 行`,
+  needsYouFoldAria: (count, when) => `同一コメント ${count} 件を表示（最終 ${when}）`,
+  needsYouFoldCount: count => `×${count}`
 }
 
 const zh: KanbanMessages = {
@@ -900,7 +967,30 @@ const zh: KanbanMessages = {
     timedOutTitle: '任务耗时过长 — Hermes 将自动重试',
     openKanban: '打开看板',
     artifacts: (n: number) => `${n} 个产物`
-  }
+  },
+  needsYouLabel: '需要你',
+  needsYouHelp: '来自所有面板的未决问题 — 点选项作答。不会埋在受阻列里。',
+  needsYouEmpty: '现在没有需要你处理的事。',
+  needsYouAskerPick: '提问者推荐',
+  needsYouSendBack: '附备注退回',
+  needsYouNotePlaceholder: '希望代理改什么？',
+  needsYouSendNote: '发送备注',
+  needsYouUndo: '撤销',
+  needsYouJustNow: '刚刚',
+  needsYouYouSaid: label => `你选了 ${label}`,
+  needsYouSentBack: '已退回',
+  needsYouAnswered: '已回答',
+  needsYouLegacyHint: '无按钮：请让代理用选项重新提问。',
+  needsYouPick: '选择',
+  needsYouDecisionBadge: label => `你选了 ${label} · 刚刚`,
+  needsYouRecommend: '推荐',
+  needsYouDetails: '详情',
+  needsYouDetailsMeta: (comments, rows, folded) =>
+    folded > 0
+      ? `${comments} 条评论 · ${rows} 行 · 重复 ×${folded}`
+      : `${comments} 条评论 · ${rows} 行`,
+  needsYouFoldAria: (count, when) => `显示 ${count} 条相同评论，最近 ${when}`,
+  needsYouFoldCount: count => `×${count}`
 }
 
 const zhHant: KanbanMessages = {
@@ -1124,7 +1214,30 @@ const zhHant: KanbanMessages = {
     timedOutTitle: '任務耗時過長 — Hermes 將自動重試',
     openKanban: '開啟看板',
     artifacts: (n: number) => `${n} 個產物`
-  }
+  },
+  needsYouLabel: '需要你',
+  needsYouHelp: '來自所有面板的未決問題 — 點選項作答。不會埋在受阻欄。',
+  needsYouEmpty: '現在沒有需要你處理的事。',
+  needsYouAskerPick: '提問者推薦',
+  needsYouSendBack: '附備註退回',
+  needsYouNotePlaceholder: '希望代理改什麼？',
+  needsYouSendNote: '傳送備註',
+  needsYouUndo: '復原',
+  needsYouJustNow: '剛剛',
+  needsYouYouSaid: label => `你選了 ${label}`,
+  needsYouSentBack: '已退回',
+  needsYouAnswered: '已回答',
+  needsYouLegacyHint: '無按鈕：請讓代理用選項重新提問。',
+  needsYouPick: '選擇',
+  needsYouDecisionBadge: label => `你選了 ${label} · 剛剛`,
+  needsYouRecommend: '推薦',
+  needsYouDetails: '詳細',
+  needsYouDetailsMeta: (comments, rows, folded) =>
+    folded > 0
+      ? `${comments} 則留言 · ${rows} 列 · 重複 ×${folded}`
+      : `${comments} 則留言 · ${rows} 列`,
+  needsYouFoldAria: (count, when) => `顯示 ${count} 則相同留言，最近 ${when}`,
+  needsYouFoldCount: count => `×${count}`
 }
 
 /** Registered via `ctx.i18n.register` at plugin load (disposer tracked). */

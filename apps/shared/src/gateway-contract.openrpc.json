@@ -8943,6 +8943,11 @@
             "title": "Hidden",
             "type": "boolean"
           },
+          "room_plumbing": {
+            "default": false,
+            "title": "Room Plumbing",
+            "type": "boolean"
+          },
           "follow_profile_config": {
             "anyOf": [
               {
@@ -28687,6 +28692,17 @@
             ],
             "default": null,
             "title": "Allow Shortcut"
+          },
+          "file": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PreviewUploadFile"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           }
         },
         "required": [
@@ -28814,6 +28830,36 @@
           "text"
         ],
         "title": "PreviewRestartProgressPayload",
+        "type": "object"
+      },
+      "PreviewUploadFile": {
+        "additionalProperties": false,
+        "description": "One checked local file for ``action='upload'`` (``tools/preview_upload.py``): the renderer builds a\n``File`` from ``data`` (base64) and never sees a path.",
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "mime": {
+            "title": "Mime",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "data": {
+            "title": "Data",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "mime",
+          "size",
+          "data"
+        ],
+        "title": "PreviewUploadFile",
         "type": "object"
       },
       "ProcessEntry": {
@@ -47942,6 +47988,18 @@
             ],
             "default": null,
             "title": "Profile"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reason"
           }
         },
         "title": "WakeStopParams",

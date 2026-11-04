@@ -27,6 +27,7 @@ import {
   gatewayActivationEpoch,
   host,
   Input,
+  ListeningLight,
   queryClient,
   relativeTime,
   RowButton,
@@ -1022,6 +1023,8 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
         </span>
       )}
       <div className="min-w-0 flex-1 truncate text-sm font-semibold">{group}</div>
+      {/* VH8: same hub-driven light on the group-chat surface (AC3). */}
+      <ListeningLight className="shrink-0" />
       <Tip label={memberNames}>
         <span
           aria-label={availabilityLabel}

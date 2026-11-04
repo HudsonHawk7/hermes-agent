@@ -237,6 +237,8 @@ export interface KanbanProfile {
  *  the backend's BOARD_COLUMNS; anything the backend adds renders via the
  *  fallback. */
 export const COLUMN_META: Record<string, { codicon: string; tone: string }> = {
+  // Amber Needs you — first on the board; cards come from GET /needs-you, not BOARD_COLUMNS.
+  needs_you: { codicon: 'comment-unresolved', tone: '#f59e0b' },
   triage: { codicon: 'inbox', tone: 'var(--ui-text-tertiary)' },
   todo: { codicon: 'circle-outline', tone: 'var(--ui-text-secondary)' },
   scheduled: { codicon: 'watch', tone: '#a78bfa' },

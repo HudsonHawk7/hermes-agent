@@ -350,6 +350,16 @@ def _cmd_gc(args: argparse.Namespace) -> int:
     removed_logs = kb.gc_worker_logs(older_than_seconds=log_days * 24 * 3600) if log_days else 0
     print(f"GC complete: {removed_ws} workspace(s), "
           f"{removed_events} event row(s), {removed_logs} log file(s) removed")
+
+    # Same worker-temp sweep the gateway janitor runs (counts match that log line).
+    try:
+        from hermes_cli.kanban_worker_temp import format_sweep_counts, sweep_worker_temp
+
+        result = sweep_worker_temp(kanban_cfg=_kanban_config())
+        print(f"GC {format_sweep_counts(result)}")
+    except Exception as exc:
+        _err(f"gc: worker-temp sweep failed: {exc}")
+        return 1
     return 0
 
 

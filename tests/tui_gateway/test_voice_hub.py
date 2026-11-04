@@ -443,3 +443,132 @@ def test_the_hub_closes_a_guard_it_created_and_never_one_it_was_handed(mic):
 
     voice_hub.hub().attach_guard(None)  # a listener that has ended clears the read
     assert voice_hub.hub().guard_state() is None
+
+
+def test_a_poll_heal_repaints_the_light_without_dropping_the_guard(mic):
+    """VH8's heal and VH3's guard must coexist: a repaint is not a re-arm.
+
+    Re-arming through ``armed()`` would take ``guard=None`` and forget the guard this Hub owns
+    (leaking its backends), so the poll heal calls ``republish_armed`` instead. Proven both ways:
+    the doctor read keeps reporting through the repaint, release still closes the guard exactly
+    once, and a repaint with no claim behind it invents no owner.
+    """
+    hub = voice_hub.hub()
+    owned = _FakeGuard()
+    tui = _transport()
+    hub.armed("tui", tui, guard=owned)
+    with hub._lock:  # the drift VH8 heals: claim kept, detector running, status bare idle
+        hub._status, hub._stop_reason = voice_hub.IDLE, None
+
+    hub.republish_armed("tui")
+
+    state = _state()
+    assert state["status"] == "armed" and state["owner_surface"] == "tui"
+    assert hub.guard_state()["frames"] == 30, "the guard in force must survive a repaint"
+
+    assert hub.release(tui) is True
+    assert owned.closed == 1, "ownership survives the repaint, so release still closes it"
+
+    hub.republish_armed("ghost")  # nothing is claimed: a repaint must not invent an owner
+    assert hub.state()["status"] == voice_hub.STOPPED
+    assert hub.state()["owner_surface"] is None
+# ── VH8: one-click stop closes capture with named stop_reason ─────────────────────────────────
+
+
+def test_owner_stop_sets_user_stop_and_closes_device(mic):
+    """One-click stop on the listening light: device closes; hub stop_reason user_stop.
+
+    Hub publish uses status=stopped on full release (idle is reserved for pause while the
+    claim is kept). The light treats both as not-listening; AC2's 'closes capture' is the
+    detector going away + stop_reason user_stop.
+    """
+    transport = _transport()
+    assert _rpc(_wake_start("gui"), transport=transport)["result"]["started"] is True
+    assert len(mic) == 1
+    assert _state()["status"] == "armed"
+
+    stop = _rpc(
+        {"id": "vh8-stop", "method": "wake.stop", "params": {"reason": "user_stop"}},
+        transport=transport,
+    )
+    assert stop["result"]["stopped"] is True, stop
+    after = _state()
+    assert after["status"] == "stopped"
+    assert after["owner_surface"] is None
+    assert after["stop_reason"] == "user_stop"
+    assert wake_word._current_detector() is None
+    assert len(mic) == 1  # no second open; stop closed the only stream
+
+
+def test_stop_with_capture_failed_reason_is_honest(mic):
+    """Capture death must publish capture_failed — never leave status armed."""
+    transport = _transport()
+    assert _rpc(_wake_start("gui"), transport=transport)["result"]["started"] is True
+
+    stop = _rpc(
+        {"id": "vh8-cap", "method": "wake.stop", "params": {"reason": "capture_failed"}},
+        transport=transport,
+    )
+    assert stop["result"]["stopped"] is True, stop
+    after = _state()
+    assert after["status"] in ("idle", "stopped")
+    assert after["stop_reason"] == "capture_failed"
+    assert after["owner_surface"] is None
+
+
+def test_unknown_stop_reason_falls_back_to_user_stop(mic):
+    transport = _transport()
+    assert _rpc(_wake_start("gui"), transport=transport)["result"]["started"] is True
+    stop = _rpc(
+        {"id": "vh8-bad", "method": "wake.stop", "params": {"reason": "not_a_real_reason"}},
+        transport=transport,
+    )
+    assert stop["result"]["stopped"] is True, stop
+    assert _state()["stop_reason"] == "user_stop"
+
+
+def test_voice_hub_state_heals_idle_while_detector_listening(mic):
+    """VH8 F1: bare idle drift while the detector runs must publish armed on poll.
+
+    Client polls voice_hub.state every 500ms; if the hub snapshot drifted to idle
+    without an intentional pause/detect handoff, the light would blank while
+    wake.status still says LISTENING. Heal re-arms on the same claim.
+    """
+    transport = _transport()
+    assert _rpc(_wake_start("gui"), transport=transport)["result"]["started"] is True
+    assert _state()["status"] == "armed"
+    assert wake_word.is_listening() is True
+
+    # Simulate drift: claim kept, detector still running, status bare idle.
+    hub = voice_hub.hub()
+    with hub._lock:
+        hub._status = voice_hub.IDLE
+        hub._stop_reason = None
+    assert hub.state()["status"] == "idle"
+
+    healed = _state()
+    assert healed["status"] == "armed", healed
+    assert healed["owner_surface"] == "gui"
+    assert healed["stop_reason"] is None
+    assert wake_word.is_listening() is True
+
+
+def test_voice_hub_state_does_not_heal_intentional_pause(mic, monkeypatch):
+    """Paused for a voice turn stays idle — light must follow the mic handoff."""
+    from hermes_cli import voice
+
+    monkeypatch.setattr(voice, "start_continuous", lambda **kw: True)
+    monkeypatch.setattr(voice, "stop_continuous", lambda **kw: None)
+    monkeypatch.setattr(server, "_session_voice_enabled", lambda session_id: True)
+
+    transport = _transport()
+    assert _rpc(_wake_start("tui"), transport=transport)["result"]["started"] is True
+    recorded = _rpc(
+        {"id": "rec-start", "method": "voice.record",
+         "params": {"action": "start", "session_id": "sid-heal"}},
+        transport=transport,
+    )
+    assert recorded["result"]["status"] == "recording", recorded
+    during = _state()
+    assert during["status"] == "idle"
+    assert during["stop_reason"] == "paused"

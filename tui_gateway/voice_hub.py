@@ -127,6 +127,20 @@ class VoiceHub:
             self._since = float(self._clock())
             return self.state()
 
+    def republish_armed(self, surface: str) -> None:
+        """Publish ``armed`` again for a claim that is already live (VH8's poll heal).
+
+        A repaint, not a new arm: the detector is still running under the same owner, so nothing
+        about the guard in force changes here. Re-arming through :meth:`armed` would drop the
+        guard this Hub owns — and leak it — which is why the heal path calls this instead.
+        """
+        with self._lock:
+            if self._transport is None:
+                return
+            self._surface = surface or self._surface or "auto"
+            self._status, self._stop_reason = ARMED, None
+            self._since = float(self._clock())
+
     def attach_guard(self, guard: Any) -> None:
         """Publish an already-running listener's guard for the doctor read. Reporting only.
 

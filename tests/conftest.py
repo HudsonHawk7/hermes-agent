@@ -1182,6 +1182,11 @@ def pytest_configure(config):
         "markers", "allow_real_home_io: explicitly bypass the test-only home I/O guard."
     )
     config.addinivalue_line(
+        "markers",
+        "allow_real_user_path: explicitly bypass the test-only HKCU user PATH guard "
+        "(only the Windows install/update E2E suite, which restores the value).",
+    )
+    config.addinivalue_line(
         "markers", "real_release_channels: keep the real R2 channel reader (no local source-branch stub)."
     )
     config.addinivalue_line(
@@ -1487,21 +1492,38 @@ _REAL_INSTALLED_GUI_APPS = sorted({
 
 
 @pytest.fixture(autouse=True)
-def _forbid_real_user_path_writes(monkeypatch):
+def _forbid_real_user_path_writes(monkeypatch, request):
     """Fail a test that would add an entry to the real Windows User PATH.
 
     The registry has no temporary-home equivalent: a test home that reached
-    these writers stayed on the developer's PATH after the run. Tests of the
-    writers' callers inject fakes (``write_user_path=``) or stub them.
+    these writers stayed on the developer's PATH after the run. Python
+    writers are stubbed; in-process winreg Path writes raise; a subprocess
+    that still mutates HKCU is restored and the test fails. Opt out only
+    with ``allow_real_user_path`` (the Windows install/update E2E suite).
     """
-    if sys.platform != "win32":
+    if sys.platform != "win32" or request.node.get_closest_marker("allow_real_user_path"):
+        yield
         return
 
-    def refuse(*_args, **_kwargs):
-        raise AssertionError("TEST BUG: write to the real Windows User PATH (HKCU\\Environment)")
+    from tests.user_path_guard import (
+        REFUSED,
+        install_python_writer_stubs,
+        install_winreg_path_guard,
+        read_user_path,
+        restore_user_path,
+    )
 
-    monkeypatch.setattr("hermes_cli._launchers._register_windows_user_path", refuse)
-    monkeypatch.setattr("hermes_cli._install_repair._write_user_path_raw", refuse)
+    install_python_writer_stubs(monkeypatch)
+    install_winreg_path_guard(monkeypatch)
+    before = read_user_path()
+    yield
+    after = read_user_path()
+    if after != before:
+        restore_user_path(before)
+        pytest.fail(
+            f"{REFUSED}: HKCU Path changed during the test and was restored.\n"
+            f"before={before!r}\nafter={after!r}"
+        )
 
 
 @pytest.fixture(autouse=True)

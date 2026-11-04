@@ -606,6 +606,11 @@ DEFAULT_CONFIG = {
         # lower of the ratio threshold and this count. Clamped to the model's context length.
         # Off by default: no single count suits windows from 64K to 1M+, so the ratio decides.
         "threshold_tokens": None,
+        # summary_max_tokens: optional wire max_tokens on the compression *summary* auxiliary
+        # call only (never chat turns). None/absent = uncapped (model decides when to stop).
+        # Set a positive int (e.g. 800) when a local model runs away (18k+ gen tokens observed).
+        # Prompt-side guidance still uses the internal summary budget; this only caps generation.
+        "summary_max_tokens": None,
         # "progress_notices": False,    # opt-in (#52995): when True, routine compression
         "target_ratio": 0.20,         # fraction of threshold to preserve as recent tail
         # tail_mode: "lean" = clamped 2.5%-of-window tail (10K floor / 25K cap) plus chunked
@@ -1909,6 +1914,10 @@ DEFAULT_CONFIG = {
         # silences a signature for good. 0 = re-alert on every failing run. Keep in sync with
         # cron.scheduler.DEFAULT_FAILURE_REPEAT_ALERT_HOURS.
         "failure_repeat_alert_hours": 6,
+        # Minutes of quiet after a user message before this profile's agent jobs may fire.
+        # None = off (jobs never wait for chat). 0 = wait only while a chat turn or voice/call
+        # is live. >0 also waits N minutes after the last user message. No auto-default.
+        "pause_while_chatting_minutes": None,
     },
     # Kanban multi-agent coordination. The dispatcher ticks every N seconds, reclaims stale claims,
     # promotes dependency-satisfied todos to ready, and fires `hermes -p <assignee> chat -q ...` per
@@ -1975,6 +1984,17 @@ DEFAULT_CONFIG = {
         # Running tasks with no heartbeat (last_heartbeat_at) for this many seconds are reclaimed to
         # ready on the next tick; a still-running local worker is terminated first. 0 = off.
         "dispatch_stale_timeout_seconds": 14400,
+        # Root for every kanban worker's TEMP/TMP/TMPDIR
+        # (<root>/<assignee>/<task_id>_<run_id>). None = leave the inherited env
+        # alone (no silent C: fallback). Set this to keep pytest/Playwright temp
+        # off the system drive (example: S:\\ForceAgents\\_tmp).
+        "worker_temp_root": None,
+        # Hours a run folder may sit idle under worker_temp_root before the
+        # janitor may delete it. Live owners (pid still running) are never removed.
+        "worker_temp_max_age_hours": 48,
+        # Minutes between gateway janitor passes over worker_temp_root. Also
+        # callable once via ``hermes kanban gc``. Never a Windows scheduled task.
+        "worker_temp_janitor_minutes": 60,
         # Each tick, requeue 'running' cards with broken claim bookkeeping (claim_lock or
         # claim_expires NULL with a dead worker) that TTL/crash/stale recovery can't see. False
         # keeps orphans frozen for manual forensics.
