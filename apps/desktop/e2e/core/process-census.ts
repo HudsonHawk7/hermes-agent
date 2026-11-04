@@ -13,6 +13,7 @@
 
 import { spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
+import * as os from 'node:os'
 import * as path from 'node:path'
 
 export interface ProcInfo {
@@ -166,6 +167,219 @@ export function isSandboxProcess(pid: number, hermesHome: string): boolean {
 /** Every live process whose command line carries `tag`. */
 export function processesTagged(tag: string): ProcInfo[] {
   return listProcesses().filter(proc => proc.pid !== process.pid && proc.cmdline.includes(tag))
+}
+
+/** True when a process looks like an Electron main/helper binary. */
+export function isElectronCmdline(cmdline: string): boolean {
+  const lower = cmdline.toLowerCase()
+
+  return (
+    lower.includes('electron.exe')
+    || /(^|[\\/])electron(\.exe)?(\s|$)/i.test(cmdline)
+    || lower.includes('electron.app')
+    || /[\\/]electron[\\/]dist[\\/]/i.test(cmdline)
+  )
+}
+
+/** Live Electron processes (excludes the current process). */
+export function listElectronProcesses(): ProcInfo[] {
+  return listProcesses().filter(proc => proc.pid !== process.pid && isElectronCmdline(proc.cmdline))
+}
+
+/**
+ * Electron processes whose command line mentions `marker` (userData path,
+ * HERMES_DESKTOP_APP_NAME, worktree path, etc.).
+ */
+export function electronProcessesMatching(marker: string): ProcInfo[] {
+  if (!marker) {
+    return []
+  }
+
+  const needles = [
+    marker,
+    marker.replace(/\//g, '\\'),
+    marker.replace(/\\/g, '/'),
+  ].map(value => value.toLowerCase())
+
+  return listElectronProcesses().filter(proc => {
+    const cmd = proc.cmdline.toLowerCase()
+
+    return needles.some(needle => needle && cmd.includes(needle))
+  })
+}
+
+/**
+ * Roots that host agent Playwright sandboxes (HERMES_HOME under pw-* / hermes-e2e-*).
+ * Never includes the live install — only scratch/tmp trees.
+ */
+export function defaultSandboxReapRoots(): string[] {
+  const roots = new Set<string>()
+
+  for (const key of ['HERMES_E2E_RUN_TMP', 'HERMES_E2E_CORE_ROOT', 'TMPDIR', 'TEMP', 'TMP'] as const) {
+    const value = process.env[key]
+
+    if (value) {
+      roots.add(path.resolve(value))
+    }
+  }
+
+  // Agent scratch on ILUM (Architect 10/29): leftover sandboxes under S:\ForceAgents\hera\tmp\pw-*
+  for (const candidate of [
+    'S:\\ForceAgents\\hera\\tmp',
+    'S:/ForceAgents/hera/tmp',
+    path.join('S:', 'ForceAgents', 'hera', 'tmp'),
+  ]) {
+    try {
+      if (fs.existsSync(candidate)) {
+        roots.add(path.resolve(candidate))
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  try {
+    roots.add(path.resolve(os.tmpdir()))
+  } catch {
+    // ignore
+  }
+
+  return [...roots]
+}
+
+function cmdlineMentionsRoot(cmdline: string, root: string): boolean {
+  if (!root) {
+    return false
+  }
+
+  const cmd = cmdline.toLowerCase()
+
+  const variants = [
+    root,
+    root.replace(/\//g, '\\'),
+    root.replace(/\\/g, '/'),
+  ].map(value => value.toLowerCase())
+
+  return variants.some(needle => needle.length > 3 && cmd.includes(needle))
+}
+
+function looksLikeSandboxCmdline(cmdline: string): boolean {
+  const lower = cmdline.toLowerCase()
+
+  // Main Electron launched by Playwright only gets apps/desktop + worktree path —
+  // user-data-dir / hermes-e2e markers land on child gpu/renderer processes.
+  const forceAgentsWorktree =
+    lower.includes('forceagents')
+    && (lower.includes('hermes-agent') || lower.includes('apps\\desktop') || lower.includes('apps/desktop'))
+
+  return (
+    lower.includes('hermes-e2e-')
+    || lower.includes('electron-user-data')
+    || /[\\/]core-[a-z0-9_-]+/i.test(cmdline)
+    || /[\\/]pw-[a-z0-9]+/i.test(cmdline)
+    || (lower.includes('gateway run') && (lower.includes('hermes-e2e') || /[\\/]pw-/i.test(cmdline) || lower.includes('forceagents')))
+    || (isElectronCmdline(cmdline) && (
+      lower.includes('hermes-e2e')
+      || /[\\/]pw-/i.test(cmdline)
+      || lower.includes('electron-user-data')
+      || forceAgentsWorktree
+    ))
+  )
+}
+
+/**
+ * Reap sandbox Electron / gateway-run leftovers whose parent is already dead.
+ * Safe against the live gateway: only matches processes whose cmdline points at
+ * a known sandbox root (pw- or hermes-e2e under agent tmp) OR an agent worktree
+ * Electron launch (ForceAgents + apps/desktop). Never bare "gateway run".
+ */
+export function orphanSandboxProcesses(roots: string[] = defaultSandboxReapRoots()): ProcInfo[] {
+  const all = listProcesses()
+  const live = new Set(all.map(proc => proc.pid))
+  const normalizedRoots = roots.map(root => path.resolve(root)).filter(Boolean)
+
+  // Also treat agent worktree paths as roots when HERMES_E2E points there.
+  for (const key of ['HERMES_DESKTOP_HERMES_ROOT'] as const) {
+    const value = process.env[key]
+
+    if (value) {
+      try {
+        normalizedRoots.push(path.resolve(value))
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  // Hard-coded ILUM agent worktree root (Architect 10/29).
+  for (const candidate of [
+    'S:\\ForceAgents\\hera\\work',
+    'S:/ForceAgents/hera/work',
+  ]) {
+    try {
+      if (fs.existsSync(candidate)) {
+        normalizedRoots.push(path.resolve(candidate))
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return all.filter(proc => {
+    if (proc.pid === process.pid) {
+      return false
+    }
+
+    // Parent still alive → owned by a running run; leave it alone.
+    // (Children of an orphan Electron main still have a live ppid = that main;
+    //  taskkill /T on the main reaps them.)
+    if (proc.ppid > 0 && live.has(proc.ppid)) {
+      return false
+    }
+
+    if (!looksLikeSandboxCmdline(proc.cmdline)) {
+      return false
+    }
+
+    // ForceAgents worktree electron is enough without a tmp root hit.
+    const lower = proc.cmdline.toLowerCase()
+
+    if (lower.includes('forceagents') && isElectronCmdline(proc.cmdline)) {
+      return true
+    }
+
+    // Require a sandbox-root marker so the live install gateway is never matched.
+    return normalizedRoots.some(root => cmdlineMentionsRoot(proc.cmdline, root))
+  })
+}
+
+/** Tree-kill orphan sandbox processes (dead parent + sandbox path). Returns killed pids. */
+export function reapOrphanSandboxProcesses(roots: string[] = defaultSandboxReapRoots()): number[] {
+  const killed: number[] = []
+
+  for (const proc of orphanSandboxProcesses(roots)) {
+    try {
+      if (process.platform === 'win32') {
+        spawnSync('taskkill', ['/PID', String(proc.pid), '/T', '/F'], {
+          stdio: 'ignore',
+          windowsHide: true,
+          timeout: 15_000,
+        })
+      } else {
+        try {
+          process.kill(-proc.pid, 'SIGKILL')
+        } catch {
+          process.kill(proc.pid, 'SIGKILL')
+        }
+      }
+
+      killed.push(proc.pid)
+    } catch {
+      // already gone or access denied
+    }
+  }
+
+  return killed
 }
 
 /** `value` single-quoted for the POSIX shell the terminal tool runs (Git Bash on Windows). */

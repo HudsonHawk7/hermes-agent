@@ -443,6 +443,14 @@ class AuthorityConnection:
         hidden = params.pop('hidden', False)
         if type(hidden) is not bool:
             raise RuntimeStoreError('invalid_params', field='hidden', detail='must be a boolean')
+        # Desktop group-member plumbing (openrpc session.create.room_plumbing / tui SessionCreateParams):
+        # pop before build_policy so CREATE_FIELDS never sees it as an unknown field. When set, force
+        # follow_profile_config so the member re-reads the profile route each turn (same as Bot Chat).
+        room_plumbing = params.pop('room_plumbing', False)
+        if type(room_plumbing) is not bool:
+            raise RuntimeStoreError('invalid_params', field='room_plumbing', detail='must be a boolean')
+        if room_plumbing:
+            params.setdefault('follow_profile_config', True)
         ref = title and resolve_titled_session(self.authority, self.actor, title, missing_ok=True)
         if (not ref and title == 'Bot Chat'
                 and not any(params.get(name) is True for name in BYPASS_FIELDS)

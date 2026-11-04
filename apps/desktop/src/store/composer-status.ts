@@ -432,6 +432,9 @@ export async function refreshBackgroundProcesses(sid: string): Promise<void> {
     // or the 5s timer hammers the gateway with 4001s for the window's lifetime.
     if (isSessionGoneForBackgroundPolling(error)) {
       markSessionGone(sid)
+      // Don't leave a frozen hollow-dot after the runtime is declared gone —
+      // there is no process left to poll under this id.
+      writeBackground(sid, [])
 
       return
     }
@@ -439,6 +442,47 @@ export async function refreshBackgroundProcesses(sid: string): Promise<void> {
     // Transient socket loss — the next trigger (event or poll) retries.
   }
 }
+
+// Global safety-net: status-stack only mounts for the visible/keep-alive pane,
+// so a session that still has running bg work can sit unmounted after the user
+// (or e2e) switches chats. Without a store-level poll, an early process.list
+// (notify before exit lands) freezes the sidebar hollow-dot forever. Arm only
+// while at least one runtime still reports running rows.
+const BACKGROUND_GLOBAL_POLL_MS = 5_000
+let backgroundGlobalPollTimer: null | ReturnType<typeof setInterval> = null
+
+function runningBackgroundRuntimeIds(): string[] {
+  const bg = $backgroundStatusBySession.get()
+
+  return Object.keys(bg).filter(sid => (bg[sid] ?? []).some(item => item.state === 'running'))
+}
+
+function syncBackgroundGlobalPoller() {
+  const running = runningBackgroundRuntimeIds()
+
+  if (running.length === 0) {
+    if (backgroundGlobalPollTimer !== null) {
+      clearInterval(backgroundGlobalPollTimer)
+      backgroundGlobalPollTimer = null
+    }
+
+    return
+  }
+
+  if (backgroundGlobalPollTimer !== null) {
+    return
+  }
+
+  backgroundGlobalPollTimer = setInterval(() => {
+    for (const sid of runningBackgroundRuntimeIds()) {
+      void refreshBackgroundProcesses(sid)
+    }
+  }, BACKGROUND_GLOBAL_POLL_MS)
+}
+
+$backgroundStatusBySession.listen(() => {
+  syncBackgroundGlobalPoller()
+})
 
 /** X on a finished row: drop it now and keep it dropped across refreshes. */
 export function dismissBackgroundProcess(sid: string, id: string) {
