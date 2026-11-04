@@ -87,9 +87,9 @@ import {
   updateGroupChat
 } from './group-chat'
 import type { GroupChatRoom } from './group-chat'
+import { isGroupChatNearBottom, observeGroupChatLogResize, scrollGroupChatToBottom } from './group-chat-follow'
 import { GroupClarifyCard, GroupImageControls, GroupMentionInput } from './group-chat-parts'
 import type { GroupRoomPrompt } from './group-chat-parts'
-import { isGroupChatNearBottom, observeGroupChatLogResize, scrollGroupChatToBottom } from './group-chat-follow'
 import { GroupMemberPicker } from './group-chat-view-members'
 import { compressGroupMemberHistory } from './group-compress'
 import { sweepExternalGroupWrites } from './group-external-writes'
@@ -591,6 +591,7 @@ export function GroupChatWorkspace(props: GroupChatWorkspaceProps) {
   const bindings = useValue($canonicalGroupBindings)
   const connectionId = useValue(host.state.connectionId)
   const profile = useValue(host.state.profile)
+
   const binding = canonicalGroupBindingFor(
     bindings,
     { connectionId: connectionId ?? '', profile },
@@ -626,6 +627,7 @@ function GroupExecutionGate(props: GroupChatWorkspaceProps) {
     if (mode !== 'canonical') {
       return
     }
+
     let cancelled = false
     setLookup({ source, status: 'pending' })
     setError('')
@@ -946,7 +948,6 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
   const logContentRef = useRef<HTMLDivElement | null>(null)
   const bottomSentinelRef = useRef<HTMLDivElement | null>(null)
   const stickToBottomRef = useRef(true)
-  // eslint-disable-next-line no-restricted-syntax -- pill visibility mirrors the live scroll stick ref
   const [showJumpToLatest, setShowJumpToLatest] = useState(false)
 
   const jumpToLatest = (behavior: ScrollBehavior = 'auto') => {
@@ -974,6 +975,13 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
       return
     }
 
+    // First layout of this room (and each room switch): land at the latest
+    // before position sync. A sync read of scrollTop 0 here would mark
+    // stick=false and skip every later follow, including ResizeObserver.
+    stickToBottomRef.current = true
+    setShowJumpToLatest(false)
+    scrollGroupChatToBottom(viewport, 'auto')
+
     const onScroll = () => {
       const near = isGroupChatNearBottom(viewport)
       stickToBottomRef.current = near
@@ -983,12 +991,10 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
     viewport.addEventListener('scroll', onScroll, {
       passive: true
     })
-    onScroll()
 
     return () => viewport.removeEventListener('scroll', onScroll)
   }, [group])
 
-  // eslint-disable-next-line no-restricted-syntax -- ResizeObserver owns height-follow while stuck
   useEffect(() => {
     const viewport = logViewportRef.current
     const content = logContentRef.current
@@ -1006,7 +1012,6 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
     }
     // jumpToLatest closes over stable refs; length/running still force a pass
     // when stick is true (empty → first message, working indicator).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room.log.length, room.running])
 
   // Retained-pane reopen (#89835 follow-up): a hot-mounted room pane stays
@@ -1022,7 +1027,6 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
     }
 
     wasVisibleRef.current = visible
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible])
   const imagesFor = (thread: null | string) => pendingImages[thread ?? 'main'] || []
 

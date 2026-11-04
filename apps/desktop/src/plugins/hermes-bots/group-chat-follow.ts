@@ -32,6 +32,7 @@ export function scrollGroupChatToBottom(viewport: HTMLElement, behavior: ScrollB
       behavior,
       top
     })
+
     return
   }
 
@@ -62,24 +63,30 @@ export function observeGroupChatLogResize(
 
 /**
  * Enter completes a mention only while the menu is open with a real option AND
- * the typed query is still a PREFIX of that option. A full exact match means
- * the user finished the name and wants to send — never re-insert. A closed or
- * empty menu never swallows Enter.
+ * the typed query is still a PREFIX of the listed options. A full exact match
+ * of ANY listed handle means the user finished the name and wants to send —
+ * never re-insert a sibling that sorts first (`@second` must not become
+ * `@second-bot`). A closed or empty menu never swallows Enter. A single
+ * handle string is accepted the same as a one-item list.
  */
 export function shouldCompleteMentionOnEnter(
   menuOpen: boolean,
-  activeHandle: null | string | undefined,
+  optionHandles: null | readonly (null | string | undefined)[] | string | undefined,
   tokenQuery: string
 ): boolean {
   if (!menuOpen) {
     return false
   }
 
-  const handle = String(activeHandle || '')
-    .trim()
-    .toLowerCase()
+  const handles = (Array.isArray(optionHandles) ? optionHandles : [optionHandles])
+    .map(handle =>
+      String(handle || '')
+        .trim()
+        .toLowerCase()
+    )
+    .filter(Boolean)
 
-  if (!handle) {
+  if (!handles.length) {
     return false
   }
 
@@ -87,8 +94,8 @@ export function shouldCompleteMentionOnEnter(
     .trim()
     .toLowerCase()
 
-  // Full name already typed → send the draft, do not re-insert the mention.
-  if (query === handle) {
+  // Full unique handle already typed among the listed options → send.
+  if (handles.some(handle => handle === query)) {
     return false
   }
 

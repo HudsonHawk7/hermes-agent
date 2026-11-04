@@ -30,6 +30,7 @@ describe('isGroupChatNearBottom', () => {
 describe('scrollGroupChatToBottom', () => {
   it('scrolls the viewport to its scrollHeight', () => {
     const scrollTo = vi.fn()
+
     const viewport = {
       scrollHeight: 2400,
       scrollTo,
@@ -69,11 +70,13 @@ describe('observeGroupChatLogResize', () => {
 
     const content = document.createElement('div')
     const scrollTo = vi.fn()
+
     const viewport = {
       scrollHeight: 800,
       scrollTo,
       scrollTop: 0
     } as unknown as HTMLElement
+
     let stick = true
 
     const stop = observeGroupChatLogResize(
@@ -115,5 +118,12 @@ describe('shouldCompleteMentionOnEnter', () => {
     expect(shouldCompleteMentionOnEnter(false, 'alpha', 'al')).toBe(false)
     expect(shouldCompleteMentionOnEnter(true, null, 'al')).toBe(false)
     expect(shouldCompleteMentionOnEnter(true, '', 'al')).toBe(false)
+  })
+
+  it('sends when the query is an exact handle even if another prefix is listed first', () => {
+    expect(shouldCompleteMentionOnEnter(true, ['second-bot', 'second'], 'second')).toBe(false)
+    expect(shouldCompleteMentionOnEnter(true, ['second-bot', 'second'], 'sec')).toBe(true)
+    expect(shouldCompleteMentionOnEnter(true, ['darkeye', 'dark'], 'dark')).toBe(false)
+    expect(shouldCompleteMentionOnEnter(true, 'second-bot', 'second')).toBe(true)
   })
 })

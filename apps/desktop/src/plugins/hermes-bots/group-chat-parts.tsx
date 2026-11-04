@@ -173,8 +173,8 @@ interface GroupMentionInputProps {
  *  wraps the plain SDK Input with a member-scoped popover: @everyone/@all
  *  quick picks plus each seated member's handle. Insertion produces exactly
  *  the strings parseGroupChatMentions resolves. Keyboard: Up/Down navigate,
- *  Enter/Tab insert (Enter falls through to submit when the popover is
- *  closed), Escape dismisses. */
+ *  Tab inserts, Enter inserts only on a prefix (an exact unique handle
+ *  sends), Escape dismisses. */
 export function GroupMentionInput({ members, onChange, onSubmitDraft, value, ...inputProps }: GroupMentionInputProps) {
   const b = useBots()
   const allMeta: Record<string, BotMeta> = useValue($botMeta)
@@ -324,9 +324,10 @@ export function GroupMentionInput({ members, onChange, onSubmitDraft, value, ...
 
             // Tab always completes the highlighted option while the menu is
             // open. Enter only completes while the typed query is still a
-            // PREFIX of that option — a full exact match means the user
-            // finished the name and wants to send. Shift+Enter never takes
-            // the mention path (falls through for a native newline).
+            // PREFIX of the listed options — a full exact match of ANY
+            // option means the user finished the name and wants to send.
+            // Shift+Enter never takes the mention path (falls through for a
+            // native newline).
             if (event.key === 'Tab' && !event.shiftKey) {
               event.preventDefault()
               insert(options[active].handle)
@@ -338,7 +339,13 @@ export function GroupMentionInput({ members, onChange, onSubmitDraft, value, ...
               event.preventDefault()
               const pick = options[active]
 
-              if (shouldCompleteMentionOnEnter(open, pick?.handle, token?.query || '')) {
+              if (
+                shouldCompleteMentionOnEnter(
+                  open,
+                  options.map(option => option.handle),
+                  token?.query || ''
+                )
+              ) {
                 insert(pick.handle)
 
                 return
