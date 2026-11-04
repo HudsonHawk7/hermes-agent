@@ -9,6 +9,8 @@
  *  - show()/showInactive() are no-ops so ready-to-show cannot raise a popup
  *  - uncaughtException / unhandledRejection log to stderr and exit 1 so
  *    Electron never raises its native error dialog (hidden windows can't hide it)
+ *  - Chromium media/occlusion switches stay off so a hidden window still
+ *    advances <video> frames for webContents.capturePage()
  *
  * Import this module FIRST in main.ts so the crash handlers are registered
  * before link-metadata (or any other module) evaluates.
@@ -164,4 +166,43 @@ export function installE2eHiddenWindowGuard(appApi: AppLike, env: E2eHiddenEnv =
       }
     })
   })
+}
+
+export type ChromiumSwitch = {
+  name: string
+  value?: string
+}
+
+/**
+ * Process-wide Chromium switches for hidden e2e only.
+ * Production must not set these — they pin visibilityState and burn CPU at idle.
+ */
+export function e2eHiddenChromiumSwitches(env: E2eHiddenEnv = process.env): ChromiumSwitch[] {
+  if (!isDesktopE2eHidden(env)) {
+    return []
+  }
+
+  return [
+    { name: 'disable-background-timer-throttling' },
+    { name: 'disable-backgrounding-occluded-windows' },
+    { name: 'disable-background-media-suspend' },
+    { name: 'disable-features', value: 'CalculateNativeWinOcclusion' },
+  ]
+}
+
+export function applyE2eHiddenChromiumSwitches(
+  commandLine: { appendSwitch: (name: string, value?: string) => void },
+  env: E2eHiddenEnv = process.env,
+): ChromiumSwitch[] {
+  const switches = e2eHiddenChromiumSwitches(env)
+
+  for (const flag of switches) {
+    if (flag.value) {
+      commandLine.appendSwitch(flag.name, flag.value)
+    } else {
+      commandLine.appendSwitch(flag.name)
+    }
+  }
+
+  return switches
 }

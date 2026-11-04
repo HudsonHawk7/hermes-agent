@@ -190,3 +190,37 @@ describe('installE2eHiddenWindowGuard', () => {
     expect(throttling).toBe(false)
   })
 })
+
+describe('e2eHiddenChromiumSwitches', () => {
+  test('empty when hidden mode is off', async () => {
+    const { e2eHiddenChromiumSwitches } = await import('./e2e-hidden')
+    expect(e2eHiddenChromiumSwitches({})).toEqual([])
+    expect(e2eHiddenChromiumSwitches({ HERMES_DESKTOP_E2E_HIDDEN: '0' })).toEqual([])
+  })
+
+  test('lists media and occlusion switches when hidden', async () => {
+    const { e2eHiddenChromiumSwitches } = await import('./e2e-hidden')
+    const names = e2eHiddenChromiumSwitches({ HERMES_DESKTOP_E2E_HIDDEN: '1' }).map(flag => flag.name)
+    expect(names).toContain('disable-background-timer-throttling')
+    expect(names).toContain('disable-backgrounding-occluded-windows')
+    expect(names).toContain('disable-background-media-suspend')
+    expect(names).toContain('disable-features')
+  })
+
+  test('applyE2eHiddenChromiumSwitches is a no-op when off', async () => {
+    const { applyE2eHiddenChromiumSwitches } = await import('./e2e-hidden')
+    const appendSwitch = vi.fn()
+    expect(applyE2eHiddenChromiumSwitches({ appendSwitch }, {})).toEqual([])
+    expect(appendSwitch).not.toHaveBeenCalled()
+  })
+
+  test('applyE2eHiddenChromiumSwitches appends names and values', async () => {
+    const { applyE2eHiddenChromiumSwitches } = await import('./e2e-hidden')
+    const appendSwitch = vi.fn()
+    const applied = applyE2eHiddenChromiumSwitches({ appendSwitch }, { HERMES_DESKTOP_E2E_HIDDEN: '1' })
+    expect(applied.length).toBeGreaterThan(0)
+    expect(appendSwitch).toHaveBeenCalled()
+    const occlusion = applied.find(flag => flag.name === 'disable-features')
+    expect(occlusion?.value).toBe('CalculateNativeWinOcclusion')
+  })
+})

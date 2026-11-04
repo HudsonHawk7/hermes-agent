@@ -5,6 +5,7 @@ import './e2e-guard'
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process'
 
 import {
+  applyE2eHiddenChromiumSwitches,
   applyE2eHiddenWindowOptions,
   installE2eHiddenWindowGuard,
   isDesktopE2eHidden
@@ -1261,6 +1262,10 @@ ipcMain.handle('hermes:embed-host:origin', () => embedHostOrigin())
 // minimized, exactly as before) and return to Chromium's default throttling
 // once the work settles.
 app.commandLine.appendSwitch('disable-renderer-backgrounding')
+
+if (isDesktopE2eHidden()) {
+  applyE2eHiddenChromiumSwitches(app.commandLine)
+}
 
 const SOURCE_REPO_ROOT = path.resolve(APP_ROOT, '../..')
 
