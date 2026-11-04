@@ -6,11 +6,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import uuid
 from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Optional
 
 from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import BasePlatformAdapter, SendResult
+from gateway.platforms.base import BasePlatformAdapter, SendResult, validate_media_delivery_path
 from gateway.session import SessionSource
 from gateway.session_contract import CANONICAL_GATEWAY_PROTOCOL
 from hermes_state_runtime import RuntimeStoreError
@@ -19,7 +22,15 @@ logger = logging.getLogger(__name__)
 
 
 class LocalSessionAdapter(BasePlatformAdapter):
-    """Delivery stays in the canonical event stream; no second local transport."""
+    """Delivery stays in the canonical event stream; no second local transport.
+
+    Native media: Desktop renders ``MEDIA:<path>`` tags from the turn transcript the same way
+    ``image_generate`` results appear. ``send_image_file`` (and siblings) therefore acknowledge
+    a valid on-disk path instead of the base fallback notice that logs
+    ``native image send unavailable`` and tries to post a false \"couldn't send\" through the
+    no-op ``send``. A path that cannot be shown publishes a named reason into the live
+    session stream so the chat surfaces it, not only the log.
+    """
 
     def __init__(self, authority):
         super().__init__(PlatformConfig(enabled=True), Platform.LOCAL)
@@ -54,6 +65,124 @@ class LocalSessionAdapter(BasePlatformAdapter):
 
     async def edit_message(self, chat_id, message_id, content, *, finalize=False):
         return SendResult(success=True, message_id=message_id)
+
+    def _resolve_live_session(self, chat_id):
+        """Return ``(live, session_id)`` for a local chat_id, or ``(None, None)``."""
+        sessions = getattr(self.authority, "sessions", None) or {}
+        live = sessions.get(chat_id)
+        if live is not None:
+            return live, chat_id
+        for sid, candidate in sessions.items():
+            src = getattr(candidate, "source", None)
+            if src is not None and getattr(src, "chat_id", None) == chat_id:
+                return candidate, sid
+        return None, None
+
+    def _publish_local_chat_text(self, chat_id, text: str) -> bool:
+        """Publish assistant-visible text into the live session event stream.
+
+        Used for named media failures so the Desktop chat shows a reason, not only a log line.
+        Returns whether a live stream accepted the frame.
+        """
+        live, sid = self._resolve_live_session(chat_id)
+        stream = getattr(live, "event_stream", None) if live is not None else None
+        if stream is None:
+            logger.warning("[Local] no live session stream for media notice chat_id=%s text=%r", chat_id, text)
+            return False
+        try:
+            stream.publish(sid, {"text": str(text)}, event_type="message.delta")
+            return True
+        except Exception as err:
+            logger.warning("[Local] media notice publish failed: %s", err)
+            return False
+
+    def _local_media_failure_text(self, kind: str, path: str, file_name: Optional[str] = None) -> str:
+        """Named chat-facing reason when a path cannot be shown on Desktop."""
+        display = file_name or (Path(str(path)).name if path else kind)
+        raw = str(path or "")
+        try:
+            exists = bool(raw) and Path(os.path.expanduser(raw)).is_file()
+        except (OSError, RuntimeError, ValueError):
+            exists = False
+        if not raw:
+            return f"Couldn't show the {kind}: no path given"
+        if not exists:
+            return f"Couldn't show the {kind}: file not found ({display})"
+        return f"Couldn't show the {kind}: path not allowed ({display})"
+
+    async def _send_local_media_file(
+        self,
+        chat_id,
+        path: str,
+        *,
+        kind: str,
+        caption: Optional[str] = None,
+        reply_to=None,
+        metadata: Optional[dict[str, Any]] = None,
+        file_name: Optional[str] = None,
+    ) -> SendResult:
+        """Native Local media: valid file → success (Desktop renders MEDIA tags); else named error."""
+        del reply_to  # Local has no platform reply-to; transcript owns threading.
+        safe = validate_media_delivery_path(str(path or ""), session_key=str(chat_id or ""))
+        if safe:
+            # Desktop already shows MEDIA: tags from message.complete / image_generate cards.
+            # Acknowledge so the base fallback never logs \"native … send unavailable\" or posts
+            # a false couldn't-send notice through the no-op send().
+            return SendResult(success=True, message_id=uuid.uuid4().hex)
+        notice = self._local_media_failure_text(kind, str(path or ""), file_name=file_name)
+        text = f"{caption}\n{notice}" if caption else notice
+        self._publish_local_chat_text(chat_id, text)
+        return SendResult(success=False, error=notice)
+
+    async def send_image_file(
+        self, chat_id, image_path, caption=None, reply_to=None, metadata=None, **kwargs,
+    ) -> SendResult:
+        return await self._send_local_media_file(
+            chat_id, image_path, kind="image", caption=caption, reply_to=reply_to,
+            metadata=metadata, file_name=kwargs.get("file_name"),
+        )
+
+    async def send_document(
+        self, chat_id, file_path, caption=None, file_name=None, reply_to=None, metadata=None, **kwargs,
+    ) -> SendResult:
+        return await self._send_local_media_file(
+            chat_id, file_path, kind="document", caption=caption, reply_to=reply_to,
+            metadata=metadata, file_name=file_name or kwargs.get("file_name"),
+        )
+
+    async def send_video(
+        self, chat_id, video_path, caption=None, reply_to=None, metadata=None, **kwargs,
+    ) -> SendResult:
+        return await self._send_local_media_file(
+            chat_id, video_path, kind="video", caption=caption, reply_to=reply_to,
+            metadata=metadata, file_name=kwargs.get("file_name"),
+        )
+
+    async def send_voice(
+        self, chat_id, audio_path, caption=None, reply_to=None, metadata=None, **kwargs,
+    ) -> SendResult:
+        return await self._send_local_media_file(
+            chat_id, audio_path, kind="audio", caption=caption, reply_to=reply_to,
+            metadata=metadata, file_name=kwargs.get("file_name"),
+        )
+
+    async def send_animation(
+        self, chat_id, animation_url, caption=None, reply_to=None, metadata=None, **kwargs,
+    ) -> SendResult:
+        path = kwargs.get("animation_path") or animation_url or ""
+        if isinstance(path, str) and path.startswith(("http://", "https://")):
+            # Remote GIF/URL — Desktop cannot natively fetch as a local MEDIA tag; no false notice.
+            return SendResult(success=True, message_id=uuid.uuid4().hex)
+        return await self._send_local_media_file(
+            chat_id, path, kind="image", caption=caption, reply_to=reply_to,
+            metadata=metadata, file_name=kwargs.get("file_name"),
+        )
+
+    async def report_media_drop(self, chat_id, text: str, metadata=None) -> SendResult:
+        """Surface a filter-dropped MEDIA path as a named error in the Desktop chat."""
+        del metadata
+        self._publish_local_chat_text(chat_id, text)
+        return SendResult(success=True, message_id=uuid.uuid4().hex)
 
     async def _record_delivery_obligation(self, *args, **kwargs):
         # No platform ACK to lose: viewers replay the durable transcript. A ledger row would only
