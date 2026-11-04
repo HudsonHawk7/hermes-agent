@@ -1730,7 +1730,8 @@ export function appendGroupChatEntry(
   from: GroupMessageAuthor,
   text: string,
   thread?: null | string,
-  images?: Attachment[]
+  images?: Attachment[],
+  vision?: GroupMessage['vision']
 ): GroupMessage {
   const priorLog = ($groupChats.get()[group] || {}).log || []
   const lastEntry = priorLog[priorLog.length - 1]
@@ -1754,6 +1755,10 @@ export function appendGroupChatEntry(
     // [{ name, data }] — data URLs. Persisted with the room log so reloads
     // keep showing what the members were shown.
     entry.images = images
+  }
+
+  if (vision && vision.count > 0) {
+    entry.vision = vision
   }
 
   // #93127 insurance: a residual double-append path (stale loop + fresh
