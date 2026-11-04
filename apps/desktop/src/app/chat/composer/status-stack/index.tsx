@@ -11,7 +11,6 @@ import { BillingBanner } from '@/components/billing-banner'
 import { composerDockCard } from '@/components/chat/composer-dock'
 import { StatusSection } from '@/components/chat/status-section'
 import { FreeTierNoticeStrip, useFreeTierNoticeOwner } from '@/components/free-tier/notice-strip'
-import { usePaneVisible } from '@/components/pane-shell/pane-visibility'
 import { SharedMetricsConsentStrip } from '@/components/shared-metrics/consent-strip'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
@@ -181,26 +180,24 @@ export function ComposerStatusStack({ onSubmit, queue, sessionId }: ComposerStat
   // dead `localhost:5174` chips stick around. On-disk file previews are kept.
   const visiblePreviews = previews.filter(item => hasRunningBackground || !isLocalhostPreview(item.target))
 
-  // Keep-alive keeps every ever-active tab mounted, so without this gate each
-  // background tile's safety-net poll fires every 5s — N sessions means N
-  // gateway round-trips plus shared-map churn forever. Hidden tabs skip the
-  // poll (event-driven refreshes in use-message-stream still land through the
-  // store) and resume it on reveal via `paneVisible` in the dep array.
-  const paneVisible = usePaneVisible()
-
+  // Keep-alive mounts every ever-active tab, so we only arm this safety-net
+  // while a running background row is present — idle keep-alives stay quiet.
+  // Do NOT gate on paneVisible / document.visibilityState: a process notify
+  // can land before process.list shows the exit, and when the user (or e2e
+  // under HERMES_DESKTOP_E2E_HIDDEN) is on another tab the early refresh
+  // would stick forever without a follow-up poll. hasRunningBackground already
+  // bounds the set; once the exit reconciles the timer disarms.
   useEffect(() => {
-    if (!sessionId || !hasRunningBackground || !paneVisible) {
+    if (!sessionId || !hasRunningBackground) {
       return
     }
 
     const timer = setInterval(() => {
-      if (document.visibilityState === 'visible') {
-        void refreshBackgroundProcesses(sessionId)
-      }
+      void refreshBackgroundProcesses(sessionId)
     }, BACKGROUND_POLL_MS)
 
     return () => clearInterval(timer)
-  }, [hasRunningBackground, sessionId, paneVisible])
+  }, [hasRunningBackground, sessionId])
 
   const openAgents = () => navigate(AGENTS_ROUTE)
 

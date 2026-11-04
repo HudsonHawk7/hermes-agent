@@ -291,8 +291,21 @@ function asRpcError(value: unknown, fallback: string): unknown {
 
   if (isObject) {
     const text = hasStringMessage && String(message).trim() ? String(message) : fallback
-    const error = new Error(text)
+    const error = new Error(text) as Error & { code?: unknown; data?: unknown }
     error.cause = value
+    // Preserve JSON-RPC code/data so callers that branch on 4007/4001 still work
+    // after a cross-realm or non-string-name rejection is re-wrapped.
+    const code = (value as { code?: unknown }).code
+
+    if (typeof code === 'number') {
+      error.code = code
+    }
+
+    const data = (value as { data?: unknown }).data
+
+    if (data != null && typeof data === 'object') {
+      error.data = data
+    }
 
     return error
   }

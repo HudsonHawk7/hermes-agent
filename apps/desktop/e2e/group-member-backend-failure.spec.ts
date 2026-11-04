@@ -4,7 +4,7 @@ import {
   TOOL_THEN_FAILURE_TRIGGER
 } from '../../../tests-js/scripts/mock-server'
 
-import { type MockBackendFixture, setupMockBackend, waitForAppReady } from './fixtures'
+import { type MockBackendFixture, selectSessionTab, setupMockBackend, waitForAppReady } from './fixtures'
 import { expect, test } from './test'
 
 // #92760 "thinks then never speaks": when a member's backend fails the turn
@@ -54,11 +54,11 @@ async function createRoom(page: MockBackendFixture['page']) {
   await dialog.getByRole('textbox', { name: 'Group name' }).fill(ROOM)
   await dialog.getByRole('button', { name: 'Create Group (2)' }).click()
 
-  const groupTab = page.getByRole('tab', { name: new RegExp(`${ROOM} Close`) })
   const groupComposer = page.getByRole('textbox', { name: `Message ${ROOM}` }).filter({ visible: true })
-  await expect(groupTab).toBeVisible({ timeout: 20_000 })
-  await expect(groupTab).toHaveAttribute('aria-selected', 'true')
-  await expect(groupComposer).toBeVisible()
+  await expect(async () => {
+    await selectSessionTab(page, ROOM, 10_000)
+    await expect(groupComposer).toBeVisible({ timeout: 3_000 })
+  }).toPass({ timeout: 30_000 })
 
   return groupComposer
 }
@@ -85,14 +85,11 @@ test('a member whose backend fails the turn is reported at once, not read as bus
   // The gateway has failed the turn; the room must say so within the base
   // turn timeout instead of extending the deadline on the retained snapshot.
   const activity = page.getByRole('button', { name: /^Activity/ })
-  const groupTab = page.getByRole('tab', { name: new RegExp(`${ROOM} Close`) })
 
   await expect(async () => {
     // A just-created bot's background intro turn can front that bot's chat
     // tab and yank the center away from the room; re-select the room first.
-    if ((await groupTab.getAttribute('aria-selected')) !== 'true') {
-      await groupTab.click()
-    }
+    await selectSessionTab(page, ROOM, 5_000)
 
     await expect(activity).toContainText('Programmer hit an error', { timeout: 5_000 })
   }).toPass({ timeout: 120_000 })
@@ -125,12 +122,9 @@ test('a member that fails after pre-tool text is reported, and that text is not 
   await groupComposer.press('Enter')
 
   const activity = page.getByRole('button', { name: /^Activity/ })
-  const groupTab = page.getByRole('tab', { name: new RegExp(`${ROOM} Close`) })
 
   await expect(async () => {
-    if ((await groupTab.getAttribute('aria-selected')) !== 'true') {
-      await groupTab.click()
-    }
+    await selectSessionTab(page, ROOM, 5_000)
 
     await expect(activity).toContainText('Programmer hit an error', { timeout: 5_000 })
   }).toPass({ timeout: 150_000 })

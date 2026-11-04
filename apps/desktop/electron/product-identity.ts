@@ -39,7 +39,19 @@ export function applyDesktopIdentity(
     return null
   }
 
-  const userData: string = path.join(app.getPath('appData'), identity.appNamePascal)
+  let appData: string
+
+  try {
+    appData = app.getPath('appData')
+  } catch {
+    // Faked HOME/APPDATA that Electron cannot resolve yet — leave userData alone
+    // (e2e sets HERMES_DESKTOP_USER_DATA_DIR and main.ts pins it).
+    app.setName(identity.displayName)
+
+    return identity.displayName
+  }
+
+  const userData: string = path.join(appData, identity.appNamePascal)
   mkdirSync(userData, { recursive: true })
   app.setPath('userData', userData)
   app.setName(identity.displayName)

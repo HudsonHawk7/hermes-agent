@@ -1142,33 +1142,47 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         return combined
 
     def _append_auto_media_tags(self, final_response: str, result, agent_history, history_media_paths) -> str:
-        """Append MEDIA:<path> tags from tool results (e.g. TTS) that the model's final text omits, so
-        extract_media() delivers each file once. Scoped to THIS turn (slice at len(agent_history)) so
-        a stale MEDIA: path from an earlier turn never rides a later reply; the history-path dedup is
-        the secondary guard — and the sole one when mid-run compression shrank the list."""
-        from gateway.run import _collect_auto_append_media_tags
-        if "MEDIA:" in final_response:
-            return final_response
-        # Scan tool results for MEDIA:<path> tags that need to be delivered as native audio/file
-        # attachments. The TTS tool embeds MEDIA: tags in its JSON response, but the model's final text
-        # reply usually doesn't include them. We collect unique tags from tool results and append any that
-        # aren't already present in the final response, so the adapter's extract_media() can find and
-        # deliver the files exactly once. Scope the scan to THIS turn's tool results only. ``agent_history``
-        # was passed into run_conversation as ``conversation_history``, so the agent's returned ``messages``
-        # list is ``agent_history`` followed by the messages produced this turn. Slicing at
-        # ``len(agent_history)`` isolates the current turn precisely, so a stale MEDIA: path emitted by a
-        # tool several turns earlier (still present in the full message list) can never leak onto a later
-        # text-only reply. (Fixes #34608) Path-based deduplication against _history_media_paths (collected
-        # before run_conversation) is retained as a secondary guard. It is also the sole guard on the
-        # fallback branch taken when mid-run context compression shrinks the message list below the original
-        # history length, preserving the compression-safe behaviour of #160.
+        """Append MEDIA:<path> tags the model's final text omits so extract_media() delivers each once.
+
+        Sources (this turn only, sliced at ``len(agent_history)``):
+        - Producer tool results (TTS / image_generate) via ``_collect_auto_append_media_tags``.
+        - Cron / no-agent bot-chat admissions: MEDIA lines from the script output on the inbound
+          user message (``[Cronjob "…" output …]``). Pictures must not depend on the companion
+          copying paths; mangled or omitted tags still attach from the script itself.
+
+        Merge, don't skip: if the reply already has some MEDIA tags (including wrong ones), still
+        append any missing paths from tools/cron. Dedup by path already present in final_response
+        and against ``history_media_paths``.
+        """
+        from gateway.platforms.base import BasePlatformAdapter
+        from gateway.run import _collect_auto_append_media_tags, _collect_cron_inbound_media_tags
+
         media_tags, has_voice_directive = _collect_auto_append_media_tags(
             result.get("messages", []), history_offset=len(agent_history), history_media_paths=history_media_paths,
         )
-        if not media_tags:
+        cron_tags = _collect_cron_inbound_media_tags(
+            result.get("messages", []), history_offset=len(agent_history), history_media_paths=history_media_paths,
+        )
+        all_tags = list(dict.fromkeys([*media_tags, *cron_tags]))
+        existing_paths = set()
+        if "MEDIA:" in (final_response or ""):
+            present, _ = BasePlatformAdapter.extract_media(final_response)
+            existing_paths.update(path for path, _is_voice in present)
+        missing = []
+        for tag in all_tags:
+            path = tag.removeprefix("MEDIA:") if tag.startswith("MEDIA:") else tag
+            if path and path not in existing_paths:
+                missing.append(tag if tag.startswith("MEDIA:") else f"MEDIA:{tag}")
+                existing_paths.add(path)
+        voice_prefix = []
+        if has_voice_directive and "[[audio_as_voice]]" not in (final_response or ""):
+            voice_prefix = ["[[audio_as_voice]]"]
+        if not missing and not voice_prefix:
             return final_response
-        unique_tags = (["[[audio_as_voice]]"] if has_voice_directive else []) + list(dict.fromkeys(media_tags))
-        return final_response + "\n" + "\n".join(unique_tags)
+        suffix = "\n".join(voice_prefix + missing)
+        if not (final_response or "").strip():
+            return suffix
+        return final_response + "\n" + suffix
 
     def run_sync(self):
         from contextlib import ExitStack

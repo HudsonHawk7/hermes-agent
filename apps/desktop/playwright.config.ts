@@ -34,18 +34,33 @@ export default defineConfig({
    * default testMatch would claim those files too and run them twice.
    * e2e/core/ has its own config (retries 0, one worker) and CI job. */
   testIgnore: ['**/*.unit.test.ts', 'core/**', 'update/**'],
+  /* Cap the whole run so a hung Electron tree cannot outlive its owner
+   * (Architect 10/29: agent runs that kept going after the worker died).
+   * Local agent runs need ~60m for the full desktop suite on one worker. */
+  globalTimeout: process.env.CI ? 45 * 60_000 : 60 * 60_000,
   /* The desktop app can take a while to bootstrap on cold CI runners — 90 s
    * per test gives us headroom without masking real hangs. */
   timeout: 90_000,
   retries: process.env.CI ? 1 : 0,
   /* A stray `test.only` must never let CI report a partial green run. */
   forbidOnly: !!process.env.CI,
-  /* Each test gets its own worker so the Electron process is fully isolated. */
+  /* Each test gets its own worker so the Electron process is fully isolated.
+   * Agent runs on Windows must stay single-worker: parallel Electron trees
+   * race the afterAll leak assert and leave CONNECTING windows on the desk
+   * when a worker dies (t_ecc82493). CI may override via PLAYWRIGHT_WORKERS. */
   fullyParallel: false,
+  workers: process.env.PLAYWRIGHT_WORKERS
+    ? Number(process.env.PLAYWRIGHT_WORKERS)
+    : 1,
   reporter: reporters,
   use: {
-    screenshot: 'on',
-    trace: { mode: 'on', screenshots: true, snapshots: true, sources: true },
+    screenshot: 'only-on-failure',
+    // `trace: on` copies network HARs that Windows deletes mid-wrapApiCall under
+    // Electron (ENOENT on *-pwnetcopy-*.network). retain-on-failure keeps proof
+    // without breaking green paths.
+    trace: process.env.CI
+      ? { mode: 'on', screenshots: true, snapshots: true, sources: true }
+      : { mode: 'retain-on-failure', screenshots: true, snapshots: true, sources: false },
     // Emulate prefers-reduced-motion: reduce so all CSS transitions and
     // animations resolve instantly. This prevents boot/connecting overlays
     // from being mid-fade when a screenshot fires, and skips JS-driven exit
