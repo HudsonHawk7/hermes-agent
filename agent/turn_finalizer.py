@@ -630,9 +630,19 @@ def finalize_turn(
         if final_response and not interrupted:
             final_response, _, _ = apply_llm_output_transform(agent, final_response, turn_id=turn_id, logger=logger)
         _close_transcript_tail(agent, messages, final_response, interrupted, _recovered_from_stream)
+        _hist = conversation_history
         if not interrupted and not failed:
             _micro_compact_after_turn(agent, messages, final_response, logger, effective_task_id)
-        agent._persist_session(messages, conversation_history)
+            # Idle summary was decided at turn start but must not run on the live
+            # request (same local slot, cache bust). Run it now that the reply exists.
+            from agent.conversation_compression import conversation_history_after_compression
+            from agent.turn_context_compaction import run_deferred_idle_compaction
+            _before = messages
+            _idle_msgs = run_deferred_idle_compaction(agent, messages)
+            if _idle_msgs is not _before and isinstance(_idle_msgs, list) and _idle_msgs:
+                messages[:] = _idle_msgs
+                _hist = conversation_history_after_compression(agent, messages, conversation_history)
+        agent._persist_session(messages, _hist)
 
     _guarded_cleanup("persist_session", _persist_step, _cleanup_errors, logger)
 

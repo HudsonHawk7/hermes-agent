@@ -1,11 +1,12 @@
 """Turn-start compaction for ``build_turn_context`` plus the small compression-attempt
 helpers shared with the pre-API / post-tool sites in ``turn_preflight``.
 
-Three passes, in order: idle-triggered compaction (opt-in, wall-clock gap), preflight
-context compression (token threshold), and the uncompressed-session overflow-warning
-re-arm. ``run_turn_start_compaction`` mutates ``agent`` exactly as the inline prologue
-did and returns a ``CompactionOutcome``. Predicates/estimators that tests patch on
-``agent.turn_context`` are imported lazily through that module so patches intercept."""
+Three passes, in order: idle-triggered compaction (opt-in, wall-clock gap — decided
+at turn start, the summary itself runs after the reply), preflight context compression
+(token threshold; must run now if the request would not fit), and the uncompressed-session
+overflow-warning re-arm. ``run_turn_start_compaction`` mutates ``agent`` exactly as the
+inline prologue did and returns a ``CompactionOutcome``. Predicates/estimators that tests
+patch on ``agent.turn_context`` are imported lazily through that module so patches intercept."""
 
 from __future__ import annotations
 
@@ -131,7 +132,7 @@ def run_turn_start_compaction(
     active_system_prompt: Optional[str], conversation_history: Optional[list[dict[str, Any]]],
     current_turn_user_idx: int, user_message: Any, effective_task_id: str,
 ) -> CompactionOutcome:
-    """Idle compaction, then preflight compression (or the uncompressed guard)."""
+    """Schedule idle compaction (runs after the reply), then preflight (or the uncompressed guard)."""
     out = CompactionOutcome(
         messages=messages, active_system_prompt=active_system_prompt,
         conversation_history=conversation_history, current_turn_user_idx=current_turn_user_idx,
@@ -145,8 +146,13 @@ def _idle_compaction(
     agent: Any, out: CompactionOutcome, system_message: Optional[str], user_message: Any,
     effective_task_id: str,
 ) -> None:
-    """Idle-triggered compaction (opt-in; ``idle_compact_after_seconds``): fires on the
-    wall-clock gap since ``_last_activity_ts``; a cheap gap check gates the estimate."""
+    """Decide idle compaction at turn start; do not run the 26B summary yet.
+
+    Opt-in via ``idle_compact_after_seconds``. A summary call on the same local
+    slot steals first-token time and busts the chat prefix cache, so the
+    compress itself is deferred until after the reply
+    (``run_deferred_idle_compaction``). Overflow preflight still runs now.
+    """
     from agent import turn_context as _tc
 
     messages = out.messages
@@ -185,33 +191,74 @@ def _idle_compaction(
     ):
         return
     logger.info(
-        "Idle compaction: %ss idle >= %ss, ~%s tokens > %s floor (last compaction produced ~%s) (session %s)",
+        "Idle compaction scheduled after reply: %ss idle >= %ss, ~%s tokens > %s floor "
+        "(last compaction produced ~%s) (session %s)",
         int(_idle_gap), _idle_after, f"{_idle_tokens:,}", f"{_idle_floor:,}",
         f"{_idle_last_compaction:,}" if _idle_last_compaction > 0 else "n/a",
         agent.session_id or "none",
     )
+    # Do not summarise on the live turn: the same local slot would steal first-token
+    # time and bust the chat prefix cache. Overflow preflight still runs now.
+    agent._pending_idle_compaction = {
+        "approx_tokens": _idle_tokens,
+        "idle_gap": _idle_gap,
+        "system_message": system_message,
+        "task_id": effective_task_id,
+        "user_message": user_message,
+    }
+
+
+def run_deferred_idle_compaction(
+    agent: Any, messages: Optional[list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Run the idle summary after the reply has been produced. No-op when none pending.
+
+    Threshold / overflow preflight still runs at turn start because the request
+    may not fit otherwise. Idle compaction can always wait until after the reply.
+    """
+    pending = getattr(agent, "_pending_idle_compaction", None)
+    agent._pending_idle_compaction = None
+    if not isinstance(pending, dict) or not messages:
+        return messages or []
+    if not getattr(agent, "compression_enabled", False):
+        return messages
+    if getattr(agent, "_persist_disabled", False):
+        return messages
+    compress = getattr(agent, "_compress_context", None)
+    if not callable(compress):
+        return messages
+
+    approx_tokens = pending.get("approx_tokens")
+    idle_gap = int(pending.get("idle_gap") or 0)
+    system_message = pending.get("system_message")
+    task_id = pending.get("task_id") or ""
+    compressor = getattr(agent, "context_compressor", None)
     _idle_status = automatic_compaction_status_message(
-        _compressor,
+        compressor,
         phase="idle",
         default_message=IDLE_COMPACTION_STATUS_TEMPLATE.format(
-            idle_seconds=int(_idle_gap), tokens=_idle_tokens
+            idle_seconds=idle_gap, tokens=approx_tokens or 0
         ),
-        approx_tokens=_idle_tokens,
-        idle_seconds=int(_idle_gap),
-        model=agent.model,
+        approx_tokens=approx_tokens,
+        idle_seconds=idle_gap,
+        model=getattr(agent, "model", None),
     )
     if _idle_status:
-        agent._emit_status(_idle_status)
-    out.messages, out.active_system_prompt = agent._compress_context(
-        messages, system_message, approx_tokens=_idle_tokens, task_id=effective_task_id, trigger="idle",
+        emit = getattr(agent, "_emit_status", None)
+        if callable(emit):
+            emit(_idle_status)
+    compressed = compress(
+        messages, system_message, approx_tokens=approx_tokens, task_id=task_id, trigger="idle",
     )
-    # ``_compress_context`` returns the INPUT list object when it skips; only
-    # re-baseline and re-anchor after a real compaction.
-    if out.messages is not messages:
-        out.conversation_history = conversation_history_after_compression(
-            agent, out.messages, out.conversation_history
-        )
-        out.current_turn_user_idx = _reanchor(agent, out.messages, user_message)
+    if not (isinstance(compressed, tuple) and len(compressed) >= 2):
+        return messages
+    new_messages, new_prompt = compressed[0], compressed[1]
+    if new_messages is not messages and isinstance(new_messages, list) and new_messages:
+        conversation_history_after_compression(agent, new_messages)
+        if new_prompt is not None:
+            agent._cached_system_prompt = new_prompt
+        return new_messages
+    return messages
 
 
 def _codex_native_auto_compaction(agent: Any) -> bool:
@@ -347,6 +394,8 @@ def _preflight_compression(
         # Compression rebuilt the list, so the pre-compression user index is stale.
         # Exact-content match first so a todo-snapshot can't steal it.
         out.current_turn_user_idx = _reanchor(agent, out.messages, user_message)
+        # Threshold / engine preflight already summarised this turn; drop the idle pass.
+        agent._pending_idle_compaction = None
 
 
 def _run_preflight_passes(
