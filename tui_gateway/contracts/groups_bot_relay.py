@@ -33,6 +33,8 @@ class RoomMember(OpenModel):
 class RoomActor(Result):
     kind: str
     id: str
+    profile: str | None = None
+    display_name: str | None = None
 
 
 class RoomEvent(Result):
