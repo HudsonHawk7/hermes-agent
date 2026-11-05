@@ -96,7 +96,7 @@ test('a member picture renders inline in the hosted room and a disallowed path s
     await expect(picture).toBeVisible({ timeout: 5_000 })
   }).toPass({ timeout: 120_000 })
 
-  await expect.poll(() => picture.evaluate(image => ({ loaded: image.naturalWidth > 0, blob: image.currentSrc.startsWith('blob:') }))).toEqual({
+  await expect.poll(() => picture.evaluate((image: HTMLImageElement) => ({ loaded: image.naturalWidth > 0, blob: image.currentSrc.startsWith('blob:') }))).toEqual({
     loaded: true,
     blob: true,
   })

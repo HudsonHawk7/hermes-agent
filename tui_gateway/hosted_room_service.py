@@ -60,10 +60,12 @@ def _room_media_tags(text: str) -> tuple[list[str], str]:
     """``([path, ...], text without the tags)`` for a member reply. Purely lexical: the gateway's
     ``extract_media`` stats extension-less paths, and on Windows statting a UNC path opens an SMB
     connection, so nothing here may touch the filesystem. A line still opening with ``MEDIA:`` after the
-    known tag shapes matched is a tag too, so it is returned as a path to refuse."""
+    known tag shapes matched is a tag too, so it is returned as a path to refuse. A whole tag in
+    inline code counts as a share attempt without the base mask's filesystem check; ``read_upload``
+    refuses network paths before it stats anything."""
     from gateway.platforms import base
 
-    masked = base._mask_media_scan_text(text)
+    masked = base._mask_media_scan_text(text, inline_tag_deliverable=lambda _path: True)
     tags: list[tuple[int, int, str]] = []
 
     def collect(pattern: re.Pattern[str], accept=lambda path: True) -> None:

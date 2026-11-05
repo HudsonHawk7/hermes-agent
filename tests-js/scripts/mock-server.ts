@@ -377,13 +377,14 @@ export const PROVIDER_FAILURE_MESSAGE = 'E2E invalid_api_key: the mock refused t
  * file. Keeping the paths in the room prompt lets each sandbox own its files.
  */
 export const MEMBER_MEDIA_TRIGGER = 'E2E_MEMBER_MEDIA_TRIGGER'
+const MEMBER_MEDIA_USAGE = `${MEMBER_MEDIA_TRIGGER} requires allowed and disallowed absolute paths on the next two lines`
 
-function memberMediaReply(userText: string): string {
+function memberMediaReply(userText: string): string | null {
   const lines = userText.split(/\r?\n/)
   const trigger = lines.findIndex(line => line.includes(MEMBER_MEDIA_TRIGGER))
 
   if (trigger < 0 || !lines[trigger + 1] || !lines[trigger + 2]) {
-    throw new Error(`${MEMBER_MEDIA_TRIGGER} requires allowed and disallowed absolute paths`)
+    return null
   }
 
   return `Here is the requested picture.\nMEDIA:${lines[trigger + 1]}\nMEDIA:${lines[trigger + 2]}`
@@ -871,7 +872,10 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
           if (userText.includes(MEMBER_MEDIA_TRIGGER)) {
             const reply = memberMediaReply(userText)
 
-            if (stream) {
+            if (reply === null) {
+              res.writeHead(400, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: { code: 'bad_e2e_trigger', message: MEMBER_MEDIA_USAGE, type: 'invalid_request_error' } }))
+            } else if (stream) {
               streamTextResponse(res, model, reply)
             } else {
               nonStreamingTextResponse(res, model, reply)

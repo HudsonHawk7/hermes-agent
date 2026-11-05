@@ -90,6 +90,15 @@ def test_member_media_in_its_output_folder_becomes_a_room_attachment(world):
     assert saved["payload"]["attachments"] == event.payload["attachments"]
 
 
+def test_a_tag_written_as_inline_code_is_shared_like_a_bare_tag(world):
+    picture = world.picture()
+
+    event, _ = world.share(f"Here it is\n`MEDIA:{picture}`")
+
+    assert event.payload["text"] == "Here it is"
+    assert [a["name"] for a in event.payload["attachments"]] == ["picture.png"]
+
+
 def test_a_text_only_member_reply_passes_through_unchanged(world):
     event = world.event("Just words, and a path /tmp/x.png with no tag")
 
@@ -296,6 +305,8 @@ def test_a_failed_commit_names_the_video_and_frees_the_uploads(world, monkeypatc
     "MEDIA:/uncprobe-host/share/notes.log",
     "MEDIA:\\\\uncprobe-host\\share\\Caddyfile",
     "MEDIA:/uncprobe-host/does/not/exist",
+    "`MEDIA:\\\\uncprobe-host\\share\\pic.png`",
+    "`MEDIA://uncprobe-host/share/pic.png`",
 ])
 def test_a_network_or_extensionless_tag_is_refused_without_touching_the_filesystem(world, monkeypatch, tag):
     from gateway.platforms import base
