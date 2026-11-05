@@ -1385,7 +1385,7 @@ def _last_transcript_timestamp(history: Optional[list[dict[str, Any]]]) -> Any:
 
 
 # Tool output may hold literal MEDIA: examples (docs, logs); only deliberate media producers may auto-append.
-_AUTO_APPEND_MEDIA_TOOL_NAMES = {"text_to_speech", "text_to_speech_tool", "image_generate"}
+_AUTO_APPEND_MEDIA_TOOL_NAMES = {"text_to_speech", "text_to_speech_tool", "image_generate", "video_generate"}
 
 # Replay-history canonicalization lives in agent/replay_cleanup.py so every resume
 # surface and the send path share one implementation.
@@ -1415,7 +1415,8 @@ def _strip_auto_continue_noise(content: Any) -> Any:
     return text
 
 # Tools whose deliverable is a JSON payload with a local-file path field rather than a literal ``MEDIA:`` tag.
-_JSON_MEDIA_TOOL_PATH_FIELDS = ("host_image", "image", "agent_visible_image")
+_JSON_MEDIA_TOOL_PATH_FIELDS = ("host_image", "image", "agent_visible_image", "video")
+_JSON_MEDIA_TOOLS = {"image_generate", "video_generate"}
 
 
 # Extension-anchored MEDIA: matcher (mirrors the dispatch site); a bare ``MEDIA:`` in prose never auto-appends.
@@ -1464,8 +1465,8 @@ def _collect_auto_append_media_tags(
             continue
         content = str(msg.get("content") or "")
         tool_name = tool_name_by_call_id.get(call_id)
-        # image_generate emits a JSON path field, not a MEDIA: tag; extract it: deterministic delivery.
-        if tool_name == "image_generate" and "MEDIA:" not in content:
+        # image_generate / video_generate emit a JSON path field, not a MEDIA: tag; extract it: deterministic delivery.
+        if tool_name in _JSON_MEDIA_TOOLS and "MEDIA:" not in content:
             try:
                 payload = json.loads(content)
             except Exception:
@@ -1520,7 +1521,7 @@ def _collect_history_media_paths(agent_history: list[dict[str, Any]]) -> set:
         if role == "assistant":
             continue
         cid = str(msg.get("tool_call_id") or msg.get("call_id") or "")
-        if tool_name_by_call_id.get(cid) == "image_generate":
+        if tool_name_by_call_id.get(cid) in _JSON_MEDIA_TOOLS:
             try:
                 payload = json.loads(content)
             except Exception:
