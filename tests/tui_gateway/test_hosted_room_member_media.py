@@ -445,6 +445,7 @@ def test_a_replay_after_a_lost_terminal_append_does_not_wedge_the_room(world, mo
         with pytest.raises(OSError, match="lost terminal"):
             world.service.prepare_room(binding)
     stored, = _member_messages(world)
+    assert len(stored["payload"]["attachments"]) == 1
     picture.unlink()
 
     world.service.prepare_room(binding)
