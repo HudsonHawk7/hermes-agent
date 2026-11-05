@@ -12,7 +12,7 @@
  *
  * The five Probe-HOLD rows fire the plugin's real handlers (not $call patches, not a fake card):
  *   hook          — wrap ctx.onEvent; __avatarMapE2E.emit(type, payload) calls the same fn
- *   play-ack      — scripted provider tool_calls play_moves; shoot card + strip if both show
+ *   play-ack      — real play_moves in the sandbox (toolset avatar); FAIL if Play Moves / Played: N clips is missing; strip lit on the same clip
  *   handoff       — cue handler queues the route; capture last frames of N then f00 of N+1
  *   She's here    — avatar-tile on CHAT (not /call) + Call button
  *   barge-in      — cue handler queues a route, then emit('voice.interrupted')
@@ -147,6 +147,20 @@ function skipNoise(src: string): boolean {
 function copyAvatarMapPlugin(dest: string): void {
   fs.cpSync(AVATAR_MAP_SRC, dest, { recursive: true, filter: skipNoise })
   fs.cpSync(CORE_SRC, path.join(dest, 'force_media_core'), { recursive: true, filter: skipNoise })
+  const toolsPy = path.join(dest, 'tools.py')
+  if (!fs.existsSync(toolsPy)) {throw new Error(`avatar-map tools.py missing at ${toolsPy}`)}
+  const toolsSrc = fs.readFileSync(toolsPy, 'utf8')
+  if (!toolsSrc.includes('play_moves') || !toolsSrc.includes('TOOLSET')) {
+    throw new Error(`avatar-map tools.py has no play_moves at ${toolsPy}`)
+  }
+  const servicePy = path.join(dest, 'service.py')
+  if (!fs.existsSync(servicePy)) {throw new Error(`avatar-map service.py missing at ${servicePy}`)}
+  const serviceSrc = fs.readFileSync(servicePy, 'utf8')
+  if (!serviceSrc.includes('Played:') || !serviceSrc.includes('confirmed by the call screen')) {
+    throw new Error(`avatar-map service.py has no Played: ack line at ${servicePy}`)
+  }
+  const dash = path.join(dest, 'dashboard', 'manifest.json')
+  if (!fs.existsSync(dash)) {throw new Error(`avatar-map dashboard/manifest.json missing at ${dash}`)}
   const pluginJs = path.join(dest, 'desktop', 'plugin.js')
   const bytes = fs.statSync(pluginJs).size
 
@@ -178,7 +192,7 @@ function copyAvatarMapPlugin(dest: string): void {
         manyNeedle,
         '    if (typeof globalThis !== \'undefined\') {\n'
           + '      globalThis.__avatarMapE2E = {\n'
-          + '        $call, patch, actions, getPlayer: () => player, handlers: e2eHandlers,\n'
+          + '        $call, patch, actions, getPlayer: () => player, handlers: e2eHandlers, navigate: (p) => host.navigate(p),\n'
           + '        emit(type, payload) {\n'
           + '          const fn = e2eHandlers[type]\n'
           + '          if (!fn) throw new Error(\'no plugin handler for \' + type)\n'
@@ -215,11 +229,25 @@ function pluginExtraYaml(libraryDir: string | null, extras = ''): string {
     : '  self_view: false\n  thinking_spark: true\n  barge_in: drain\n'
 
   return `
+_config_version: 51
+platform_toolsets:
+  cli:
+    - hermes-cli
+    - avatar
 plugins:
   enabled:
     - ${PLUGIN_ID}
+  entries:
+    ${PLUGIN_ID}:
+      granted_capabilities:
+        - tools.override
+      allow_tool_override: true
 avatar_map:
-${lib}${extras}`
+${lib}${extras}
+tools:
+  tool_search:
+    enabled: "off"
+`
 }
 
 function fakeBins(bin: string): void {
@@ -302,17 +330,80 @@ async function installFakeCamera(page: Page): Promise<void> {
   })
 }
 
+function copyIfExists(src: string, dest: string): void {
+  if (fs.existsSync(src)) {fs.copyFileSync(src, dest)}
+}
+
+function copyTree(src: string, dest: string): void {
+  if (!fs.existsSync(src)) {return}
+  fs.mkdirSync(dest, { recursive: true })
+  for (const ent of fs.readdirSync(src, { withFileTypes: true })) {
+    const from = path.join(src, ent.name)
+    const to = path.join(dest, ent.name)
+    if (ent.isDirectory()) {copyTree(from, to); continue}
+    fs.copyFileSync(from, to)
+  }
+}
+
+function dumpSandboxHome(sandbox: CoreSandbox, tag: string): void {
+  try {
+    fs.mkdirSync(SHOT_DIR, { recursive: true })
+    copyIfExists(path.join(sandbox.hermesHome, 'config.yaml'), path.join(SHOT_DIR, `${tag}-config.yaml`))
+    copyIfExists(path.join(sandbox.hermesHome, 'logs', 'gateway.log'), path.join(SHOT_DIR, `${tag}-gateway.log`))
+    copyIfExists(path.join(sandbox.hermesHome, 'logs', 'errors.log'), path.join(SHOT_DIR, `${tag}-errors.log`))
+    copyIfExists(path.join(sandbox.hermesHome, 'logs', 'agent.log'), path.join(SHOT_DIR, `${tag}-agent.log`))
+    copyIfExists(path.join(sandbox.hermesHome, 'state.db'), path.join(SHOT_DIR, `${tag}-state.db`))
+    const cache = path.join(sandbox.hermesHome, 'cache', 'plugin_toolset_keys.json')
+    copyIfExists(cache, path.join(SHOT_DIR, `${tag}-plugin_toolset_keys.json`))
+    copyTree(path.join(sandbox.hermesHome, 'sessions'), path.join(SHOT_DIR, `${tag}-sessions`))
+    const walk = (dir: string, depth: number) => {
+      if (depth < 0 || !fs.existsSync(dir)) {return}
+      for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, ent.name)
+        if (ent.isDirectory()) {walk(p, depth - 1); continue}
+        if (/\.(jsonl|json)$/i.test(ent.name) && /session/i.test(p)) {
+          copyIfExists(p, path.join(SHOT_DIR, `${tag}-${ent.name}`))
+        }
+      }
+    }
+    walk(sandbox.hermesHome, 4)
+  } catch (err) {
+    console.log('dumpSandboxHome', err)
+  }
+}
+
+function seedPluginToolsetCache(hermesHome: string): void {
+  const dir = path.join(hermesHome, 'cache')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(
+    path.join(dir, 'plugin_toolset_keys.json'),
+    JSON.stringify({ toolset_keys: ['avatar'], portable_mcp: [] }),
+    'utf8',
+  )
+}
+
 async function dumpOnFail(page: Page, app: ElectronApplication, tag: string): Promise<void> {
   try {
     fs.mkdirSync(SHOT_DIR, { recursive: true })
     const html = await page.content()
     fs.writeFileSync(path.join(SHOT_DIR, `${tag}.html`), html.slice(0, 80_000), 'utf8')
+    const body = await page.evaluate(() => document.body.innerText || '')
+    fs.writeFileSync(path.join(SHOT_DIR, `${tag}-body.txt`), body.slice(0, 20_000), 'utf8')
 
     const ids = await page.locator('[data-testid]').evaluateAll(nodes =>
       nodes.map(n => n.getAttribute('data-testid')).filter(Boolean).slice(0, 80),
     )
 
     fs.writeFileSync(path.join(SHOT_DIR, `${tag}-testids.json`), JSON.stringify(ids, null, 2), 'utf8')
+    const toolRows = await page.evaluate(() => [...document.querySelectorAll('[data-tool-row]')].map(n => {
+      const el = n as HTMLElement
+      return {
+        text: (el.innerText || '').slice(0, 800),
+        expanded: el.getAttribute('aria-expanded'),
+        html: el.outerHTML.slice(0, 4000),
+      }
+    }))
+    fs.writeFileSync(path.join(SHOT_DIR, `${tag}-tool-rows.json`), JSON.stringify(toolRows, null, 2), 'utf8')
     fs.writeFileSync(path.join(SHOT_DIR, `${tag}-main.log`), appLogTail(app, 80), 'utf8')
   } catch (err) {
     console.log('dumpOnFail', err)
@@ -332,6 +423,7 @@ type E2eHook = {
   emit?: (type: string, payload?: Record<string, unknown>) => unknown
   handlers?: Record<string, (event: unknown) => unknown>
   $call?: { get: () => Record<string, unknown> }
+  navigate?: (path: string) => void
 }
 
 const CUE_EVENT = 'plugin.avatar-map.cue'
@@ -351,6 +443,15 @@ async function patchCall(page: Page, partial: Record<string, unknown>): Promise<
 
 async function clickTestId(page: Page, testId: string): Promise<void> {
   await page.locator(`[data-testid="${testId}"]`).first().click({ force: true, timeout: 8_000 })
+}
+
+async function goViaHook(page: Page, path: string): Promise<void> {
+  await page.evaluate(p => {
+    const hook = (globalThis as { __avatarMapE2E?: E2eHook }).__avatarMapE2E
+
+    if (!hook?.navigate) {throw new Error('hook.navigate missing — e2e wrap did not land')}
+    hook.navigate(p)
+  }, path)
 }
 
 async function emitPluginEvent(page: Page, type: string, payload: Record<string, unknown> = {}): Promise<unknown> {
@@ -616,6 +717,8 @@ test('S3a+S3b call screen (fixtures, hidden, isolated sandbox)', async () => {
   copyLibrary(FIXTURES_SRC, libraryDir)
 
   writeProviderHome(sandbox.hermesHome, provider.url, pluginExtraYaml(libraryDir))
+  seedPluginToolsetCache(sandbox.hermesHome)
+  dumpSandboxHome(sandbox, 'boot-before')
 
   const env = coreAppEnv(sandbox, {
     HERMES_E2E_FAKE_CAMERA: '1',
@@ -661,6 +764,8 @@ test('S3a+S3b call screen (fixtures, hidden, isolated sandbox)', async () => {
       console.log('STILL_OFF reason=', reason, 'logs=\n', appLogTail(app, 60))
       throw new Error(`avatar-composer-call never mounted. off-reason=${reason}`)
     }
+
+    dumpSandboxHome(sandbox, 'boot-after-composer')
 
     const mounted = await attachedCount(page, 'avatar-composer-call')
     const off = await attachedCount(page, 'avatar-composer-off')
@@ -719,49 +824,110 @@ test('S3a+S3b call screen (fixtures, hidden, isolated sandbox)', async () => {
     expect(handlerKeys, 'cue handler registered').toContain(CUE_EVENT)
     expect(handlerKeys, 'voice.interrupted registered').toContain('voice.interrupted')
 
-    // play-ack card: scripted play_moves while chat (and the composer) still exist.
-    const PLAYACK = 'U9-playack'
-    let playMovesViaProvider = false
-    provider.script(PLAYACK, [
-      { toolCalls: [{ name: 'play_moves', args: { segments: [CLIP_WAVE], when: 'after_current' } }] },
-      { text: ['Played: 1 clips'] },
-    ])
-    try {
-      await send(page, `${PLAYACK} play the wave`)
-      await expect.poll(
-        () => provider.completions.some(c => c.marker === PLAYACK && c.step === 0 && c.finished),
-        { timeout: 90_000, message: 'play_moves provider step 0' },
-      ).toBe(true)
-      playMovesViaProvider = true
-      console.log('PLAY_MOVES provider', provider.completions.filter(c => c.marker === PLAYACK).map(c => ({
-        step: c.step, tools: c.toolCalls, finished: c.finished, text: c.sentText.slice(0, 80),
-      })))
-    } catch (err) {
-      console.log('PLAY_MOVES send miss', String(err).slice(0, 400))
-    }
-    await page.waitForTimeout(800)
-    const playMovesOnChat = await page.getByText(/Play Moves|play_moves/i).count()
-    const playedLineOnChat = await page.getByText(/Played:\s*\d+\s*clips/i).count()
-    const chatBits = await page.evaluate(() => (document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 900))
-    console.log('PLAY_ACK chat Play Moves=', playMovesOnChat, 'Played line=', playedLineOnChat, 'viaProvider=', playMovesViaProvider)
-    console.log('PLAY_ACK chat bits', chatBits)
-    if (playMovesOnChat > 0) {
-      await page.getByText(/Play Moves|play_moves/i).first().click({ force: true }).catch(() => undefined)
-    }
-    await shot(app, 's3-play-ack-card.png')
-
+    // play-ack: open the call so REST /ack can confirm, go back to chat without
+    // ending (composer needed), then run the real play_moves tool. Fail if the
+    // Play Moves card / Played: N clips line is missing. Do not inject a fake card.
+    // Do not script "Played: N clips" as assistant text — that line must come from tools.py.
     await page.evaluate(async () => {
       const hook = (globalThis as { __avatarMapE2E?: E2eHook }).__avatarMapE2E
 
       if (!hook) {throw new Error('__avatarMapE2E missing')}
       await hook.actions.open()
     })
-
     try {
       await waitAttached(page, 'avatar-call', 60_000)
     } catch {
       await dumpOnFail(page, app, 'no-call')
       throw new Error(`avatar-call missing after actions.open. logs:\n${appLogTail(app, 40)}`)
+    }
+    const callOpen = await page.evaluate(() => Boolean((globalThis as { __avatarMapE2E?: E2eHook }).__avatarMapE2E?.$call?.get()?.open))
+    expect(callOpen, 'call must be open before play_moves so /ack can confirm').toBe(true)
+    const returnTo = await page.evaluate(() => {
+      const hook = (globalThis as { __avatarMapE2E?: E2eHook }).__avatarMapE2E
+      return String(hook?.$call?.get()?.returnTo || '/')
+    })
+    console.log('PLAY_ACK call open, returnTo=', returnTo)
+    await goViaHook(page, returnTo || '/')
+    await waitAttached(page, 'avatar-composer-call', 20_000)
+
+    const PLAYACK = 'U9-playack'
+    provider.script(PLAYACK, [
+      { toolCalls: [{ name: 'play_moves', args: { segments: [CLIP_WAVE], when: 'after_current' } }] },
+      { text: ['wave is queued on the call.'] },
+    ])
+    await send(page, `${PLAYACK} play the wave`)
+    await expect.poll(
+      () => provider.completions.some(c => c.marker === PLAYACK && c.step === 0 && c.finished),
+      { timeout: 90_000, message: 'play_moves provider step 0' },
+    ).toBe(true)
+    const playMovesViaProvider = true
+    console.log('PLAY_MOVES provider', provider.completions.filter(c => c.marker === PLAYACK).map(c => ({
+      step: c.step, tools: c.toolCalls, finished: c.finished, text: c.sentText.slice(0, 80),
+    })))
+    const playRow = page.locator('[data-tool-row]').filter({ hasText: /Play Moves|play_moves/i }).first()
+    await playRow.waitFor({ state: 'attached', timeout: 45_000 }).catch(() => undefined)
+    if (await playRow.count()) {
+      await playRow.evaluate(el => el.scrollIntoView({ block: 'center', inline: 'nearest' })).catch(() => undefined)
+      const toggle = playRow.locator('button[aria-expanded]').first()
+      if (await toggle.count()) {
+        const expanded = await toggle.getAttribute('aria-expanded')
+        if (expanded !== 'true') {
+          await toggle.click({ force: true }).catch(() => undefined)
+        }
+      } else {
+        await playRow.click({ force: true }).catch(() => undefined)
+      }
+    }
+    try {
+      await expect.poll(async () => {
+        const snap = await page.evaluate(() => {
+          const rows = [...document.querySelectorAll('[data-tool-row]')].map(n => {
+            const el = n as HTMLElement
+            const btn = el.querySelector('button[aria-expanded]')
+            return {
+              text: el.innerText || '',
+              expanded: btn?.getAttribute('aria-expanded') || '',
+            }
+          })
+          const play = rows.find(r => /Play Moves|play_moves/i.test(r.text))
+          return { rows, play }
+        })
+        const hay = snap.play?.text || ''
+        const card = /Play Moves|play_moves/i.test(hay)
+        const played = /Played:\s*\d+\s*clips/i.test(hay)
+        const confirmed = /confirmed by the call screen/i.test(hay)
+        const refused = /Couldn't play|does not exist|unknown tool|snowballstemmer/i.test(hay)
+        return card && played && confirmed
+          ? 'ok'
+          : `card=${card} played=${played} confirmed=${confirmed} refused=${refused} expanded=${snap.play?.expanded || ''} rows=${snap.rows.length} hay=${hay.slice(0, 240)}`
+      }, { timeout: 45_000, message: 'Play Moves row innerText must contain Played: N clips' }).toBe('ok')
+      await expect(
+        playRow.getByText(/Played:\s*\d+\s*clips/i),
+        'Played: N clips must be visible on the Play Moves row',
+      ).toBeVisible({ timeout: 10_000 })
+    } catch (err) {
+      dumpSandboxHome(sandbox, 'play-ack-miss')
+      await dumpOnFail(page, app, 'play-ack-miss')
+      throw err
+    }
+    dumpSandboxHome(sandbox, 'play-ack')
+    await dumpOnFail(page, app, 'play-ack')
+    const playMovesOnChat = await page.getByText(/Play Moves|play_moves/i).count()
+    expect(playMovesOnChat, 'Play Moves card must appear after play_moves').toBeGreaterThan(0)
+    await playRow.evaluate(el => el.scrollIntoView({ block: 'center', inline: 'nearest' })).catch(() => undefined)
+    const rowPng = await playRow.screenshot({ animations: 'disabled' }).catch(() => null)
+    if (rowPng && rowPng.byteLength >= 400) {
+      fs.writeFileSync(path.join(SHOT_DIR, 's3-play-ack-card-row.png'), rowPng)
+      console.log(`SHOT s3-play-ack-card-row.png bytes=${rowPng.byteLength}`)
+    }
+    await shot(app, 's3-play-ack-card.png')
+
+    await goViaHook(page, '/call')
+    try {
+      await waitAttached(page, 'avatar-call', 60_000)
+    } catch {
+      await dumpOnFail(page, app, 'no-call-return')
+      throw new Error(`avatar-call missing after return from chat. logs:\n${appLogTail(app, 40)}`)
     }
 
     await page.waitForTimeout(400)
@@ -1050,6 +1216,8 @@ test('Aurora first-call clips through the call screen when t_e5a04565 has landed
   const libraryDir = path.join(sandbox.root, 'aurora-library')
   copyLibrary(AURORA_LIB, libraryDir)
   writeProviderHome(sandbox.hermesHome, provider.url, pluginExtraYaml(libraryDir))
+  seedPluginToolsetCache(sandbox.hermesHome)
+  dumpSandboxHome(sandbox, 'boot-before')
 
   const { app, page } = await launchCoreApp(coreAppEnv(sandbox, { HERMES_E2E_PYTHON: process.env.HERMES_E2E_PYTHON || '' }))
 
