@@ -25,7 +25,7 @@ import { $sessionStates } from '@/store/session-states'
  * session's tile when one is open, else the primary composer (which renders
  * that session); a runtime id is mapped to its stored id first.
  */
-const resolveComposerAddress = (
+export const resolveComposerAddress = (
   sessionId: null | string | undefined
 ): { ids: string[]; stored: string; target: 'active' | ComposerTarget | null } => {
   const id = typeof sessionId === 'string' ? sessionId.trim() : ''
