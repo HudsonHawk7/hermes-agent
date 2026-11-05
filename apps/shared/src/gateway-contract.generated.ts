@@ -1597,6 +1597,8 @@ export interface RoomEvent {
 export interface RoomActor {
   kind: string
   id: string
+  profile?: string | null
+  display_name?: string | null
 }
 export interface GroupsCreateParams {
   profile?: string | null
