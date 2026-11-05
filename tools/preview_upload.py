@@ -42,12 +42,11 @@ UPLOAD_TYPES = {
 #: customer data), which the provider alone may read; ``upload`` hands a file to any site open in the pane.
 PROVIDER_FOLDER_KEYS = (("image_gen", "image_input_dir"), ("video_gen", "image_input_dir"))
 
-# Room replies are shared only with the frozen room roster, unlike a preview upload
-# which hands bytes to an arbitrary site.  They may therefore include generated
-# outputs and screenshot artifacts as the hosted-room media contract requires.
+# Room replies may include generated outputs and explicit image inputs.  Screen-share
+# frames are never room media: they can contain live work screens and customer data.
 ROOM_MEDIA_FOLDER_KEYS = (
-    ("image_gen", "output_dir"), ("image_gen", "image_input_dir"), ("image_gen", "screenshots_dir"),
-    ("video_gen", "output_dir"), ("video_gen", "image_input_dir"), ("video_gen", "screenshots_dir"),
+    ("image_gen", "output_dir"), ("image_gen", "image_input_dir"),
+    ("video_gen", "output_dir"), ("video_gen", "image_input_dir"),
 )
 
 #: The profile's retained chat attachments (gateway/session_ingress_media.py): ``native-inputs`` under the documents

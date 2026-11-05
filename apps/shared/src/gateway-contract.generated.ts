@@ -1599,6 +1599,7 @@ export interface RoomActor {
   id: string
   profile?: string | null
   display_name?: string | null
+  connection_id?: string | null
 }
 export interface GroupsCreateParams {
   profile?: string | null

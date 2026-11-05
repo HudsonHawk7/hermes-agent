@@ -843,6 +843,24 @@ class HostedRoomAttachmentStore:
             )
             return int(changed.rowcount)
 
+    def discard_uploads(self, *, room_id: Any, attachment_ids: Sequence[str]) -> int:
+        """Drop never-committed uploads now, releasing their blobs, instead of waiting out the upload TTL."""
+
+        room_id = _identifier(room_id, label="room_id")
+        attachment_ids = [_attachment_id(value) for value in attachment_ids]
+        if not attachment_ids:
+            return 0
+        now = float(self.clock())
+        placeholders = ",".join("?" for _ in attachment_ids)
+        with self._lock, self._transaction(immediate=True) as conn:
+            expired = conn.execute(
+                f"""UPDATE hosted_room_attachments SET expires_at=?, updated_at=?
+                     WHERE room_id=? AND state='uploaded' AND attachment_id IN ({placeholders})""",
+                (now, now, room_id, *attachment_ids),
+            ).rowcount
+        self.prune(now=now)
+        return int(expired)
+
     def retain_event(self, *, room_id: Any, event_id: Any) -> int:
         """Retain committed blobs after their immutable room event is durable."""
 

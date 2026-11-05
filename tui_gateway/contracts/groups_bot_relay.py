@@ -35,6 +35,7 @@ class RoomActor(Result):
     id: str
     profile: str | None = None
     display_name: str | None = None
+    connection_id: str | None = None
 
 
 class RoomEvent(Result):
