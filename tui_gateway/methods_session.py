@@ -1341,6 +1341,36 @@ def _(rid, params: dict, session: dict) -> dict:
     return _ok(rid, {"row_id": int(row_id), "reactions": reactions})
 
 
+_SESSION_NOTE_MAX_CHARS = 500
+
+
+@_session_method("session.note")
+def _(rid, params: dict, session: dict) -> dict:
+    """Append ONE plugin-authored system line to this session's transcript (desktop ``host.voice.note``).
+
+    Live-only by design: no message row is written, so a note is a display event (like ``review.summary``)
+    and never becomes model input on the next turn or on resume. The role is fixed here — a note is always
+    a system line — so a plugin can never write as the user or as the agent; ``source`` is a label the
+    renderer may show beside it, never the speaker. Only the client that owns the session's transport may
+    call it, so one window cannot inject a line into another window's chat.
+    """
+    text = str(params.get("text") or "").strip()
+    if not text:
+        return _err(rid, 4031, "session.note requires text")
+    if len(text) > _SESSION_NOTE_MAX_CHARS:
+        return _err(rid, 4032, f"session.note text is limited to {_SESSION_NOTE_MAX_CHARS} characters")
+    sid = str(params.get("session_id") or "").strip()
+    owner = session.get("transport")
+    caller = current_transport()
+    # Fail closed. A missing owner (session never bound a transport) or a
+    # missing caller (in-process dispatch) is not "same client" — only the
+    # transport that owns the session may append a line.
+    if owner is None or owner is not caller:
+        return _err(rid, 4033, "session.note: session not owned by this client")
+    _emit("session.note", sid, {"text": text, "source": _str_param(params, "source")[:64] or None})
+    return _ok(rid, {"ok": True, "session_id": sid})
+
+
 @method("llm.oneshot")
 @_profile_scoped
 def _(rid, params: dict) -> dict:

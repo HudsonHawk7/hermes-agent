@@ -22,6 +22,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.process_custody import kill_tree, spawn
+
 pytestmark = [pytest.mark.platforms("windows"), pytest.mark.spawns_gateway_lookalike]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -99,9 +101,9 @@ def live_gateway(tmp_path_factory):
         "{" + ", ".join(f'"{n}": {{"source": "local", "sha": "0"}}' for n in _HEADS) + "}", encoding="utf-8")
 
     log = open(root / "gateway.log", "w", encoding="utf-8")
-    proc = subprocess.Popen([sys.executable, "-m", "hermes_cli.main", "gateway", "run", "--force"],
-                            cwd=str(home), env=_child_env(home), stdin=subprocess.DEVNULL, stdout=log,
-                            stderr=subprocess.STDOUT, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+    proc = spawn([sys.executable, "-m", "hermes_cli.main", "gateway", "run", "--force"],
+                 cwd=str(home), env=_child_env(home), stdin=subprocess.DEVNULL, stdout=log,
+                 stderr=subprocess.STDOUT, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
     from gateway.control_socket import identify_gateway, reload_gateway_plugins
     try:
         if not _wait(lambda: proc.poll() is not None or identify_gateway(home, timeout=2.0), 180):
@@ -112,7 +114,7 @@ def live_gateway(tmp_path_factory):
         assert not missing, f"gateway did not load {missing}: {answer}"
         yield home, proc
     finally:
-        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=30, check=False)
+        kill_tree(proc)
         proc.wait(timeout=30)
         log.close()
 

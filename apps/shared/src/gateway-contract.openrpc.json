@@ -3535,6 +3535,24 @@
       }
     },
     {
+      "name": "session.note",
+      "summary": "Append a plugin-authored system line to a live session's transcript (live-only, never model input).",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/SessionNoteParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/SessionNoteResult"
+        }
+      }
+    },
+    {
       "name": "session.redirect",
       "summary": "Redirect the active turn (queued for the next turn while the agent is still building).",
       "params": [
@@ -34050,6 +34068,42 @@
           "id": {
             "title": "Id",
             "type": "string"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Display Name"
+          },
+          "connection_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Connection Id"
           }
         },
         "required": [
@@ -38174,6 +38228,96 @@
           "operation"
         ],
         "title": "SessionMutateResult",
+        "type": "object"
+      },
+      "SessionNoteParams": {
+        "additionalProperties": false,
+        "description": "One plugin-authored system line (desktop ``host.voice.note`` \u2014 the call-ended line).\n\n``text`` is the line itself (whitespace-trimmed, 500 chars max); ``source`` is an optional label\nthe renderer may show beside it. There is no role field: a note is always a system line.",
+        "properties": {
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Source"
+          }
+        },
+        "required": [
+          "session_id",
+          "text"
+        ],
+        "title": "SessionNoteParams",
+        "type": "object"
+      },
+      "SessionNotePayload": {
+        "additionalProperties": false,
+        "description": "``methods_session`` ``session.note``: a plugin-authored line for this session's transcript.\n\nLive-only \u2014 no message row is written, so the line paints once and never replays on resume. The\nrole is fixed server-side: a note is always a system line, never the user's or the agent's voice.",
+        "properties": {
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Source"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "SessionNotePayload",
+        "type": "object"
+      },
+      "SessionNoteResult": {
+        "additionalProperties": false,
+        "properties": {
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "session_id"
+        ],
+        "title": "SessionNoteResult",
         "type": "object"
       },
       "SessionOwner": {
@@ -50063,6 +50207,18 @@
           "name": "payload",
           "schema": {
             "$ref": "#/components/schemas/SessionLiveInfo"
+          }
+        }
+      ]
+    },
+    {
+      "name": "session.note",
+      "summary": "A plugin added one system line to this session's transcript.",
+      "params": [
+        {
+          "name": "payload",
+          "schema": {
+            "$ref": "#/components/schemas/SessionNotePayload"
           }
         }
       ]

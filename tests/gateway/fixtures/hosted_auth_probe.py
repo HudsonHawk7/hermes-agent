@@ -252,6 +252,10 @@ def probe(tmp_path):
                     'cross_actor_denials': denials, 'owner_stops': 2}
 
     try:
+        # Host + profile `two` both start `-m gateway.run`. Those children must
+        # keep going through daemon() → process_custody.spawn (kill-on-close Job
+        # Object). A raw Popen here is the orphan class this fixture left behind
+        # when the runner died.
         with daemon(root, target, env | {'HERMES_HOME': str(target)}, barrier=False), daemon(
                 root, home, env, barrier=False) as (_, desc), ExitStack() as stack:
             clients = [stack.enter_context(httpx.Client(base_url=desc['api_origin'],

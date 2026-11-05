@@ -6,12 +6,15 @@ import { directTtsConfig, type DirectTtsConfig, synthesizeSpeechClientDirect } f
 import { RECONNECT_ATTEMPT_TIMEOUT_MS, withTimeout } from '@/lib/with-timeout'
 import {
   $voicePlayback,
+  clearVoiceEnvelope,
+  publishVoiceEnvelope,
   setVoicePlaybackState,
   type VoicePlaybackSource,
   type VoicePlaybackState
 } from '@/store/voice-playback'
 
 import { cutSentences, sanitizeTextForSpeech } from './speech-text'
+import { envelope, ENVELOPE_FPS } from './voice-envelope'
 
 // Free Edge TTS occasionally hands back audio that never fires `playing`/`ended`
 // nor `error` — leaving voice mode stuck "speaking" forever. Reject if playback
@@ -61,6 +64,89 @@ async function unlockAutoplay(): Promise<void> {
   }
 }
 
+// ---- sentence envelope (the mouth track behind `host.voice.playback`) -----
+// Published per sentence as it starts and cleared when it stops being true.
+// Decoding is the only cost and it runs ALONGSIDE playback, so TTS latency is
+// untouched; when no decoder exists (jsdom, an audio-less surface) the door
+// simply answers null and an overlay no-ops.
+let decodeCtx: AudioContext | null = null
+
+// Bumped on every publish kick and every clear: a decode that resolves after
+// its sentence ended, or after a barge-in, must never repaint a mouth over
+// silence.
+let envelopeToken = 0
+
+async function decodeSamples(bytes: ArrayBuffer): Promise<null | { sampleRate: number; samples: Float32Array }> {
+  if (typeof window === 'undefined') {
+    return null
+  }
+
+  const Ctor =
+    window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+
+  if (!Ctor) {
+    return null
+  }
+
+  if (!decodeCtx) {
+    decodeCtx = new Ctor()
+  }
+
+  // decodeAudioData detaches the buffer it is handed; callers pass a copy.
+  const decoded = await decodeCtx.decodeAudioData(bytes)
+
+  return { sampleRate: decoded.sampleRate, samples: decoded.getChannelData(0) }
+}
+
+function publishSentenceEnvelope(bytes: ArrayBuffer, startedAtMs: number) {
+  const token = (envelopeToken += 1)
+
+  void (async () => {
+    try {
+      const decoded = await decodeSamples(bytes.slice(0))
+
+      if (!decoded || token !== envelopeToken) {
+        return
+      }
+
+      const track = envelope(decoded.samples, decoded.sampleRate, ENVELOPE_FPS)
+
+      publishVoiceEnvelope({ durationMs: track.durationMs, fps: track.fps, rms: track.rms, startedAtMs })
+    } catch {
+      // The mouth track is decoration on top of speech: a decode we cannot do
+      // must never break the voice.
+    }
+  })()
+}
+
+function clearSentenceEnvelope() {
+  envelopeToken += 1
+  clearVoiceEnvelope()
+}
+
+/** The bytes behind a `data:` URL, or null when it is not base64 or malformed —
+ *  the envelope is decoration, so a payload we cannot read is simply no track. */
+function bytesOfDataUrl(url: string): ArrayBuffer | null {
+  const comma = url.indexOf(',')
+
+  if (!url.startsWith('data:') || comma < 0 || !url.slice(0, comma).includes(';base64')) {
+    return null
+  }
+
+  try {
+    const binary = atob(url.slice(comma + 1))
+    const bytes = new Uint8Array(binary.length)
+
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index)
+    }
+
+    return bytes.buffer
+  } catch {
+    return null
+  }
+}
+
 function currentState(
   status: VoicePlaybackState['status'],
   options?: VoicePlaybackOptions,
@@ -92,6 +178,9 @@ export interface VoicePlaybackOptions extends OwnerScope {
 export function stopVoicePlayback() {
   inFlight = null
   sequence += 1
+  // A barge-in silences the sentence mid-frame: drop the track (and bump the
+  // token so a decode still in flight cannot publish it a beat later).
+  clearSentenceEnvelope()
 
   // Drain EVERY live playback, not just the newest. Each stop is idempotent
   // and unregisters itself; the snapshot keeps the iteration safe.
@@ -297,6 +386,11 @@ function openClientDirectSpeechSession(tts: DirectTtsConfig, options: VoicePlayb
 
         const url = URL.createObjectURL(new Blob([bytes], { type: 'audio/mpeg' }))
 
+        // One envelope per sentence, published as that sentence starts. The
+        // closed head/tail comes from the encoder, so the mouth shuts between
+        // sentences instead of hanging open on the last frame.
+        publishSentenceEnvelope(bytes, Date.now())
+
         try {
           await new Promise<void>((resolve, reject) => {
             const audio = new Audio(url)
@@ -312,6 +406,7 @@ function openClientDirectSpeechSession(tts: DirectTtsConfig, options: VoicePlayb
         } finally {
           playing = null
           URL.revokeObjectURL(url)
+          clearSentenceEnvelope()
         }
       }
 
@@ -638,6 +733,14 @@ async function playSpeechDataUrl(
     return false
   }
 
+  // The relay rung plays the whole reply as one blob, so the track is that
+  // blob's envelope: an overlay still gets a mouth when this rung answers.
+  const dataBytes = bytesOfDataUrl(response.data_url)
+
+  if (dataBytes) {
+    publishSentenceEnvelope(dataBytes, Date.now())
+  }
+
   const audio = new Audio(response.data_url)
   currentAudio = audio
   setVoicePlaybackState(currentState('speaking', options, audio))
@@ -704,7 +807,7 @@ async function playSpeechDataUrl(
         onError()
       }
     })
-  })
+  }).finally(clearSentenceEnvelope)
 
   if (!isCurrent()) {
     return false

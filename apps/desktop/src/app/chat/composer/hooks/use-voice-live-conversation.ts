@@ -118,6 +118,10 @@ export function useVoiceLiveConversation({
   const voiceCopy = t.notifications.voice
   const [status, setStatus] = useState<ConversationStatus>('idle')
   const [muted, setMuted] = useState(false)
+  // Synchronous mirror for `toggleMute()`'s return value (the plugin door
+  // relays it, so a same-tick double toggle must not read a stale state).
+  const mutedRef = useRef(muted)
+  mutedRef.current = muted
   const [level, setLevel] = useState(0)
   // Mirrors delegationRef for the reply-drive effect: a new delegation must
   // restart the feed loop, and a ref write alone does not re-render.
@@ -462,12 +466,14 @@ export function useVoiceLiveConversation({
   }, [activeDelegation, busy, refreshStatus, setDelegation, status])
 
   const toggleMute = useCallback(() => {
-    setMuted(value => {
-      const next = !value
-      sessionRef.current?.setMuted(next)
+    // Return the value the surface applied: the plugin door relays this.
+    const next = !mutedRef.current
 
-      return next
-    })
+    mutedRef.current = next
+    setMuted(next)
+    sessionRef.current?.setMuted(next)
+
+    return next
   }, [])
 
   /** No explicit turn boundary in full duplex; a nudge tells the voice to answer now. */
