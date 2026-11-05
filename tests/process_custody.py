@@ -22,7 +22,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 import os
-from pathlib import Path
 import subprocess
 import sys
 from typing import Any
@@ -128,6 +127,16 @@ def environ_hermes_homes() -> list[tuple[int, str]]:
     return found
 
 
+def _norm(value: str | os.PathLike[str]) -> str:
+    """Compare a home path without statting it.
+
+    ``Path.resolve()`` calls ``stat``, and the pytest home-IO guard refuses any
+    stat of ``%LOCALAPPDATA%\\hermes`` or ``profiles\\<name>``. The sweep must
+    still *see* those processes so it can leave them alone.
+    """
+    return os.path.normcase(os.path.abspath(str(value)))
+
+
 def processes_with_hermes_home_under(roots: Iterable) -> list[int]:
     """PIDs (never this process) whose environment names a ``HERMES_HOME`` inside one of *roots*.
 
@@ -140,8 +149,8 @@ def processes_with_hermes_home_under(roots: Iterable) -> list[int]:
         if not root:
             continue
         try:
-            resolved.append(Path(root).resolve())
-        except (OSError, ValueError):
+            resolved.append(_norm(root))
+        except (OSError, ValueError, TypeError):
             continue
     if not resolved:
         return []
@@ -149,10 +158,10 @@ def processes_with_hermes_home_under(roots: Iterable) -> list[int]:
     found = []
     for pid, home in environ_hermes_homes():
         try:
-            path = Path(home).resolve()
-        except (OSError, ValueError):
+            candidate = _norm(home)
+        except (OSError, ValueError, TypeError):
             continue
-        if any(path == root or path.is_relative_to(root) for root in resolved):
+        if any(candidate == root or candidate.startswith(root + os.sep) for root in resolved):
             found.append(pid)
     return found
 
