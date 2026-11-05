@@ -3110,6 +3110,68 @@ export interface VoiceHubStateResult {
 }
 /** The Hub's whole state machine: idle at boot, armed by a person, stopped when released. */
 export type VoiceHubStatus = 'armed' | 'idle' | 'stopped'
+export interface VoiceHubGuardParams {
+  profile?: string | null
+}
+/** ``tui_gateway/voice_hub.py::VoiceHub.guard_state`` — a doctor read, not the light. ``guard`` is null when no guard is in force, which is exactly what a restarted gateway must look like (VH1 AC1/AC3). */
+export interface VoiceHubGuardResult {
+  guard?: VoiceGuardState | null
+}
+/** What the guard *did*, read from ``tools/voice_guard.py::VoiceGuard.state``. ``frames`` seen, ``speech_frames`` after cancellation, ``cancelled_frames`` where the far end changed the sample, ``utterances`` emitted, ``dropped_short`` discarded for length, ``late_reference_frames`` mic frames with no far end, ``max_reference_lag_ms`` the worst far-end staleness seen, ``degraded`` once the far end stopped being causally early (or went missing past its limit). ``reference`` / ``reference_pump`` say whether the loopback tap is actually running, and ``settings`` is the value line the guard prints at arm, so a doctor read can never show a guard whose tap is silent. */
+export interface VoiceGuardState {
+  frames?: number
+  speech_frames?: number
+  cancelled_frames?: number
+  utterances?: number
+  dropped_short?: number
+  late_reference_frames?: number
+  max_reference_lag_ms?: number
+  degraded?: boolean
+  reference?: string | null
+  reference_pump?: VoiceGuardReferencePump | null
+  dropped_reference_frames?: number
+  echo_cancel?: string | null
+  vad?: string | null
+  settings?: string | null
+}
+/** The far-end tap's own thread: whether it runs, and what it has pulled. */
+export interface VoiceGuardReferencePump {
+  running: boolean
+  frames?: number
+  errors?: number
+  last_error?: string | null
+  [key: string]: unknown
+}
+export interface VoiceHubSpeakerParams {
+  profile?: string | null
+}
+/** ``tui_gateway/voice_hub.py::VoiceHub.speaker_state`` — a doctor read, not the light. ``speaker`` is null when speaker ID is off, which is how a restarted gateway must look (VH1 AC1/AC3). ``gate`` is the Hub's own answer to "may capture open at all", so a client can show a refusal without re-deriving it from ``voice_hub.state``. */
+export interface VoiceHubSpeakerResult {
+  speaker?: VoiceSpeakerState | null
+  gate?: boolean
+}
+/** What the speaker gate *is*, read from ``tools/voice_speaker.py::SpeakerGate.state``. ``available`` false means the gate refused and the Hub is not listening; ``state`` is then ``speaker_id_unavailable`` and ``reason`` is one of the named refusals the VH4 spec fixed (``model_missing`` … ``speaker_backend_unavailable``) — never a guess. ``detail`` is the one line the operator needs to fix it. Counters are per-arm: ``utterances`` judged, ``trusted`` accepted as ``judson``, ``dropped`` refused before anything downstream saw them. */
+export interface VoiceSpeakerState {
+  available?: boolean
+  state?: string
+  reason?: string | null
+  detail?: string | null
+  model?: string | null
+  threshold?: number | null
+  identities?: string[] | null
+  trusted_identities?: string[] | null
+  utterances?: number
+  trusted?: number
+  dropped?: VoiceSpeakerDropped | null
+}
+/** Utterances refused, by reason — ``too_short``, ``low_score``, ``not_trusted``, ``embedding_failed``. */
+export interface VoiceSpeakerDropped {
+  too_short?: number
+  low_score?: number
+  not_trusted?: number
+  embedding_failed?: number
+  [key: string]: unknown
+}
 export interface SessionCreateParams {
   profile?: string | null
   cols?: number | null
@@ -6602,6 +6664,10 @@ export interface RpcMethods {
   'voice.toggle': { params: VoiceToggleParams; result: VoiceToggleResult }
   /** Speak text through the backend TTS engine (barge-in aware). */
   'voice.tts': { params: VoiceTtsParams; result: VoiceTtsResult }
+  /** The armed listening guard's counters (null when no guard is in force). */
+  'voice_hub.guard': { params: VoiceHubGuardParams; result: VoiceHubGuardResult }
+  /** Who the speaker gate will accept, what it has dropped, and its named refusal. */
+  'voice_hub.speaker': { params: VoiceHubSpeakerParams; result: VoiceHubSpeakerResult }
   /** Who owns the microphone right now: status, owner surface, since, stop reason. */
   'voice_hub.state': { params: VoiceHubStateParams; result: VoiceHubStateResult }
   /** Push client-captured PCM into the armed detector (mic-less remote backends). */
@@ -6872,6 +6938,8 @@ export const RPC_METHODS = [
   'voice.record',
   'voice.toggle',
   'voice.tts',
+  'voice_hub.guard',
+  'voice_hub.speaker',
   'voice_hub.state',
   'wake.feed',
   'wake.pause',

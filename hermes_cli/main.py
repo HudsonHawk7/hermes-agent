@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# health: allow FILE_LINES -- VH5 speaker ID registers the `voice` subcommand (import, one parser call, one allow-list entry); registering a subcommand cannot live anywhere but the parser builder in this file.
 """Hermes CLI - Main entry point.
 
 Usage:
@@ -394,6 +395,7 @@ from hermes_cli.subcommands.moa import build_moa_parser
 from hermes_cli.subcommands.fallback import build_fallback_parser
 from hermes_cli.subcommands.worktree import build_worktree_parser
 from hermes_cli.subcommands.browser import build_browser_parser
+from hermes_cli.subcommands.voice import build_voice_parser
 from hermes_cli.subcommands.secrets import build_secrets_parser
 from hermes_cli.subcommands.codex_runtime import build_codex_runtime_parser
 from hermes_cli.subcommands.egress import build_egress_parser
@@ -2772,7 +2774,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "resume",
         "send", "sessions", "setup",
         "skin", "skills", "slack", "status", "tools", "uninstall", "update",
-        "usage", "vault",
+        "usage", "vault", "voice",
         "webhook", "whatsapp", "whatsapp-cloud", "worktree", "chat", "secrets", "security",
         "browser",
         "verify",
@@ -3300,6 +3302,7 @@ def _build_cli_parser():
     build_fallback_parser(subparsers)
     build_worktree_parser(subparsers)
     build_browser_parser(subparsers)
+    build_voice_parser(subparsers)
     build_secrets_parser(subparsers)
     # OUTBOUND egress firewall; ``hermes proxy`` (gateway group) is the INBOUND one.
     build_egress_parser(subparsers)
