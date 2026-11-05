@@ -250,7 +250,7 @@ class HostedRoomService:
         def refuse_all(reason: str) -> tuple[discussion.EventPlan, tuple[str, ...]]:
             return publish([f"({self._media_label(path)} not shared: {reason})" for path in paths]), ()
 
-        if (member.target or {}).get("kind") == "peer":
+        if (member.target or {"kind": "local"}).get("kind") != "local":
             return refuse_all("sent from another machine")
         home = self._member_media_home(member.profile)
         if home is None:
