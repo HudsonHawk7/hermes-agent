@@ -657,6 +657,62 @@ def inject_new_comments_from_env(agent: Any) -> bool:
         return False
 
 
+def inject_stall_unstick_from_env(agent) -> bool:
+    """If the stall rule queued a critical-thinking-unstick pointer, steer it now.
+
+    Named card event already recorded the skill at warn time; this is the
+    mid-run / next-turn delivery so the worker actually loads the skill. Marks
+    ``stall_unstick_delivered`` after a successful steer so it fires once.
+    """
+    tid = os.environ.get("HERMES_KANBAN_TASK") if _is_dispatcher_owned_worker() else None
+    if not tid or agent is None or not hasattr(agent, "steer"):
+        return False
+    run_id_raw = os.environ.get("HERMES_KANBAN_RUN_ID")
+    try:
+        run_id = int(run_id_raw) if run_id_raw not in (None, "") else None
+    except (TypeError, ValueError):
+        run_id = None
+    try:
+        with _board(None, quiet_close=True) as (kb, conn):
+            from hermes_cli.kanban_db_dispatch import (
+                STALL_UNSTICK_POINTER_TEXT,
+                STALL_UNSTICK_SKILL_NAME,
+                mark_stall_unstick_delivered,
+                pending_stall_unstick_pointer,
+            )
+            pending = pending_stall_unstick_pointer(conn, tid, run_id=run_id)
+            if pending is None and run_id is not None:
+                # Fall back to task-scoped undelivered pointer (respawn after kill).
+                pending = pending_stall_unstick_pointer(conn, tid, run_id=None)
+            if not pending:
+                return False
+            message = (pending.get("message") or STALL_UNSTICK_POINTER_TEXT).strip()
+            skill = (pending.get("skill") or STALL_UNSTICK_SKILL_NAME).strip()
+            note = (
+                f"[Kanban stall unstick — skill `{skill}`]\n"
+                f"{message}"
+            )
+            ok = bool(agent.steer(note))
+            if not ok:
+                return False
+            deliver_run = run_id if run_id is not None else pending.get("_run_id")
+            try:
+                deliver_run = int(deliver_run) if deliver_run is not None else None
+            except (TypeError, ValueError):
+                deliver_run = None
+            with kb.write_txn(conn):
+                mark_stall_unstick_delivered(
+                    conn, tid,
+                    run_id=deliver_run,
+                    pointer_event_id=pending.get("_event_id"),
+                    via="inject",
+                )
+            return True
+    except Exception:
+        logger.debug("stall-unstick-inject: failed", exc_info=True)
+        return False
+
+
 # --- Handlers ---
 
 @_kanban_handler("kanban_show")

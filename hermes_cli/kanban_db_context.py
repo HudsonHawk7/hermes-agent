@@ -237,3 +237,28 @@ def _ctx_comments(lines: list[str], comments: list[Comment], now: int) -> None:
         lines.append(f"comment from worker `{safe_author}` at {_ctx_stamp(c.created_at, now)}:")
         lines.append(_ctx_cap(c.body, _CTX_MAX_COMMENT_BYTES))
         lines.append("")
+
+
+def _ctx_stall_unstick(lines: list[str], conn: sqlite3.Connection, task_id: str) -> None:
+    """Surface an undelivered stall→critical-thinking-unstick pointer for next turn.
+
+    The stall rule queues ``stall_unstick_pointer`` on the advisory warn tick.
+    Putting the exact pointer text into worker_context makes the next spawn (or
+    a kanban_show re-read) load the skill without a silent inject.
+    """
+    try:
+        from hermes_cli.kanban_db_dispatch import (
+            STALL_UNSTICK_POINTER_TEXT,
+            STALL_UNSTICK_SKILL_NAME,
+            pending_stall_unstick_pointer,
+        )
+    except Exception:
+        return
+    pending = pending_stall_unstick_pointer(conn, task_id)
+    if not pending:
+        return
+    message = (pending.get("message") or STALL_UNSTICK_POINTER_TEXT).strip()
+    skill = (pending.get("skill") or STALL_UNSTICK_SKILL_NAME).strip()
+    lines.append(f"## Stall unstick pointer (`{skill}`)")
+    lines.append(message)
+    lines.append("")
