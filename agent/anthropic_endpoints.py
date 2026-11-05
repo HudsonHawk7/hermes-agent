@@ -183,3 +183,26 @@ def _is_claude_platform_endpoint(base_url: str | None) -> bool:
         or _is_vertex_ai_endpoint(base_url)
         or _is_azure_anthropic_endpoint(base_url)
     )
+
+
+def _looks_like_ollama_endpoint(base_url: str | None) -> bool:
+    """True only for explicit Ollama signatures (port 11434 or an ``ollama`` host label).
+
+    Used by both the Anthropic Messages adapter (thinking disable) and the custom
+    chat-completions profile (``think`` body field). ``think`` / Anthropic-compat
+    ``thinking.type=disabled`` are Ollama-native; strict hosts (Mistral, Groq) 422 on
+    them, and arbitrary localhost may be llama.cpp / vLLM / LM Studio.
+    """
+    raw = (base_url or "").strip()
+    if not raw:
+        return False
+    parsed = urlparse(raw if "://" in raw else f"//{raw}")
+    try:  # urlparse raises ValueError on malformed ports ("host:99999"); treat as not-Ollama.
+        if parsed.port == 11434:
+            return True
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").lower().rstrip(".")
+    return bool(host) and (
+        host == "ollama.com" or host.endswith(".ollama.com") or "ollama" in host.split(".")
+    )

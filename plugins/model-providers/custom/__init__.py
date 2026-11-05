@@ -2,29 +2,12 @@
 provider="custom" (Ollama, vLLM, llama.cpp, GLM-5.2 on ARK, …)."""
 
 from typing import Any
-from urllib.parse import urlparse
 
+from agent.anthropic_endpoints import _looks_like_ollama_endpoint
 from agent.reasoning_effort import OPENAI_COMPAT_WIRE_EFFORTS, clamp_effort
 from providers import register_provider
 from providers.base import ProviderProfile
 from utils import base_url_host_matches
-
-
-def _looks_like_ollama_endpoint(base_url: str | None) -> bool:
-    """True only for explicit Ollama signatures (port 11434 or an ``ollama`` host label).
-    ``think`` is Ollama-native; strict hosts (Mistral, Groq) 422 on it, and
-    arbitrary localhost may be llama.cpp / vLLM / LM Studio."""
-    raw = (base_url or "").strip()
-    if not raw:
-        return False
-    parsed = urlparse(raw if "://" in raw else f"//{raw}")
-    try:  # urlparse raises ValueError on malformed ports ("host:99999"); treat as not-Ollama.
-        if parsed.port == 11434:
-            return True
-    except ValueError:
-        return False
-    host = (parsed.hostname or "").lower().rstrip(".")
-    return bool(host) and (host == "ollama.com" or host.endswith(".ollama.com") or "ollama" in host.split("."))
 
 
 class CustomProfile(ProviderProfile):

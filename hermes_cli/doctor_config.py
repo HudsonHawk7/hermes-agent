@@ -303,6 +303,74 @@ def _validate_model_config(config_path, issues: list) -> None:
                                 f"(add it to {_DHH}/.env or run 'hermes setup')",
                                 f"No credentials found for provider '{runtime_provider}'. Run 'hermes setup' or set the provider's "
                                 f"API key in {_DHH}/.env, or switch providers with 'hermes config set model.provider <name>'", issues)
+    _report_reasoning_off_mismatch(cfg, model_section, default_model, model_base_url)
+
+
+def collect_reasoning_off_mismatch(
+    *,
+    api_mode: str | None,
+    model: str | None,
+    base_url: str | None,
+    reasoning_effort,
+) -> str | None:
+    """Return a doctor warning line when configured reasoning-off cannot be honored, else None.
+
+    Ollama + anthropic_messages + off is honored via ``thinking.type=disabled`` (adapter path).
+    Adaptive mandatory-thinking Claude families still cannot disable — those stay a loud mismatch.
+    """
+    from hermes_constants import parse_reasoning_effort
+    from agent.anthropic_adapter import (
+        _accepts_thinking_disable,
+        _model_matches,
+        _supports_adaptive_thinking,
+        _BETWEEN_TOOLS_OFF_CLAUDE_SUBSTRINGS,
+    )
+    from agent.anthropic_endpoints import _looks_like_ollama_endpoint
+
+    mode = str(api_mode or "").strip().lower()
+    if mode not in {"anthropic_messages", "anthropic"}:
+        return None
+    parsed = parse_reasoning_effort(reasoning_effort)
+    if not isinstance(parsed, dict) or parsed.get("enabled") is not False:
+        return None
+    name = str(model or "").strip()
+    if not name:
+        return None
+    # Ollama Anthropic-compat honors disable explicitly — not a mismatch.
+    if _looks_like_ollama_endpoint(base_url):
+        return None
+    if _accepts_thinking_disable(name) or _model_matches(name, _BETWEEN_TOOLS_OFF_CLAUDE_SUBSTRINGS):
+        return None
+    # Legacy opt-in thinking (omit = off) is fine; only adaptive families that reject disable are loud.
+    if not _supports_adaptive_thinking(name):
+        return None
+    return (
+        f"agent.reasoning_effort is off but model '{name}' under api_mode={mode} cannot send "
+        "thinking.type=disabled (thinking may stay on). Use chat_completions, or a model that "
+        "accepts disable, or leave reasoning on."
+    )
+
+
+def _report_reasoning_off_mismatch(cfg: dict, model_section: dict, default_model: str, model_base_url: str) -> None:
+    """Doctor surface for the same mismatch the session log warns about."""
+    agent_cfg = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
+    api_mode = model_section.get("api_mode") if isinstance(model_section, dict) else None
+    msg = collect_reasoning_off_mismatch(
+        api_mode=str(api_mode or "").strip() or None,
+        model=default_model,
+        base_url=model_base_url,
+        reasoning_effort=agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None,
+    )
+    if msg:
+        check_warn(msg)
+    else:
+        # Only claim OK when the operator actually set reasoning off under anthropic_messages —
+        # silence otherwise (no noise on default configs).
+        from hermes_constants import parse_reasoning_effort
+        parsed = parse_reasoning_effort(agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None)
+        mode = str(api_mode or "").strip().lower()
+        if isinstance(parsed, dict) and parsed.get("enabled") is False and mode in {"anthropic_messages", "anthropic"}:
+            check_ok("reasoning_effort off is honored under anthropic_messages for this model/endpoint")
 
 
 def _validate_auxiliary_config(config_path, issues: list) -> None:

@@ -122,6 +122,106 @@ class TestEnablePathIsUnchanged:
         assert "thinking" not in _kwargs("anthropic/claude-opus-5", None)
 
 
+class TestOllamaAnthropicMessagesThinkingOff:
+    """Ollama Anthropic-compat: thinking defaults ON for many models when the field is omitted.
+
+    Ollama maps ``thinking: {type: \"disabled\"}`` → ``Think=false`` (docs + source). Hermes must
+    send that for ``reasoning_effort: none``/off; ``minimal`` must not force thinking ON.
+    """
+
+    OLLAMA_BASES = (
+        "http://127.0.0.1:11434",
+        "http://localhost:11434/v1",
+        "http://ollama:11434",
+    )
+    NON_CLAUDE = ("gemma4", "qwen3:8b", "llama3.2")
+
+    @pytest.mark.parametrize("base_url", OLLAMA_BASES)
+    @pytest.mark.parametrize("model", NON_CLAUDE)
+    def test_off_sends_explicit_disabled(self, base_url: str, model: str) -> None:
+        kwargs = _kwargs(model, {"enabled": False}, base_url=base_url)
+        assert kwargs["thinking"] == {"type": "disabled"}
+        assert "output_config" not in kwargs
+
+    @pytest.mark.parametrize("base_url", OLLAMA_BASES)
+    @pytest.mark.parametrize("model", NON_CLAUDE)
+    def test_minimal_does_not_enable_thinking(self, base_url: str, model: str) -> None:
+        """THINKING_BUDGET has no 'minimal' — old path defaulted to budget 8000 = ON."""
+        kwargs = _kwargs(model, {"enabled": True, "effort": "minimal"}, base_url=base_url)
+        assert kwargs["thinking"] == {"type": "disabled"}
+        assert kwargs["thinking"].get("type") != "enabled"
+
+    @pytest.mark.parametrize("base_url", OLLAMA_BASES)
+    def test_medium_still_enables_with_budget(self, base_url: str) -> None:
+        kwargs = _kwargs("gemma4", {"enabled": True, "effort": "medium"}, base_url=base_url)
+        assert kwargs["thinking"]["type"] == "enabled"
+        assert kwargs["thinking"]["budget_tokens"] == 8000
+
+    def test_non_ollama_non_claude_off_still_omits(self) -> None:
+        """MiniMax / generic third-party: thinking is opt-in; omit remains off (Kimi has its own test)."""
+        kwargs = _kwargs(
+            "minimax-m2.7",
+            {"enabled": False},
+            base_url="https://api.minimax.io/anthropic",
+        )
+        assert "thinking" not in kwargs
+
+    def test_non_ollama_base_does_not_get_ollama_disable(self) -> None:
+        """Port/host must look like Ollama — plain localhost without 11434 is not Ollama."""
+        kwargs = _kwargs("gemma4", {"enabled": False}, base_url="http://127.0.0.1:8080")
+        assert "thinking" not in kwargs
+
+
+class TestThinkingOffMismatchIsLoud:
+    """When disable cannot be honored, never fail silently — session log + doctor."""
+
+    def test_mandatory_model_off_logs_warning(self, caplog) -> None:
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="agent.anthropic_adapter"):
+            kwargs = _kwargs("anthropic/claude-fable-5", {"enabled": False})
+        assert "thinking" not in kwargs
+        assert any("cannot send thinking.type=disabled" in r.message for r in caplog.records)
+
+    def test_doctor_flags_mandatory_off_under_anthropic_messages(self) -> None:
+        from hermes_cli.doctor_config import collect_reasoning_off_mismatch
+
+        msg = collect_reasoning_off_mismatch(
+            api_mode="anthropic_messages",
+            model="anthropic/claude-fable-5",
+            base_url=None,
+            reasoning_effort="none",
+        )
+        assert msg is not None
+        assert "cannot send thinking.type=disabled" in msg
+
+    def test_doctor_silent_for_ollama_off(self) -> None:
+        from hermes_cli.doctor_config import collect_reasoning_off_mismatch
+
+        assert (
+            collect_reasoning_off_mismatch(
+                api_mode="anthropic_messages",
+                model="gemma4",
+                base_url="http://127.0.0.1:11434",
+                reasoning_effort="none",
+            )
+            is None
+        )
+
+    def test_doctor_silent_when_disableable_claude(self) -> None:
+        from hermes_cli.doctor_config import collect_reasoning_off_mismatch
+
+        assert (
+            collect_reasoning_off_mismatch(
+                api_mode="anthropic_messages",
+                model="claude-opus-4-6",
+                base_url=None,
+                reasoning_effort=False,
+            )
+            is None
+        )
+
+
 class TestDisableVerdictHelper:
     """``_accepts_thinking_disable`` is the single source of the verdict."""
 

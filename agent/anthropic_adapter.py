@@ -20,8 +20,8 @@ from agent.anthropic_credentials import _is_oauth_token, anthropic_route_is_oaut
 from agent.anthropic_endpoints import (
     _base_url_needs_context_1m_beta, _is_azure_anthropic_endpoint, _is_kimi_coding_endpoint,
     _is_minimax_anthropic_endpoint, _is_nous_portal_endpoint, _is_opencode_endpoint,
-    _is_third_party_anthropic_endpoint, _model_name_is_kimi_family, _normalize_base_url_text,
-    _requires_bearer_auth,
+    _is_third_party_anthropic_endpoint, _looks_like_ollama_endpoint, _model_name_is_kimi_family,
+    _normalize_base_url_text, _requires_bearer_auth,
 )
 from agent.anthropic_message_convert import (
     convert_messages_to_anthropic, convert_tools_to_anthropic, normalize_model_name,
@@ -613,22 +613,53 @@ def _apply_claude_code_identity(system, anthropic_tools, anthropic_messages, to_
     return system
 
 
-def _thinking_kwargs(reasoning_config: dict[str, Any], model: str, effective_max_tokens: int) -> dict[str, Any]:
+def _thinking_kwargs(
+    reasoning_config: dict[str, Any],
+    model: str,
+    effective_max_tokens: int,
+    *,
+    base_url: str | None = None,
+) -> dict[str, Any]:
     """Map ``reasoning_config`` to Anthropic thinking kwargs. Adaptive models (Claude 4.6+,
     Kimi/Moonshot) get ``thinking.type=adaptive`` + ``output_config.effort``; older models and
     manual-only compat endpoints (MiniMax) get budget_tokens. Haiku through 4.5 gets none. On
     4.7+ ``thinking.display`` defaults to "omitted", hiding the reasoning Hermes shows in its CLI,
-    so "summarized" is requested to keep the activity feed populated."""
+    so "summarized" is requested to keep the activity feed populated.
+
+    Ollama's Anthropic-compat route maps ``thinking: {type: disabled}`` to ``Think=false`` (see
+    Ollama docs + source). Omitting the field leaves many Ollama models (e.g. gemma4) thinking ON,
+    so a configured ``reasoning_effort: none`` must send the explicit disable — never silence.
+    ``minimal`` on Ollama must not force thinking ON either (toggleable thinking, lowest tier =
+    off).
+    """
+    ollama = _looks_like_ollama_endpoint(base_url)
     if reasoning_config.get("enabled") is False:
         # Adaptive models think by DEFAULT, so omitting the parameter is not a disable — the user
         # silently keeps paying. Mandatory-thinking models 400 on the disable, so they keep the
-        # omission: a silently-ignored disable beats a dead turn.
+        # omission: a loudly-warned ignored disable beats a dead turn.
         if _model_matches(model, _BETWEEN_TOOLS_OFF_CLAUDE_SUBSTRINGS):
             return {"thinking": {"type": "between_tools"}}
-        return {"thinking": {"type": "disabled"}} if _accepts_thinking_disable(model) else {}
+        if _accepts_thinking_disable(model) or ollama:
+            return {"thinking": {"type": "disabled"}}
+        # Legacy Claude / MiniMax: thinking is opt-in via budget_tokens — omit already means off.
+        # Adaptive families that reject disable (mandatory thinking, Kimi scope) keep thinking when
+        # omitted, so surface the mismatch instead of failing silently.
+        if _supports_adaptive_thinking(model):
+            logger.warning(
+                "reasoning_effort is off but anthropic_messages cannot send thinking.type=disabled "
+                "for model %r (base_url=%r). Thinking may stay on; switch api_mode to chat_completions "
+                "or pick a model that accepts disable. Run `hermes doctor` for the same check.",
+                model,
+                base_url or "",
+            )
+        return {}
     if _is_pre_thinking_haiku(model):
         return {}
     effort = str(reasoning_config.get("effort", "medium")).lower()
+    # Ollama Anthropic-compat: thinking is effectively on/off. "minimal" must not enable it
+    # (THINKING_BUDGET has no minimal entry, so the old path defaulted to budget 8000 = ON).
+    if ollama and effort in {"minimal", "none", "off"}:
+        return {"thinking": {"type": "disabled"}}
     if _supports_adaptive_thinking(model):
         adaptive_effort = ADAPTIVE_EFFORT_MAP.get(effort, "medium")
         if adaptive_effort == "xhigh" and not _supports_xhigh_effort(model):
@@ -698,7 +729,7 @@ def build_anthropic_kwargs(
     # reasoning blocks stay populated — matching 4.6 behavior and preserving the activity-feed UX during
     # long tool runs.
     if reasoning_config and isinstance(reasoning_config, dict):
-        kwargs.update(_thinking_kwargs(reasoning_config, model, effective_max_tokens))
+        kwargs.update(_thinking_kwargs(reasoning_config, model, effective_max_tokens, base_url=base_url))
     # Safety net so upstream 4.6 -> 4.7 migrations don't need coordinated edits everywhere callers
     # (auxiliary_client, ...) set sampling params.
     if _forbids_sampling_params(model):
