@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import ctypes
 import platform
 import shlex
 import subprocess
@@ -117,8 +118,8 @@ def _try_lazy_install_stt() -> bool:
 
 # Substrings identifying a missing/unloadable CUDA runtime library: the "auto" device
 # picker has already committed to CUDA, so we fall back to CPU and reload. Deliberately
-# narrow (library names + dlopen phrasing) so legitimate runtime failures like "CUDA
-# out of memory" surface to the user instead of silently running on CPU.
+# narrow (library names + dlopen phrasing): a genuine decode failure must surface, not
+# silently re-run on CPU — VRAM exhaustion is the one exception, see _CUDA_OOM_MARKERS.
 _CUDA_LIB_ERROR_MARKERS = (
     "libcublas", "libcudnn", "libcudart", "cannot be loaded", "cannot open shared object",
     "no kernel image is available", "CUBLAS_STATUS_NOT_SUPPORTED", "no CUDA-capable device",
@@ -128,6 +129,101 @@ _CUDA_LIB_ERROR_MARKERS = (
 def _looks_like_cuda_lib_error(exc: BaseException) -> bool:
     """Heuristic: is this a missing/broken CUDA runtime library (not a legitimate runtime failure)?"""
     return any(marker in str(exc) for marker in _CUDA_LIB_ERROR_MARKERS)
+
+
+# The 3090 is shared with ComfyUI and Ollama, so a GPU transcription can lose the VRAM race.
+# Losing the GPU for one utterance is fine; losing the words is not, so an out-of-memory error
+# retries that utterance on the CPU behind a WARNING that says OOM. It is NOT the missing-library
+# case: nothing is broken, so the cached CUDA model stays and the next utterance tries the GPU
+# again.
+_CUDA_OOM_MARKERS = (
+    "out of memory", "cublas_status_alloc_failed", "cudnn_status_alloc_failed",
+    "cuda_error_out_of_memory", "cudaerrormemoryallocation")
+
+
+def _looks_like_cuda_oom_error(exc: BaseException) -> bool:
+    """Heuristic: did this failure run out of GPU memory (as opposed to a missing library)?"""
+    text = str(exc).casefold()
+    return any(marker in text for marker in _CUDA_OOM_MARKERS)
+
+
+# cuBLAS 12 is the CUDA library ctranslate2's wheel does NOT ship — it bundles cudnn64_9.dll and
+# libiomp5md.dll and expects the rest of the CUDA runtime to be installed — and since Python 3.8
+# the loader no longer searches PATH for an extension module's dependencies. So `device: cuda`
+# died with "Library cublas64_12.dll is not found or cannot be loaded" and the CPU fallback hid it
+# behind 6-8 s per utterance, however short the speech; conversation mode was unusable on Windows
+# (2026-10-18..21, three profiles pinned back to the CPU). The nvidia-cublas-cu12 wheel (the
+# `stt-whisper` / `voice` extras) carries cublas64_12 + cublasLt64_12 under nvidia/cublas/bin: we
+# add that directory to the DLL search path and load the pair in dependency order, the same
+# pattern ctranslate2/__init__.py uses for its own bundled libraries.
+_CUDA_DEVICE_NAMES = frozenset({"cuda", "auto"})
+_CUBLAS12_DLLS = ("cublasLt64_12.dll", "cublas64_12.dll")
+_CUBLAS_EXTRA = "stt-whisper"
+# ``os.add_dll_directory`` hands back a cookie that the loader only honours while it is
+# referenced; keep every one we open alive for the life of the process.
+_cuda_dll_dir_cookies: list[Any] = []
+# None = not attempted in this process yet; then True (loaded) or False (reported as unusable).
+_cublas_preload: Optional[bool] = None
+
+
+def _cuda_preload_needed(device: str, host: str) -> bool:
+    """Pure: does loading *device* on *host* need cuBLAS put on the DLL search path?"""
+    return host == "Windows" and str(device or "").strip().casefold() in _CUDA_DEVICE_NAMES
+
+
+def _cublas_bin_dir() -> Optional[Path]:
+    """The nvidia-cublas-cu12 wheel's DLL directory, or None when that package is absent."""
+    try:
+        spec = _ilu.find_spec("nvidia.cublas")
+    except (ImportError, ValueError):
+        return None
+    locations = list(getattr(spec, "submodule_search_locations", None) or ()) if spec else []
+    for location in locations:
+        bin_dir = Path(location) / "bin"
+        if bin_dir.is_dir():
+            return bin_dir
+    return None
+
+
+def _preload_cublas(bin_dir: Path) -> list[str]:
+    """Load cuBLAS 12's DLLs in dependency order so ctranslate2's own load resolves them."""
+    cookie = os.add_dll_directory(str(bin_dir))
+    _cuda_dll_dir_cookies.append(cookie)
+    for name in _CUBLAS12_DLLS:
+        ctypes.CDLL(str(bin_dir / name))
+    return list(_CUBLAS12_DLLS)
+
+
+def _ensure_cublas_preloaded(device: str, *, host: Optional[str] = None) -> bool:
+    """Put cuBLAS 12 on the DLL search path before a GPU load.
+
+    Returns False when it cannot be done, after ONE WARNING naming the extra to install: the
+    caller's CPU fallback then costs 6-8 s an utterance, which must never be a silent surprise.
+    """
+    global _cublas_preload
+    if not _cuda_preload_needed(device, platform.system() if host is None else host):
+        return False
+    if _cublas_preload is not None:
+        return _cublas_preload
+    bin_dir = _cublas_bin_dir()
+    if bin_dir is None:
+        _cublas_preload = False
+        logger.warning(
+            "Local whisper is pinned to device=%r but the CUDA 12 cuBLAS runtime is not installed, so "
+            "ctranslate2 cannot load cublas64_12.dll and every transcription runs on the CPU (6-8 s per "
+            "utterance however short the speech). Install the '%s' extra (nvidia-cublas-cu12) — "
+            "`hermes tools` → Speech-to-Text — to transcribe on the GPU.", device, _CUBLAS_EXTRA)
+        return False
+    try:
+        _preload_cublas(bin_dir)
+    except OSError as exc:
+        _cublas_preload = False
+        logger.warning("Cannot load the CUDA 12 cuBLAS runtime from %s (%s) — the GPU path will fall "
+                       "back to the CPU (int8).", bin_dir, exc)
+        return False
+    _cublas_preload = True
+    logger.info("cuBLAS 12 preloaded from %s (%s)", bin_dir, ", ".join(_CUBLAS12_DLLS))
+    return True
 
 
 def _sysctl_value(name: str) -> str:
@@ -172,6 +268,7 @@ def _hub_cache_miss_error() -> type:
 
 def _create_whisper_model(model_name: str, *, device: str, compute_type: str):
     """Use a cached model without contacting the Hub, downloading only on a cache miss."""
+    _ensure_cublas_preloaded(device)
     from faster_whisper import WhisperModel
 
     kwargs = {"device": device, "compute_type": compute_type}
@@ -218,6 +315,10 @@ def _load_local_whisper_model(model_name: str, device: str = "auto", compute_typ
     try:
         return _create_whisper_model(model_name, device=device, compute_type=compute_type)
     except Exception as exc:
+        if _looks_like_cuda_oom_error(exc):
+            logger.warning("faster-whisper ran out of GPU memory loading '%s' (%s) — the 3090 is shared "
+                           "with other GPU work, so this loads on the CPU (int8).", model_name, exc)
+            return _create_whisper_model(model_name, device="cpu", compute_type="int8")
         if not _looks_like_cuda_lib_error(exc):
             raise
         logger.warning("faster-whisper CUDA load failed (%s) — falling back to CPU (int8). "
