@@ -1,5 +1,5 @@
 /**
- * Lane 5 (t_18ada2ea): PR 203 / 1d41be1 call-screen capture in a real sandbox.
+ * Lane 5 (t_6df9c774): PR 203 / 1d41be1 call-screen capture in a real sandbox.
  *
  * Isolated HERMES_HOME lives under os.tmpdir() via createCoreSandbox (C:\Users\...\AppData\Local\Temp\hermes-e2e).
  * Fail-fast if that root, the sandbox home, or HERMES_E2E_CORE_ROOT sits under the native Hermes home
@@ -10,8 +10,14 @@
  * Mock provider. Fake sogni on PATH. No spend. Window stays hidden (playwright.config HERMES_DESKTOP_E2E_HIDDEN=1).
  * Capture via webContents.capturePage (hidden-capture.ts). Live gateway on :8642 is read-only.
  *
- * Covers DESIGN.md §11.6 S3a rows and S3b rows (including row 14 / s3-rate-pinned).
- * Fixture clips: kitchen-morning. When Aurora's first-call set (t_e5a04565) lands at
+ * The five Probe-HOLD rows are driven the way plugin.js reaches them, not by patching $call:
+ *   handoff pair  — player.enqueue([spark-laugh-01, spark-wave-01]) (cue action play, 2-clip route)
+ *   She's here    — avatar-tile on chat, before open()
+ *   when-now      — enqueue mid-clip; strip keeps current chip-now, route waits
+ *   play-ack      — same enqueue path as the cue handler; strip lights the acked clip
+ *   barge-in      — player.drain() then herTurnEnded() (voice.interrupted)
+ *
+ * Fixture clips: kitchen-morning (clip 3 = spark-laugh-01, clip 4 = spark-wave-01). When Aurora's first-call set (t_e5a04565) lands at
  * %LOCALAPPDATA%\hermes\profiles\aurora\avatar-map-library, a later test plays those too
  * (library copy onto C: — never HERMES_HOME under the native home).
  *
@@ -53,7 +59,11 @@ const FIXTURES_SRC = 'S:/ForceAgents/architect/wt/avatar-map-s3/Tools/hermes-for
 const AURORA_LIB = path.join(process.env.LOCALAPPDATA || '', 'hermes', 'profiles', 'aurora', 'avatar-map-library')
 
 const SHOT_DIR = process.env.HERMES_HIDDEN_CAPTURE_DIR
-  || path.join(os.tmpdir(), `pr203-shots-${ILUM}`)
+  || 'C:/Users/judso/Projects/Sandboxes/voss/tmp/pr203-shots-lane5'
+
+const CLIP_LAUGH = 'spark-laugh-01' // fixture clip 3
+const CLIP_WAVE = 'spark-wave-01' // fixture clip 4
+const CLIP_LEAN = 'closer-lean-01'
 
 function nativeHermesHome(): string {
   const local = process.env.LOCALAPPDATA
@@ -130,7 +140,7 @@ function copyAvatarMapPlugin(dest: string): void {
   const bytes = fs.statSync(pluginJs).size
 
   if (bytes < 50_000) {throw new Error(`plugin.js too small: ${bytes} at ${pluginJs}`)}
-  // Sandbox-only hook so the spec can drive $call (voice / barge-in / camera) without a live multiplex.
+  // Sandbox-only hook: same calls the cue handler and voice.interrupted make.
   const needle = '    ctx.registerMany(['
   const raw = fs.readFileSync(pluginJs, 'utf8')
 
@@ -142,7 +152,7 @@ function copyAvatarMapPlugin(dest: string): void {
       raw.replace(
         needle,
         '    if (typeof globalThis !== \'undefined\') {\n'
-        + '      globalThis.__avatarMapE2E = { $call, patch, actions, getPlayer: () => player }\n'
+        + '      globalThis.__avatarMapE2E = { $call, patch, actions, getPlayer: () => player, enqueue(route) { const queued = player.enqueue(route); syncFromPlayer(); return queued }, drain() { player.drain(); herTurnEnded(); syncFromPlayer() } }\n'
         + '    }\n'
         + needle,
       ),
@@ -287,6 +297,9 @@ async function assertHidden(app: ElectronApplication): Promise<void> {
 type E2eHook = {
   patch: (partial: Record<string, unknown>) => void
   actions: { open: () => void; end: () => void; settings: () => void; reload: () => void; setLayout: (id: string) => void; backToRest: () => void }
+  enqueue?: (route: string[]) => string[]
+  drain?: () => void
+  $call?: { get: () => Record<string, unknown> }
 }
 
 async function e2eHook(page: Page): Promise<boolean> {
@@ -304,6 +317,56 @@ async function patchCall(page: Page, partial: Record<string, unknown>): Promise<
 
 async function clickTestId(page: Page, testId: string): Promise<void> {
   await page.locator(`[data-testid="${testId}"]`).first().click({ force: true, timeout: 8_000 })
+}
+
+async function enqueueRoute(page: Page, route: string[]): Promise<string[]> {
+  return page.evaluate(ids => {
+    const hook = (globalThis as { __avatarMapE2E?: E2eHook }).__avatarMapE2E
+
+    if (!hook?.enqueue) {throw new Error('hook.enqueue missing')}
+
+    return hook.enqueue(ids)
+  }, route)
+}
+
+async function drainQueue(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const hook = (globalThis as { __avatarMapE2E?: E2eHook }).__avatarMapE2E
+
+    if (!hook?.drain) {throw new Error('hook.drain missing')}
+    hook.drain()
+  })
+}
+
+async function callSnap(page: Page): Promise<{ playing: string | null; queue: string[]; next: string | null }> {
+  return page.evaluate(() => {
+    const hook = (globalThis as { __avatarMapE2E?: E2eHook }).__avatarMapE2E
+    const s = hook?.$call?.get() ?? {}
+
+    return {
+      playing: (s.playing as string | null) ?? null,
+      queue: Array.isArray(s.queue) ? [...(s.queue as string[])] : [],
+      next: (s.next as string | null) ?? null,
+    }
+  })
+}
+
+async function waitPlaying(page: Page, clipId: string, timeout = 20_000): Promise<void> {
+  await page.locator(`[data-testid="avatar-her"][data-playing="${clipId}"]`).waitFor({ state: 'attached', timeout })
+}
+
+async function waitNearEnd(page: Page, minProgress = 0.76, timeout = 12_000): Promise<void> {
+  await expect.poll(async () => page.evaluate(() => {
+    const v = document.querySelector('[data-avatar-map-active="true"]') as HTMLVideoElement | null
+
+    if (!v || !v.duration || !Number.isFinite(v.duration) || v.duration <= 0) {return 0}
+
+    return v.currentTime / v.duration
+  }), { timeout, intervals: [80, 80, 80] }).toBeGreaterThanOrEqual(minProgress)
+}
+
+async function chipNowText(page: Page): Promise<string> {
+  return (await page.locator('[data-testid="avatar-chip-now"]').first().textContent()) ?? ''
 }
 
 test.describe.configure({ timeout: 10 * 60_000 })
@@ -387,6 +450,41 @@ test('S3a+S3b call screen (fixtures, hidden, isolated sandbox)', async () => {
     console.log('COMPOSER call=', mounted, 'off=', off, 'hook=', await e2eHook(page))
 
     await assertHidden(app)
+
+    // AC 19: She's here tile + Call pill, before open. On /call this tile is gone.
+    const statsNo = page.getByRole('button', { name: 'No thanks' })
+
+    if (await statsNo.count()) {
+      await statsNo.first().click().catch(() => undefined)
+    }
+
+    const showRight = page.getByRole('button', { name: 'Show right sidebar' })
+
+    if (await showRight.count()) {
+      await showRight.first().click()
+    }
+
+    const sheTab = page.getByRole('tab', { name: "She's here" }).or(page.getByText("She's here", { exact: true }))
+
+    if (await sheTab.count()) {
+      await sheTab.first().click({ force: true }).catch(() => undefined)
+    }
+
+    try {
+      await waitAttached(page, 'avatar-tile', 20_000)
+    } catch {
+      await dumpOnFail(page, app, 'no-tile')
+      throw new Error("avatar-tile never mounted (She's here pane)")
+    }
+
+    expect(await attachedCount(page, 'avatar-tile'), 'avatar-tile').toBeGreaterThan(0)
+    expect(await attachedCount(page, 'avatar-tile-call'), 'avatar-tile-call').toBeGreaterThan(0)
+    expect(await attachedCount(page, 'avatar-composer-call'), 'avatar-composer-call').toBeGreaterThan(0)
+    await expect(page.locator('[data-testid="avatar-tile"]').first()).toBeVisible({ timeout: 12_000 })
+    await expect(page.locator('[data-testid="avatar-tile-call"]').first()).toBeVisible()
+    await expect(page.locator('[data-testid="avatar-composer-call"]').first()).toBeVisible()
+    await shot(app, 's3-shes-here.png')
+    await shot(app, 's3-tile-and-call-pill.png')
     await shot(app, 's3-composer-call.png')
 
     if (!(await e2eHook(page))) {
@@ -408,13 +506,63 @@ test('S3a+S3b call screen (fixtures, hidden, isolated sandbox)', async () => {
       throw new Error(`avatar-call missing after actions.open. logs:\n${appLogTail(app, 40)}`)
     }
 
-    await page.waitForTimeout(1_200)
+    await page.waitForTimeout(400)
     await shot(app, 's3-chrome.png')
     await shot(app, 's3-just-her.png')
 
     expect(await attachedCount(page, 'avatar-stage')).toBeGreaterThan(0)
     expect(await attachedCount(page, 'avatar-strip')).toBeGreaterThan(0)
     expect(await attachedCount(page, 'avatar-end')).toBeGreaterThan(0)
+
+    // Five Probe-HOLD rows: drive the player the way the cue handler and voice.interrupted do.
+    // Before layouts so the rest clip is still mid-play for when-now.
+    await waitAttached(page, 'avatar-her', 20_000)
+    await waitAttached(page, 'avatar-chip-now', 20_000)
+
+    const beforeWhen = await callSnap(page)
+    console.log('WHEN_NOW before', beforeWhen)
+    const queuedWhen = await enqueueRoute(page, [CLIP_WAVE])
+    console.log('WHEN_NOW queued', queuedWhen)
+    const afterWhen = await callSnap(page)
+    expect(afterWhen.playing, 'when-now must keep the current clip').toBe(beforeWhen.playing)
+    expect(afterWhen.queue, 'when-now queue').toContain(CLIP_WAVE)
+    await expect(page.locator('[data-testid="avatar-chip-now"]')).toBeAttached()
+    const nowWhen = await chipNowText(page)
+    expect(nowWhen.toLowerCase(), 'when-now chip-now is still current, not Wave').not.toContain('wave')
+    await expect(page.locator('[data-testid="avatar-chip"], [data-testid="avatar-chip-now"]').filter({ hasText: /Wave/i })).toBeAttached()
+    await shot(app, 's3-when-now-waits.png')
+
+    await waitPlaying(page, CLIP_WAVE, 20_000)
+    await expect(page.locator('[data-testid="avatar-chip-now"]')).toContainText(/Wave/i)
+    await shot(app, 's3-play-ack-strip.png')
+
+    const queuedHandoff = await enqueueRoute(page, [CLIP_LAUGH, CLIP_WAVE])
+    console.log('HANDOFF queued', queuedHandoff)
+    await waitPlaying(page, CLIP_LAUGH, 20_000)
+    await expect(page.locator('[data-testid="avatar-chip-now"]')).toContainText(/Laugh/i)
+    await waitNearEnd(page, 0.76)
+    await expect(page.locator(`[data-testid="avatar-her"][data-playing="${CLIP_LAUGH}"]`)).toBeAttached()
+    await shot(app, 's3-handoff-no-black-a.png')
+    await waitPlaying(page, CLIP_WAVE, 12_000)
+    await expect(page.locator('[data-testid="avatar-chip-now"]')).toContainText(/Wave/i)
+    await page.waitForTimeout(350)
+    await shot(app, 's3-handoff-no-black-b.png')
+    await shot(app, 's3-handoff-no-black.png')
+
+    const queuedBarge = await enqueueRoute(page, [CLIP_LAUGH, CLIP_WAVE, CLIP_LEAN])
+    console.log('BARGE queued', queuedBarge)
+    await waitPlaying(page, CLIP_LAUGH, 20_000)
+    await expect(page.locator('[data-testid="avatar-chip"]').filter({ hasText: /Wave/i })).toBeAttached()
+    await drainQueue(page)
+    const afterDrain = await callSnap(page)
+    console.log('BARGE after drain', afterDrain)
+    expect(afterDrain.playing, 'drain keeps current clip').toBe(CLIP_LAUGH)
+    expect(afterDrain.queue, 'drain empties the route').toEqual([])
+    expect(afterDrain.next, 'drain next is rest').toBeTruthy()
+    expect(afterDrain.next === CLIP_WAVE || afterDrain.next === CLIP_LEAN, 'drain next must not stay on the route').toBe(false)
+    await expect(page.locator('[data-testid="avatar-chip-now"]')).toContainText(/Laugh/i)
+    expect(await page.locator('[data-testid="avatar-chip"]').filter({ hasText: /Wave/i }).count(), 'Wave chip gone after drain').toBe(0)
+    await shot(app, 's3-barge-in-drain.png')
 
     // Camera off (self_view false) — AC 9, 11
     if (await attachedCount(page, 'avatar-camera-off') > 0) {
@@ -437,7 +585,7 @@ test('S3a+S3b call screen (fixtures, hidden, isolated sandbox)', async () => {
       await page.waitForTimeout(400)
     }
 
-    // Voice thinking / speaking / barge-in drain (S3a AC 5, 6) — store states the UI already renders.
+    // Voice thinking / speaking — store states the UI already renders (no barge-in patch).
     if (await e2eHook(page)) {
       await patchCall(page, { voice: 'thinking', open: true })
       await page.waitForTimeout(300)
@@ -445,15 +593,10 @@ test('S3a+S3b call screen (fixtures, hidden, isolated sandbox)', async () => {
       await patchCall(page, { voice: 'speaking' })
       await page.waitForTimeout(300)
       await shot(app, 's3-voice-speaking.png')
-      await patchCall(page, { voice: 'interrupted' })
-      await page.waitForTimeout(300)
-      await shot(app, 's3-barge-in-drain.png')
-      await patchCall(page, { voice: 'off' })
+      await patchCall(page, { voice: 'listening' })
     }
 
     // Tile + statusbar count (AC 12, 13)
-    await shot(app, 's3-shes-here.png')
-
     if (await attachedCount(page, 'avatar-count') > 0) {
       await clickTestId(page, 'avatar-count')
       await page.waitForTimeout(300)
@@ -464,12 +607,11 @@ test('S3a+S3b call screen (fixtures, hidden, isolated sandbox)', async () => {
       }
     }
 
-    // Rest loop / no-repeat / handoff (AC 2, 3) — rest clips are 2s; two cycles.
+    // Rest loop / no-repeat — two later rest frames, after the driven handoff pair already shot.
     await page.waitForTimeout(2_500)
     await shot(app, 's3-no-repeat-a.png')
     await page.waitForTimeout(2_500)
     await shot(app, 's3-no-repeat-b.png')
-    await shot(app, 's3-handoff-no-black.png')
 
     // Seams (S3b AC 41) — store flag the UI already renders as "same pose"
     if (await e2eHook(page)) {
