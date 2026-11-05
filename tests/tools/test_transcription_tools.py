@@ -525,24 +525,30 @@ class TestTranscribeLocalExtended:
         )
 
 
-    def test_cuda_out_of_memory_does_not_trigger_cpu_fallback(self, tmp_path):
-        """'CUDA out of memory' is a real error, not a missing lib — surface it."""
+    def test_cuda_out_of_memory_falls_back_to_cpu_with_a_warning(self, tmp_path, caplog):
+        """The 3090 is shared with ComfyUI and Ollama: losing the GPU for one utterance is fine,
+        losing the words is not — so OOM retries on the CPU and says so in a WARNING."""
         audio = tmp_path / "test.ogg"
         audio.write_bytes(b"fake")
 
-        mock_whisper_cls = MagicMock(side_effect=RuntimeError("CUDA out of memory"))
+        cpu_model = MagicMock()
+        cpu_model.transcribe.return_value = ([MagicMock(text="hi", no_speech_prob=0.0, avg_logprob=0.0)],
+                                             MagicMock(language="en", duration=1.0))
+        mock_whisper_cls = MagicMock(side_effect=[RuntimeError("CUDA out of memory"), cpu_model])
 
         with patch("tools.transcription_tools._HAS_FASTER_WHISPER", True), \
              patch("faster_whisper.WhisperModel", mock_whisper_cls), \
              patch("tools.transcription_tools._local_model", None), \
-             patch("tools.transcription_tools._local_model_name", None):
+             patch("tools.transcription_tools._local_model_name", None), \
+             caplog.at_level("WARNING", logger="tools.transcription_tools"):
             from tools.transcription_tools import _transcribe_local
             result = _transcribe_local(str(audio), "base")
 
-        # Single call — no CPU retry, because OOM isn't a missing-lib symptom.
-        assert mock_whisper_cls.call_count == 1
-        assert result["success"] is False
-        assert "CUDA out of memory" in result["error"]
+        assert result["success"] is True, result.get("error")
+        assert mock_whisper_cls.call_count == 2
+        retry_kwargs = mock_whisper_cls.call_args_list[1].kwargs
+        assert (retry_kwargs["device"], retry_kwargs["compute_type"]) == ("cpu", "int8")
+        assert any("out of memory" in record.getMessage() for record in caplog.records)
 
     @staticmethod
     def _lazy_failure(message):
@@ -582,12 +588,13 @@ class TestTranscribeLocalExtended:
         assert (retry_kwargs["device"], retry_kwargs["compute_type"]) == ("cpu", "int8")
 
     def test_iteration_time_non_lib_error_surfaces_without_cpu_retry(self, tmp_path):
-        """A real runtime failure during iteration must NOT trigger the CPU retry."""
+        """A real decode failure during iteration must NOT trigger the CPU retry."""
         audio = tmp_path / "test.ogg"
         audio.write_bytes(b"fake")
 
         cuda_model = MagicMock()
-        cuda_model.transcribe.return_value = (self._lazy_failure("CUDA out of memory"), MagicMock())
+        cuda_model.transcribe.return_value = (self._lazy_failure("Invalid data found in the stream"),
+                                              MagicMock())
         mock_whisper_cls = MagicMock(return_value=cuda_model)
 
         with patch("tools.transcription_tools._HAS_FASTER_WHISPER", True), \
@@ -598,8 +605,40 @@ class TestTranscribeLocalExtended:
             result = _transcribe_local(str(audio), "base")
 
         assert result["success"] is False
-        assert "CUDA out of memory" in result["error"]
+        assert "Invalid data found in the stream" in result["error"]
         assert mock_whisper_cls.call_count == 1
+
+    def test_iteration_time_cuda_oom_retries_on_cpu_and_keeps_the_cuda_cache(self, tmp_path, caplog):
+        """OOM is transient (ComfyUI / Ollama share the 3090), so only this utterance drops to the
+        CPU: the cached CUDA model must survive so the next utterance tries the GPU again."""
+        audio = tmp_path / "test.ogg"
+        audio.write_bytes(b"fake")
+        info = MagicMock(language="en", duration=1.0)
+
+        cuda_model = MagicMock()
+        cuda_model.transcribe.return_value = (self._lazy_failure("CUDA failed with error out of memory"),
+                                              info)
+        cpu_segment = MagicMock(text="hi", no_speech_prob=0.0, avg_logprob=0.0)
+        cpu_model = MagicMock()
+        cpu_model.transcribe.return_value = ([cpu_segment], info)
+        mock_whisper_cls = MagicMock(side_effect=[cuda_model, cpu_model])
+
+        with patch("tools.transcription_tools._HAS_FASTER_WHISPER", True), \
+             patch("faster_whisper.WhisperModel", mock_whisper_cls), \
+             patch("tools.transcription_tools._local_model", None), \
+             patch("tools.transcription_tools._local_model_name", None), \
+             caplog.at_level("WARNING", logger="tools.transcription_tools"):
+            from tools import transcription_tools
+            result = transcription_tools._transcribe_local(str(audio), "base")
+            # Read inside the block: the patch restores the pre-test `_local_model` on exit.
+            cached_after = transcription_tools._local_model
+
+        assert result["success"] is True, result.get("error")
+        assert result["transcript"] == "hi"
+        retry_kwargs = mock_whisper_cls.call_args_list[1].kwargs
+        assert (retry_kwargs["device"], retry_kwargs["compute_type"]) == ("cpu", "int8")
+        assert cached_after is cuda_model, "the CUDA model must stay cached"
+        assert any("out of memory" in record.getMessage() for record in caplog.records)
 
 
 # ============================================================================

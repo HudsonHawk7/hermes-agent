@@ -277,7 +277,7 @@ def test_stale_claim_extend_live_worker_does_not_count_failure(
     kanban_home, monkeypatch,
 ):
     """The live-worker extend path must NOT increment ``consecutive_failures``
-    (#111306): extending a still-alive worker's claim is not a failure."""
+    (#111306): extending a still-alive *heartbeating* worker's claim is not a failure."""
     import hermes_cli.kanban_db as _kb
 
     with kbc.connect() as conn:
@@ -286,9 +286,15 @@ def test_stale_claim_extend_live_worker_does_not_count_failure(
         kb.claim_task(conn, t, claimer=f"{host}:worker")
         kbd._set_worker_pid(conn, t, 12345)
         old_expires = int(time.time()) - 3600
+        now = int(time.time())
         conn.execute(
-            "UPDATE tasks SET claim_expires = ? WHERE id = ?",
-            (old_expires, t),
+            "UPDATE tasks SET claim_expires = ?, last_heartbeat_at = ? WHERE id = ?",
+            (old_expires, now, t),
+        )
+        conn.execute(
+            "UPDATE task_runs SET last_heartbeat_at = ? WHERE id = "
+            "(SELECT current_run_id FROM tasks WHERE id = ?)",
+            (now, t),
         )
         monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: True)
         # Nothing reclaimed — the live claim is extended instead.
@@ -299,6 +305,7 @@ def test_stale_claim_extend_live_worker_does_not_count_failure(
         ).fetchone()
         assert row["status"] == "running"
         assert row["consecutive_failures"] == 0
+        assert any(e.kind == "claim_extended" for e in kb.list_events(conn, t))
 
 
 
