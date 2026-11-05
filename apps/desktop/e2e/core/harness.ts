@@ -19,7 +19,8 @@ import { _electron, type ElectronApplication, expect, type Page } from '@playwri
 
 import { resolveElectronBinary } from '../electron-binary'
 
-import { isSandboxProcess, procfsCensus, type ProcInfo, readProc, sandboxProcessesOf } from './process-census'
+import { isSandboxProcess, procfsCensus, type ProcInfo, readProc, sandboxProcessesOf, treeKill } from './process-census'
+import { pathUnder, windowsProcessHomes } from './process-environment'
 
 export type { ProcInfo } from './process-census'
 
@@ -92,6 +93,14 @@ function sleepSync(ms: number): void {
 
 function processHomeUnder(pid: number, root: string, hermesHome: string): boolean {
   if (!procfsCensus) {
+    // No /proc: ask the process itself. Its command line names no home, and the in-memory census
+    // only knows pids seen through a lock — a daemon whose lock is gone needs the environment.
+    const home = windowsProcessHomes([pid]).get(pid)
+
+    if (home) {
+      return pathUnder(home, root) || pathUnder(home, hermesHome)
+    }
+
     return isSandboxProcess(pid, hermesHome)
   }
 
@@ -101,12 +110,14 @@ function processHomeUnder(pid: number, root: string, hermesHome: string): boolea
 }
 
 /**
- * SIGTERM (then SIGKILL after 15 s) every daemon recorded in a sandbox
- * `gateway.lock` (launch home and each profile home). The pid is only
- * signalled while its environment still names this sandbox, so a recycled pid
- * is never touched.
+ * Tree-kill (`taskkill /T /F` on Windows) every daemon still running against a sandbox home.
+ *
+ * Two sources, because either one alone leaks: the sandbox `gateway.lock` pid(s) (launch home and
+ * each profile home), and the environment census — a daemon whose lock file is already gone, or
+ * whose Playwright worker died before teardown, is only visible through its `HERMES_HOME`.
+ * Nothing outside `root` is ever signalled, so the live gateway cannot be caught here.
  */
-function stopSandboxGatewayDaemons(root: string, hermesHome: string): void {
+export function stopSandboxGatewayDaemons(root: string, hermesHome: string): void {
   const profilesDir = path.join(hermesHome, 'profiles')
 
   const homes = [
@@ -115,6 +126,10 @@ function stopSandboxGatewayDaemons(root: string, hermesHome: string): void {
   ]
 
   const pids = new Set<number>()
+
+  for (const proc of sandboxProcessesOf(hermesHome, -1)) {
+    pids.add(proc.pid)
+  }
 
   for (const home of homes) {
     try {
@@ -126,6 +141,28 @@ function stopSandboxGatewayDaemons(root: string, hermesHome: string): void {
     } catch {
       // No lock (remote-only spec, never booted) or an empty one: nothing to stop.
     }
+  }
+
+  if (pids.size === 0) {
+    return
+  }
+
+  if (process.platform === 'win32') {
+    // SIGTERM is not a Windows kill path: process.kill maps to TerminateProcess, which never reaches
+    // the gateway's re-exec'd child. `taskkill /T /F` takes the tree.
+    for (const pid of pids) {
+      treeKill(pid)
+    }
+
+    for (const deadline = Date.now() + 15_000; Date.now() < deadline; ) {
+      if (![...pids].some(pid => processHomeUnder(pid, root, hermesHome))) {
+        return
+      }
+
+      sleepSync(100)
+    }
+
+    return
   }
 
   const signal = (sig: NodeJS.Signals) => {
