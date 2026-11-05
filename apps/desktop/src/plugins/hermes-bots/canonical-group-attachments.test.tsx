@@ -74,3 +74,21 @@ it('downloads only the selected committed attachment from its captured owner', a
   expect(changed).toHaveBeenCalledWith([])
   expect(submit).not.toHaveBeenCalled()
 })
+
+it('renders downloaded member images and videos inline while retaining Download', async () => {
+  const createObjectURL = vi.fn(() => 'blob:member-media')
+  vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() })
+  const image = { attachment_id: 'image-one', event_id: 'event-one', kind: 'image', name: 'picture.png', mime: 'image/png' }
+  const video = { attachment_id: 'video-one', event_id: 'event-one', kind: 'video', name: 'clip.mp4', mime: 'video/mp4' }
+  request.mockImplementation(async (_route, method, params) => {
+    expect(method).toBe('groups.attachment.download')
+
+    return { ...(params.attachment_id === image.attachment_id ? image : video), data_base64: 'AAEC/w==' }
+  })
+
+  const view = render(<CanonicalGroupAttachments attachments={[image, video]} binding={binding} disabled={false} readOnly />)
+
+  await waitFor(() => expect(screen.getByRole('img', { name: image.name })).not.toBeNull())
+  expect(view.container.querySelector('video')).not.toBeNull()
+  expect(screen.getAllByRole('button', { name: 'Download' })).toHaveLength(2)
+})

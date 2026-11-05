@@ -1,5 +1,5 @@
 import { Button } from '@hermes/plugin-sdk'
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 import { downloadCanonicalAttachment } from './canonical-attachment-download'
 import { useCanonicalGroupLabels } from './canonical-group-labels'
@@ -8,6 +8,37 @@ import { type CanonicalGroupBinding, canonicalGroupRequest } from './canonical-g
 export interface CanonicalGroupAttachment { attachment_id?: string; event_id?: string; kind: string; name: string; mime: string; size?: number }
 type Attachment = CanonicalGroupAttachment
 interface DownloadedAttachment extends Attachment { data_base64: string }
+
+function InlineAttachment({ attachment, binding }: { attachment: Attachment; binding: CanonicalGroupBinding }) {
+  const [url, setUrl] = useState<string>()
+
+  useEffect(() => {
+    if (!attachment.attachment_id || !attachment.event_id || !['image', 'video'].includes(attachment.kind)) {return}
+    const controller = new AbortController()
+    let objectUrl: string | undefined
+
+    void canonicalGroupRequest<DownloadedAttachment>(binding, 'groups.attachment.download', {
+      room_id: binding.roomId, event_id: attachment.event_id, attachment_id: attachment.attachment_id
+    }).then(result => {
+      if (controller.signal.aborted) {return}
+      const bytes = Uint8Array.from(atob(result.data_base64), char => char.charCodeAt(0))
+      objectUrl = URL.createObjectURL(new Blob([bytes], { type: result.mime }))
+      setUrl(objectUrl)
+    }).catch(() => undefined)
+
+    return () => {
+      controller.abort()
+
+      if (objectUrl) {URL.revokeObjectURL(objectUrl)}
+    }
+  }, [attachment.attachment_id, attachment.event_id, attachment.kind, binding])
+
+  if (!url) {return null}
+
+  if (attachment.kind === 'image') {return <img alt={attachment.name} className="max-h-72 max-w-full rounded" src={url} />}
+
+  return <video className="max-h-72 max-w-full rounded" controls src={url} />
+}
 
 function kindFor(file: File): string {
   if (file.type.startsWith('image/')) {return 'image'}
@@ -88,6 +119,7 @@ export function CanonicalGroupAttachments({ binding, attachments, onChange, onUp
  if (file) {void upload(file);} e.currentTarget.value = '' }} ref={input} type="file" />
     <Button disabled={disabled || busy} onClick={() => input.current?.click()} type="button">{labels.attachFiles}</Button></>}
     {attachments.map(a => <span className="flex items-center gap-1" key={a.attachment_id ?? a.name}>
+      {readOnly && <InlineAttachment attachment={a} binding={binding} />}
       <span>{a.name}</span><Button disabled={disabled || busy} onClick={() => void download(a)} type="button">{labels.download}</Button>
       {!readOnly && <Button disabled={disabled || busy} onClick={() => onChange?.(attachments.filter(item => item !== a))} type="button">{labels.removeAttachment}</Button>}
     </span>)}
