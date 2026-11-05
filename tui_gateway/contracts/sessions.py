@@ -500,6 +500,26 @@ method("session.history", params=SessionHistoryParams, result=SessionHistoryResu
        doc="The durable display transcript (ancestors included, row ids attached).")
 
 
+class SessionNoteParams(SessionParams):
+    """One plugin-authored system line (desktop ``host.voice.note`` — the call-ended line).
+
+    ``text`` is the line itself (whitespace-trimmed, 500 chars max); ``source`` is an optional label
+    the renderer may show beside it. There is no role field: a note is always a system line.
+    """
+
+    text: str
+    source: str | None = None
+
+
+class SessionNoteResult(Result):
+    ok: bool
+    session_id: str
+
+
+method("session.note", params=SessionNoteParams, result=SessionNoteResult,
+       doc="Append a plugin-authored system line to a live session's transcript (live-only, never model input).")
+
+
 class SessionUsageParams(SessionParams):
     pass
 

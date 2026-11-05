@@ -544,3 +544,20 @@ def test_attachment_reads_take_no_write_lock_and_repeat_no_startup(tmp_path):
     finally:
         writer.rollback()
         writer.close()
+
+
+def test_discard_uploads_frees_uncommitted_blobs_now_and_leaves_committed_ones(tmp_path):
+    store = HostedRoomAttachmentStore(tmp_path / "state.db")
+    kept = _put(store, upload_id="kept", data=PNG + b"kept")
+    dropped = _put(store, upload_id="dropped", data=PNG + b"dropped")
+    store.commit_message(room_id="room-1", event_id="event-1", manifest=_manifest(kept),
+                         recipient_member_ids=("research",))
+
+    assert store.discard_uploads(
+        room_id="room-1", attachment_ids=[kept["attachment_id"], dropped["attachment_id"]]) == 1
+
+    assert store.stats(room_id="room-1")["attachments"] == 1
+    assert store.stats()["blobs"] == 1
+    assert store.find_upload(room_id="room-1", upload_id="dropped") is None
+    assert store.find_upload(room_id="room-1", upload_id="kept") is not None
+    assert store.discard_uploads(room_id="room-1", attachment_ids=[]) == 0

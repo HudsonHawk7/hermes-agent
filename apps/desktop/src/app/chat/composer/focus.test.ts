@@ -4,6 +4,7 @@ import { $hoveredTreeGroup } from '@/components/pane-shell/tree/store'
 
 import {
   ackComposerInsert,
+  activeComposerTarget,
   blurComposerInput,
   focusComposerInput,
   getActiveComposer,
@@ -200,6 +201,9 @@ describe('resolveActive / keep-alive tab heal', () => {
     mountSurface('main')
     markActiveComposer('tile:buried')
 
+    // A status read names the claim toggleMic() would reach, and a second read does not heal it.
+    expect(activeComposerTarget()).toBe('tile:buried')
+    expect(activeComposerTarget()).toBe('tile:buried')
     expect(getActiveComposer()).toBe('main')
 
     const mainSaw: string[] = []

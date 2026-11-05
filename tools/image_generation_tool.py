@@ -601,12 +601,14 @@ def _provider_result(result, contract_error: str) -> str:
     return json.dumps(result)
 
 
-def _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale, model=None, controls=None) -> dict[str, Any]:
+def _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale, model=None, controls=None, extras=None) -> dict[str, Any]:
     """Add the optional ``provider.generate(**kwargs)`` args in place (edit args only when supplied)."""
     if model:
         kwargs["model"] = model
     if controls:
         kwargs.update(controls)
+    if extras:
+        kwargs.update(extras)
     if isinstance(image_url, str) and image_url.strip():
         kwargs["image_url"] = image_url.strip()
     if reference_image_urls is not None:
@@ -636,7 +638,7 @@ def _declared_controls(provider, controls: Optional[dict[str, Any]]) -> Optional
 def _dispatch_to_plugin_provider(
     prompt: str, aspect_ratio: str, image_url: Optional[str] = None,
     reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None,
-    controls: Optional[dict[str, Any]] = None):
+    controls: Optional[dict[str, Any]] = None, extra_args: Optional[dict[str, Any]] = None):
     """JSON result from the selected plugin provider, or ``None`` to fall through to in-tree FAL
     (provider unset / ``"fal"`` / ``"nous"``). Providers without ``upscale`` ignore it via ``**kwargs``."""
     configured = _plugin_provider_name()
@@ -662,7 +664,8 @@ def _dispatch_to_plugin_provider(
     kwargs: dict[str, Any] = {"prompt": prompt, "aspect_ratio": aspect_ratio}
     try:
         _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale,
-                             model=_read_configured_image_model(), controls=_declared_controls(provider, controls))
+                             model=_read_configured_image_model(), controls=_declared_controls(provider, controls),
+                             extras=_declared_extra_args(provider, extra_args))
         result = provider.generate(**kwargs)
     except Exception as exc:
         # A TypeError from generate() predating image_url support (third-party plugin not yet
@@ -703,7 +706,7 @@ def _managed_model_plugin() -> Optional[tuple]:
 def _maybe_route_managed_model(
     prompt: str, aspect_ratio: str, image_url: Optional[str] = None,
     reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None,
-    controls: Optional[dict[str, Any]] = None) -> Optional[str]:
+    controls: Optional[dict[str, Any]] = None, extra_args: Optional[dict[str, Any]] = None) -> Optional[str]:
     """JSON result from the Krea or Portal gateway the stored model belongs to, or ``None`` to fall
     through to FAL.
 
@@ -732,7 +735,8 @@ def _maybe_route_managed_model(
     kwargs: dict[str, Any] = {"prompt": prompt, "aspect_ratio": aspect_ratio, "model": model_id}
     try:
         _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale,
-                             controls=_declared_controls(provider, controls))
+                             controls=_declared_controls(provider, controls),
+                             extras=_declared_extra_args(provider, extra_args))
         result = provider.generate(**kwargs)
     except Exception as exc:
         logger.warning("Managed %s routing failed: %s", plugin_name, exc)
@@ -783,9 +787,11 @@ def _handle_image_generate(args, **kw):
     sources = dict(image_url=image_url, reference_image_urls=reference_image_urls,
                    upscale=upscale if isinstance(upscale, bool) else None)
     controls = {name: args[name] for name in _CREATIVE_CONTROL_PARAMS if name in args}
-    raw = _dispatch_to_plugin_provider(prompt, aspect_ratio, controls=controls or None, **sources)
+    raw = _dispatch_to_plugin_provider(
+        prompt, aspect_ratio, controls=controls or None, extra_args=args, **sources)
     if raw is None:
-        raw = _maybe_route_managed_model(prompt, aspect_ratio, controls=controls or None, **sources)
+        raw = _maybe_route_managed_model(
+            prompt, aspect_ratio, controls=controls or None, extra_args=args, **sources)
         if raw is not None:
             raw = _fall_back_to_fal(raw, prompt, aspect_ratio, sources)
     if raw is None:
@@ -862,6 +868,9 @@ def _active_image_capabilities() -> dict[str, Any]:
                 info["supports_upscale"] = bool(caps.get("supports_upscale"))
                 if caps.get("creative_controls"):
                     info["creative_controls"] = list(caps["creative_controls"])
+                extra = caps.get("extra_parameters")
+                if isinstance(extra, dict):
+                    info["extra_parameters"] = extra
                 if caps.get("source_image_role") == "style":
                     info["source_image_role"] = "style"
                 return info
@@ -946,6 +955,48 @@ _UPSCALE_PARAM = {
 }
 
 
+_RESERVED_SCHEMA_PARAMS = frozenset({
+    "prompt", "aspect_ratio", "image_url", "reference_image_urls", "upscale",
+    *_CREATIVE_CONTROL_PARAMS,
+})
+
+
+def _split_extra_parameters(raw) -> tuple[dict[str, tuple[dict[str, Any], bool]], list[str]]:
+    """Return ``(name -> (schema, required), refused names)``.
+
+    A non-dict map has no named spec to refuse. A named spec that is not a
+    JSON-schema object is refused by name. Built-in names are never overridden.
+    """
+    if not isinstance(raw, dict):
+        return {}, []
+    accepted: dict[str, tuple[dict[str, Any], bool]] = {}
+    refused: list[str] = []
+    for name, spec in raw.items():
+        if not isinstance(name, str) or not name.strip() or name.strip() in _RESERVED_SCHEMA_PARAMS:
+            continue
+        key = name.strip()
+        if not isinstance(spec, dict):
+            refused.append(key)
+            continue
+        prop = {field: value for field, value in spec.items() if field != "required"}
+        if not prop:
+            continue
+        accepted[key] = (prop, bool(spec.get("required")))
+    return accepted, refused
+
+
+def _declared_extra_args(provider, args: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """Only extra parameters this provider declared, and only when the caller sent them."""
+    if provider is None or not isinstance(args, dict):
+        return {}
+    try:
+        raw = (provider.capabilities() or {}).get("extra_parameters")
+    except Exception:
+        return {}
+    accepted, _refused = _split_extra_parameters(raw)
+    return {name: args[name] for name in accepted if name in args}
+
+
 def _build_dynamic_image_schema() -> dict[str, Any]:
     """Render description AND params from the active model's capabilities; args it cannot
     honor are NOT advertised (the handler still accepts them for replay compat)."""
@@ -990,8 +1041,23 @@ def _build_dynamic_image_schema() -> dict[str, Any]:
     for name in info.get("creative_controls") or []:
         if name in _CREATIVE_CONTROL_PARAMS:
             properties[name] = _CREATIVE_CONTROL_PARAMS[name]
-    return {"description": base_desc.format(edit_clause=edit_clause),
-            "parameters": {"type": "object", "properties": properties, "required": ["prompt"]}}
+    accepted, refused = _split_extra_parameters(info.get("extra_parameters"))
+    required = ["prompt"]
+    for name, (prop, is_required) in accepted.items():
+        properties[name] = prop
+        if is_required:
+            required.append(name)
+    # The tool registry swallows exceptions from dynamic_schema_overrides, so a
+    # raise here would drop the name. Name the bad spec on the description the model sees.
+    description = base_desc.format(edit_clause=edit_clause)
+    if refused:
+        description += (
+            " Refused extra parameter(s) "
+            + ", ".join(refused)
+            + ": each spec must be a JSON-schema object."
+        )
+    return {"description": description,
+            "parameters": {"type": "object", "properties": properties, "required": required}}
 
 
 registry.register(

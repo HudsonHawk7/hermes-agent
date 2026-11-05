@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import os
+import re
 import threading
 import time
 from collections import Counter
@@ -49,6 +51,42 @@ def _grant_revoke_is_terminal(exc: PeerRunsHTTPError) -> bool:
     """Return whether the peer proves the scoped grant is already unusable."""
     return exc.status_code in {401, 403} and exc.error_code in {
         "invalid_room_grant", "room_reauthorization_required"}
+
+
+_LEFTOVER_MEDIA_LINE = re.compile(r"^[ \t]*[`\"'*_]{0,3}MEDIA:(?P<path>[^\n]*)", re.MULTILINE)
+
+
+def _room_media_tags(text: str) -> tuple[list[str], str]:
+    """``([path, ...], text without the tags)`` for a member reply. Purely lexical: the gateway's
+    ``extract_media`` stats extension-less paths, and on Windows statting a UNC path opens an SMB
+    connection, so nothing here may touch the filesystem. A line still opening with ``MEDIA:`` after the
+    known tag shapes matched is a tag too, so it is returned as a path to refuse. A whole tag in
+    inline code counts as a share attempt without the base mask's filesystem check; ``read_upload``
+    refuses network paths before it stats anything."""
+    from gateway.platforms import base
+
+    masked = base._mask_media_scan_text(text, inline_tag_deliverable=lambda _path: True)
+    tags: list[tuple[int, int, str]] = []
+
+    def collect(pattern: re.Pattern[str], accept=lambda path: True) -> None:
+        for match in pattern.finditer(masked):
+            if any(match.start() < end and start < match.end() for start, end, _ in tags):
+                continue
+            path = base._normalize_media_tag_path(match.group("path"))
+            if accept(path):
+                tags.append((match.start(), match.end(), path))
+
+    collect(base.MEDIA_TAG_CLEANUP_RE)
+    collect(base.MEDIA_EXTENSIONLESS_TAG_RE, base._path_lacks_deliverable_extension)
+    collect(_LEFTOVER_MEDIA_LINE)
+    paths: list[str] = []
+    for _, _, path in sorted(tags):
+        with contextlib.suppress(OSError, RuntimeError, ValueError):
+            path = os.path.expanduser(path)
+        if path not in paths:
+            paths.append(path)
+    cleaned = base._delete_spans(text, [(start, end) for start, end, _ in tags])
+    return paths, re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
 def _hook(obj: Any, name: str):
@@ -144,6 +182,122 @@ class HostedRoomService:
         """Profiles a SAVED room's roster is checked against. New groups use ``local_profiles``;
         a subclass may keep a seated member valid after it stops being eligible for new groups."""
         return self.local_profiles()
+
+    def _member_media_home(self, profile: str) -> Path | None:
+        homes = getattr(self, "profile_homes", None)
+        if callable(homes):
+            home = homes().get(profile)
+            if home is not None:
+                return Path(home)
+        if profile == "default":
+            return self.root
+        candidate = self.root / "profiles" / profile
+        return candidate if candidate.is_dir() else None
+
+    @staticmethod
+    def _media_label(path: str) -> str:
+        from tools import preview_upload
+
+        mime = (preview_upload.UPLOAD_TYPES.get(Path(path).suffix.lower()) or ("",))[0]
+        return "video" if mime.startswith("video/") else "picture" if mime.startswith("image/") else "file"
+
+    @staticmethod
+    def _media_failure(label: str, exc: Exception) -> str:
+        from gateway.hosted_room_attachments import AttachmentQuotaError
+
+        detail = str(exc).lower()
+        if isinstance(exc, AttachmentQuotaError):
+            reason = "room storage is full"
+        elif "is outside the folders" in detail:
+            reason = "outside allowed folders"
+        elif "there is no file at" in detail:
+            reason = "file not found"
+        elif "larger than" in detail or "read more than" in detail or "size limit" in detail:
+            reason = "too large"
+        elif "files can be uploaded" in detail:
+            reason = "unsupported type"
+        elif "no folder is configured" in detail:
+            reason = "no allowed folders configured"
+        elif "network and device paths" in detail or "is a link" in detail or "not a full path" in detail:
+            reason = "not a local file path"
+        else:
+            reason = "could not be verified"
+        return f"({label} not shared: {reason})"
+
+    def _member_media_event(
+        self, event: discussion.EventPlan, room: Mapping[str, Any], member: discussion.DiscussionMember,
+    ) -> tuple[discussion.EventPlan, tuple[str, ...]]:
+        """Turn a member's local MEDIA tags into committed, room-visible attachments; every tag ends as
+        an attachment or a one-line refusal, never as literal ``MEDIA:`` text."""
+        from gateway.hosted_room_attachments import (
+            MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_MESSAGE, MAX_MESSAGE_ATTACHMENT_BYTES,
+            AttachmentError, HostedRoomAttachmentStore)
+        from hermes_cli.config_effective import load_user_config_effective
+        from tools import preview_upload
+
+        paths, cleaned = _room_media_tags(str(event.payload["text"]))
+        if not paths:
+            return event, ()
+        room_id = str(room["room_id"])
+        existing = hosted_rooms.read_event_by_id(self.db_path, room_id=room_id, event_id=event.event_id)
+        if existing is not None:
+            return replace(event, payload=existing["payload"]), ()
+
+        def publish(lines: list[str], attachments: list[dict[str, Any]] | None = None) -> discussion.EventPlan:
+            payload = {**event.payload, "text": "\n".join(filter(None, [cleaned, *lines]))}
+            if attachments:
+                payload["attachments"] = attachments
+            return replace(event, payload=payload)
+
+        def refuse_all(reason: str) -> tuple[discussion.EventPlan, tuple[str, ...]]:
+            return publish([f"({self._media_label(path)} not shared: {reason})" for path in paths]), ()
+
+        if (member.target or {"kind": "local"}).get("kind") != "local":
+            return refuse_all("sent from another machine")
+        home = self._member_media_home(member.profile)
+        if home is None:
+            return refuse_all("member profile is unavailable")
+        roots = preview_upload.room_media_roots(load_user_config_effective(home / "config.yaml"), home)
+        store = HostedRoomAttachmentStore(self.db_path)
+        manifest: list[dict[str, Any]] = []
+        failures: list[str] = []
+        total_size = 0
+        for index, path in enumerate(paths):
+            label = self._media_label(path)
+            if len(manifest) >= MAX_ATTACHMENTS_PER_MESSAGE:
+                failures.append(f"({label} not shared: attachment limit reached)")
+                continue
+            try:
+                shared = preview_upload.read_upload(path, roots)
+                if shared["size"] > MAX_ATTACHMENT_BYTES:
+                    failures.append(f"({label} not shared: too large)")
+                    continue
+                if total_size + shared["size"] > MAX_MESSAGE_ATTACHMENT_BYTES:
+                    failures.append(f"({label} not shared: too large for one message)")
+                    continue
+                saved = store.put(
+                    room_id=room_id, upload_id=f"member-media:{event.event_id}:{index}",
+                    kind="video" if shared["mime"].startswith("video/") else "image",
+                    name=shared["name"], mime=shared["mime"], data=base64.b64decode(shared["data"], validate=True))
+            except (preview_upload.UploadRefused, AttachmentError) as exc:
+                failures.append(self._media_failure(label, exc))
+                continue
+            manifest.append({key: saved[key] for key in ("attachment_id", "kind", "name", "size", "mime")})
+            total_size += shared["size"]
+        if not manifest:
+            return publish(failures), ()
+        try:
+            _, transitioned = store.commit_message_with_receipt(
+                room_id=room_id, event_id=event.event_id, manifest=manifest,
+                recipient_member_ids=[str(row["member_id"]) for row in room["members"]],
+                viewer_access=True, hold_until_event=True)
+        except AttachmentError as exc:
+            store.discard_uploads(room_id=room_id, attachment_ids=[entry["attachment_id"] for entry in manifest])
+            return publish([
+                *failures,
+                *(self._media_failure("video" if entry["kind"] == "video" else "picture", exc)
+                  for entry in manifest)]), ()
+        return publish(failures, manifest), transitioned
 
     def bindings(self) -> tuple[HostedRoomBinding, ...]:
         local_gateway_id = hosted_rooms.local_authority_gateway_id()
@@ -402,8 +556,19 @@ class HostedRoomService:
                 execution_generation=execution_generation if status == "deferred" else None,
                 local_profiles=local_profiles)
             for event in publication.events:
-                appended = hosted_rooms.append_event(
-                    self.db_path, **event.append_kwargs(room_id), expected_latest_seq=cursor)
+                committed = ()
+                if event.kind == "message.member":
+                    event, committed = self._member_media_event(event, room, plan.member)
+                try:
+                    appended = hosted_rooms.append_event(
+                        self.db_path, **event.append_kwargs(room_id), expected_latest_seq=cursor)
+                except Exception:
+                    if committed:
+                        from gateway.hosted_room_attachments import HostedRoomAttachmentStore
+                        store = HostedRoomAttachmentStore(self.db_path)
+                        store.abort_message_commit(room_id=room_id, event_id=event.event_id, attachment_ids=committed)
+                        store.discard_uploads(room_id=room_id, attachment_ids=committed)
+                    raise
                 cursor = max(cursor, int(appended["seq"]))
             changed = True
         return changed
