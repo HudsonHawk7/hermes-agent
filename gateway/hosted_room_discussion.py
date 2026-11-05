@@ -399,8 +399,8 @@ def _validate_member_message(kind: str, payload: Payload, actor: Payload, room: 
             raise DiscussionValidationError("recipient_member_ids must be unique")
         payload["recipient_member_ids"] = recipients
     _validate_turn_coordinates(payload, room)
-    if not isinstance(text := payload.get("text"), str) or not text.strip() or is_pass_text(text):
-        raise DiscussionValidationError("message.member text must be a non-pass string")
+    if not isinstance(text := payload.get("text"), str) or (not text.strip() and not payload.get("attachments")) or is_pass_text(text):
+        raise DiscussionValidationError("message.member must contain non-pass text or attachments")
     member = _member_by_id(room, payload.get("member_id"))
     expected = {**_member_actor(member, display_name=False), "connection_id": _peer_id(member)}
     if any(actor.get(key) != value for key, value in expected.items()):

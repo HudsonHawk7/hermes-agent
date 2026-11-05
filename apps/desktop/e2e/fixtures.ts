@@ -32,7 +32,7 @@ import { writeEnvFile, writeMockProviderConfig } from '../../../tests-js/scripts
 import { type MockServerOptions, startMockServer } from '../../../tests-js/scripts/mock-server'
 import { isDesktopE2eHidden } from '../electron/e2e-hidden'
 
-import { electronProcessesMatching } from './core/process-census'
+import { electronProcessesMatching, sandboxProcessesOf } from './core/process-census'
 import { resolveElectronBinary } from './electron-binary'
 import { installErrorBannerGuard } from './test'
 
@@ -292,15 +292,21 @@ export function reapSandboxGatewayRuns(hermesHome: string): {
     }
   }
 
-  // Also kill any gateway-run process whose parent was just killed (pair child).
-  // Tree-kill usually covers this; this is a belt-and-suspenders pass.
-  const afterKill = listGatewayRunProcesses()
+  // Second pass: the environment census. A `gateway run` whose lock is already gone — or was never
+  // written because the worker died mid-spec — shows its home only in its own environment, so the
+  // command-line pass below can never see it. `sandboxProcessesOf` compares environments.
   const killedSet = new Set(killed)
 
-  for (const proc of afterKill) {
-    // Parent may already be gone; if cmdline is gateway and we still have lock
-    // pids alive as parents, tree-kill again. Fallback: if hermesHome marker
-    // appears in cmdline (rare), kill it.
+  for (const proc of sandboxProcessesOf(hermesHome)) {
+    if (!killedSet.has(proc.pid)) {
+      killProcessTree(proc.pid)
+      killed.push(proc.pid)
+      killedSet.add(proc.pid)
+    }
+  }
+
+  // Last resort: a gateway-run whose command line does happen to name the home.
+  for (const proc of listGatewayRunProcesses()) {
     const cmd = proc.commandLine.toLowerCase()
     const homeNeedle = hermesHome.replace(/\\/g, '/').toLowerCase()
     const homeNeedleWin = hermesHome.replace(/\//g, '\\').toLowerCase()

@@ -14,18 +14,20 @@ import {
 import { CONVERSATION_LEASE, READ_ALOUD_LEASE, syncTtsLease } from '@/lib/tts-lease'
 import { toLiveHistory } from '@/lib/voice-live'
 import { clearWakeIndicator, syncWakeIndicatorWithVoice } from '@/lib/wake-indicator'
-import { $voiceConversationStartRequest, takeVoiceConversationStart } from '@/store/composer'
+import { $voiceConversationStartRequest, freshDraftScope, takeVoiceConversationStart } from '@/store/composer'
 import { resetBrowseState } from '@/store/composer-input-history'
 import { recordFeatureUse } from '@/store/desktop-metrics'
 import { $gateway } from '@/store/gateway'
 import { notify, notifyError } from '@/store/notifications'
+import { $sessionStates } from '@/store/session-states'
+import { clearVoiceConversation, publishVoiceConversation } from '@/store/voice-conversation'
 import { $voiceLiveStatus, refreshVoiceLiveStatus, selectedVoiceChatMode } from '@/store/voice-live'
 import { $autoSpeakReplies, $voiceStopPhrase, setAutoSpeakReplies } from '@/store/voice-prefs'
 import { resumeWakeAfterVoice } from '@/store/wake-word'
 
 import { pinFloatingComposerCapture } from '../floating-target'
 import type { ComposerTarget } from '../focus'
-import { onComposerDictationRequest, onComposerVoiceToggleRequest } from '../focus'
+import { onComposerDictationRequest, onComposerVoiceMuteRequest, onComposerVoiceToggleRequest } from '../focus'
 import { useComposerScope, useComposerSurfaceId } from '../scope'
 import type { ChatBarProps } from '../types'
 
@@ -253,6 +255,33 @@ export function useComposerVoice({
   })
 
   const conversation = liveEngineActive ? liveConversation : chainedConversation
+
+  // ── plugin voice doors (#voice-doors) ─────────────────────────────────
+  // Mirror the call-status light for `host.voice`, and answer mic-toggle
+  // requests addressed to THIS composer. The owner is the only writer: a
+  // plugin can read the state and ask for a toggle, never assert one.
+  const sessionStates = useStore($sessionStates)
+
+  const voiceDoorSessionKey = sessionId
+    ? sessionStates[sessionId]?.storedSessionId ?? sessionId
+    : freshDraftScope()
+
+  useEffect(() => {
+    publishVoiceConversation({
+      active: voiceConversationActive,
+      muted: conversation.muted,
+      sessionId: sessionId ?? null,
+      status: conversation.status,
+      storedSessionId: voiceDoorSessionKey,
+      target
+    })
+  }, [conversation.muted, conversation.status, sessionId, target, voiceConversationActive, voiceDoorSessionKey])
+
+  useEffect(() => () => clearVoiceConversation(target), [target])
+
+  const toggleConversationMute = conversation.toggleMute
+
+  useEffect(() => onComposerVoiceMuteRequest(target, () => toggleConversationMute()), [target, toggleConversationMute])
 
   /** Turn the conversation on with the engine `voice.voice_chat_mode` selects,
    *  decided in the same state batch so the other engine never sees a frame of

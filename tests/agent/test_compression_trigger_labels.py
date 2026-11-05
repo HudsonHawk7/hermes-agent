@@ -16,6 +16,7 @@ import pytest
 
 from agent.turn_context_compaction import (
     CompactionOutcome, _engine_preflight_maintenance, _idle_compaction, _run_preflight_passes,
+    run_deferred_idle_compaction,
 )
 from agent.turn_preflight import (
     PreflightGateVerdict, compress_after_tool_results, run_preflight_compression,
@@ -63,7 +64,9 @@ def _outcome(messages: list) -> CompactionOutcome:
 def _drive_idle(agent: SimpleNamespace) -> None:
     agent.compression_idle_compact_after_seconds = 60
     agent._last_activity_ts = time.time() - 3_600
-    _idle_compaction(agent, _outcome(_messages()), "sys", "current ask", "task")
+    out = _outcome(_messages())
+    _idle_compaction(agent, out, "sys", "current ask", "task")
+    run_deferred_idle_compaction(agent, out.messages)
 
 
 def _drive_turn_start_threshold(agent: SimpleNamespace) -> None:

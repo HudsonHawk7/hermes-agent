@@ -194,6 +194,7 @@ def _handle_video_generate(args: dict[str, Any], **_kw: Any) -> str:
         "model": model, "image_url": image_url, "reference_image_urls": reference_image_urls, **optional}
     # Drop None entries so providers see clean defaults.
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
+    kwargs.update(_declared_extra_args(provider, args))
     pname = getattr(provider, "name", "?")
 
     def _err(error: str, error_type: str) -> str:
@@ -260,10 +261,56 @@ _GENERIC_DESCRIPTION = (
 )
 
 
-def _schema(description: str, properties: dict[str, Any]) -> dict[str, Any]:
+def _schema(description: str, properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
     return {
         "description": description,
-        "parameters": {"type": "object", "properties": properties, "required": ["prompt"]}}
+        "parameters": {
+            "type": "object",
+            "properties": properties,
+            "required": list(required) if required is not None else ["prompt"],
+        }}
+
+
+_RESERVED_SCHEMA_PARAMS = frozenset({
+    "prompt", "duration", "aspect_ratio", "resolution",
+    "image_url", "reference_image_urls", "negative_prompt", "audio", "seed", "upscale",
+})
+
+
+def _split_extra_parameters(raw) -> tuple[dict[str, tuple[dict[str, Any], bool]], list[str]]:
+    """Return ``(name -> (schema, required), refused names)``.
+
+    A non-dict map has no named spec to refuse. A named spec that is not a
+    JSON-schema object is refused by name. Built-in names are never overridden.
+    """
+    if not isinstance(raw, dict):
+        return {}, []
+    accepted: dict[str, tuple[dict[str, Any], bool]] = {}
+    refused: list[str] = []
+    for name, spec in raw.items():
+        if not isinstance(name, str) or not name.strip() or name.strip() in _RESERVED_SCHEMA_PARAMS:
+            continue
+        key = name.strip()
+        if not isinstance(spec, dict):
+            refused.append(key)
+            continue
+        prop = {field: value for field, value in spec.items() if field != "required"}
+        if not prop:
+            continue
+        accepted[key] = (prop, bool(spec.get("required")))
+    return accepted, refused
+
+
+def _declared_extra_args(provider, args: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """Only extra parameters this provider declared, and only when the caller sent them."""
+    if provider is None or not isinstance(args, dict):
+        return {}
+    try:
+        raw = (provider.capabilities() or {}).get("extra_parameters")
+    except Exception:
+        return {}
+    accepted, _refused = _split_extra_parameters(raw)
+    return {name: args[name] for name in accepted if name in args}
 
 
 def _provider_call(provider: Any, method: str, default: Any) -> Any:
@@ -364,7 +411,18 @@ def _build_dynamic_video_schema() -> dict[str, Any]:
             "- audio: native stereo audio is generated with every video "
             "(always on; no toggle) — describe the desired sound in the "
             "prompt")
-    return _schema("\n".join(parts), properties)
+    accepted, refused = _split_extra_parameters(caps.get("extra_parameters"))
+    required = ["prompt"]
+    for name, (prop, is_required) in accepted.items():
+        properties[name] = prop
+        if is_required:
+            required.append(name)
+    if refused:
+        parts.append(
+            "Refused extra parameter(s) "
+            + ", ".join(refused)
+            + ": each spec must be a JSON-schema object.")
+    return _schema("\n".join(parts), properties, required)
 
 
 registry.register(
