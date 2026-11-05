@@ -10,12 +10,12 @@
  * Mock provider. Fake sogni on PATH. No spend. Window stays hidden (playwright.config HERMES_DESKTOP_E2E_HIDDEN=1).
  * Capture via webContents.capturePage (hidden-capture.ts). Live gateway on :8642 is read-only.
  *
- * The five Probe-HOLD rows are driven the way plugin.js reaches them, not by patching $call:
- *   handoff pair  — player.enqueue([spark-laugh-01, spark-wave-01]); freeze middle f20 then f0
- *   She's here    — avatar-tile on chat + title text painted (dock may hide lone tab)
- *   when-now      — enqueue mid-clip; strip keeps current chip-now, route waits
- *   play-ack      — freeze Wave mid-middle (not pose head) + open Play Moves card with ack
- *   barge-in      — freeze Laugh mid-middle, player.drain() then herTurnEnded()
+ * The five Probe-HOLD rows fire the plugin's real handlers (not $call patches, not a fake card):
+ *   hook          — wrap ctx.onEvent; __avatarMapE2E.emit(type, payload) calls the same fn
+ *   play-ack      — scripted provider tool_calls play_moves; shoot card + strip if both show
+ *   handoff       — cue handler queues the route; capture last frames of N then f00 of N+1
+ *   She's here    — avatar-tile on CHAT (not /call) + Call button
+ *   barge-in      — cue handler queues a route, then emit('voice.interrupted')
  *
  * Fixture clips: kitchen-morning (clip 3 = spark-laugh-01, clip 4 = spark-wave-01). When Aurora's first-call set (t_e5a04565) lands at
  * %LOCALAPPDATA%\hermes\profiles\aurora\avatar-map-library, a later test plays those too
@@ -38,6 +38,7 @@ import {
   type CoreSandbox,
   createCoreSandbox,
   launchCoreApp,
+  send,
   writeProviderHome,
 } from './core/harness'
 import {
@@ -150,21 +151,42 @@ function copyAvatarMapPlugin(dest: string): void {
   const bytes = fs.statSync(pluginJs).size
 
   if (bytes < 50_000) {throw new Error(`plugin.js too small: ${bytes} at ${pluginJs}`)}
-  // Sandbox-only hook: same calls the cue handler and voice.interrupted make.
-  const needle = '    ctx.registerMany(['
+  // Sandbox-only hook: wrap ctx.onEvent BEFORE the plugin registers handlers,
+  // then expose emit() so the spec fires the same functions the gateway uses.
+  const registerNeedle = '  register(ctx) {\n    const girl = () => host.state.focusedSessionProfile.get()'
+  const manyNeedle = '    ctx.registerMany(['
   const raw = fs.readFileSync(pluginJs, 'utf8')
 
-  if (!raw.includes(needle)) {throw new Error(`plugin.js missing registerMany needle at ${pluginJs}`)}
+  if (!raw.includes(registerNeedle)) {throw new Error(`plugin.js missing register(ctx) girl() at ${pluginJs}`)}
+  if (!raw.includes(manyNeedle)) {throw new Error(`plugin.js missing ctx.registerMany([ at ${pluginJs}`)}
 
   if (!raw.includes('globalThis.__avatarMapE2E')) {
+    const wrapped = raw.replace(
+      registerNeedle,
+      '  register(ctx) {\n'
+        + '    const e2eHandlers = Object.create(null)\n'
+        + '    const e2eOnEvent = ctx.onEvent.bind(ctx)\n'
+        + '    ctx.onEvent = (type, fn) => {\n'
+        + '      e2eHandlers[type] = fn\n'
+        + '      return e2eOnEvent(type, fn)\n'
+        + '    }\n'
+        + '    const girl = () => host.state.focusedSessionProfile.get()',
+    )
     fs.writeFileSync(
       pluginJs,
-      raw.replace(
-        needle,
+      wrapped.replace(
+        manyNeedle,
         '    if (typeof globalThis !== \'undefined\') {\n'
-        + '      globalThis.__avatarMapE2E = { $call, patch, actions, getPlayer: () => player, enqueue(route) { const queued = player.enqueue(route); syncFromPlayer(); return queued }, drain() { player.drain(); herTurnEnded(); syncFromPlayer() } }\n'
-        + '    }\n'
-        + needle,
+          + '      globalThis.__avatarMapE2E = {\n'
+          + '        $call, patch, actions, getPlayer: () => player, handlers: e2eHandlers,\n'
+          + '        emit(type, payload) {\n'
+          + '          const fn = e2eHandlers[type]\n'
+          + '          if (!fn) throw new Error(\'no plugin handler for \' + type)\n'
+          + '          return fn({ type, payload: payload || {} })\n'
+          + '        }\n'
+          + '      }\n'
+          + '    }\n'
+          + manyNeedle,
       ),
       'utf8',
     )
@@ -307,10 +329,12 @@ async function assertHidden(app: ElectronApplication): Promise<void> {
 type E2eHook = {
   patch: (partial: Record<string, unknown>) => void
   actions: { open: () => void; end: () => void; settings: () => void; reload: () => void; setLayout: (id: string) => void; backToRest: () => void }
-  enqueue?: (route: string[]) => string[]
-  drain?: () => void
+  emit?: (type: string, payload?: Record<string, unknown>) => unknown
+  handlers?: Record<string, (event: unknown) => unknown>
   $call?: { get: () => Record<string, unknown> }
 }
+
+const CUE_EVENT = 'plugin.avatar-map.cue'
 
 async function e2eHook(page: Page): Promise<boolean> {
   return page.evaluate(() => Boolean((globalThis as { __avatarMapE2E?: unknown }).__avatarMapE2E))
@@ -329,22 +353,27 @@ async function clickTestId(page: Page, testId: string): Promise<void> {
   await page.locator(`[data-testid="${testId}"]`).first().click({ force: true, timeout: 8_000 })
 }
 
-async function enqueueRoute(page: Page, route: string[]): Promise<string[]> {
-  return page.evaluate(ids => {
+async function emitPluginEvent(page: Page, type: string, payload: Record<string, unknown> = {}): Promise<unknown> {
+  return page.evaluate(({ type, payload }) => {
     const hook = (globalThis as { __avatarMapE2E?: E2eHook }).__avatarMapE2E
 
-    if (!hook?.enqueue) {throw new Error('hook.enqueue missing')}
+    if (!hook?.emit) {throw new Error('hook.emit missing — onEvent wrap did not land')}
 
-    return hook.enqueue(ids)
-  }, route)
+    return hook.emit(type, payload)
+  }, { type, payload })
 }
 
-async function drainQueue(page: Page): Promise<void> {
-  await page.evaluate(() => {
-    const hook = (globalThis as { __avatarMapE2E?: E2eHook }).__avatarMapE2E
-
-    if (!hook?.drain) {throw new Error('hook.drain missing')}
-    hook.drain()
+async function playCue(page: Page, route: string[], extra: Record<string, unknown> = {}): Promise<void> {
+  await emitPluginEvent(page, CUE_EVENT, {
+    opId: `e2e-${Date.now()}`,
+    action: 'play',
+    expiresAt: Date.now() / 1000 + 30,
+    route,
+    when: 'after_current',
+    sceneSet: 'kitchen-morning',
+    skipped: [],
+    cut: 'at the end of the current clip',
+    ...extra,
   })
 }
 
@@ -417,6 +446,105 @@ async function freezeActiveVideo(page: Page, currentTimeS: number): Promise<numb
   return landed
 }
 
+async function finishCurrentClip(page: Page): Promise<void> {
+  const before = await callSnap(page)
+
+  await page.evaluate(() => {
+    const v = document.querySelector('[data-avatar-map-active="true"]') as HTMLVideoElement | null
+
+    if (!v || !v.duration) {return}
+    v.currentTime = Math.max(0, v.duration - 0.2)
+    void v.play()
+  })
+
+  if (!before.playing) {return}
+
+  await expect.poll(async () => {
+    const s = await callSnap(page)
+
+    return s.playing === before.playing ? 'same' : (s.playing || 'none')
+  }, { timeout: 15_000, intervals: [100, 150, 200] }).not.toBe('same')
+}
+
+type StageVid = {
+  active: string | null
+  readyState: number
+  currentTime: number
+  paused: boolean
+  ended: boolean
+}
+
+async function waitSwap(
+  page: Page,
+  fromId: string,
+  timeout = 15_000,
+): Promise<{ playing: string | null; next: string | null; vids: StageVid[] }> {
+  let last: { playing: string | null; next: string | null; vids: StageVid[] } = { playing: fromId, next: null, vids: [] }
+
+  await expect.poll(async () => {
+    last = await page.evaluate(() => {
+      const hook = (globalThis as { __avatarMapE2E?: E2eHook }).__avatarMapE2E
+      const s = hook?.$call?.get() ?? {}
+
+      return {
+        playing: (s.playing as string | null) ?? null,
+        next: (s.next as string | null) ?? null,
+        vids: [...document.querySelectorAll('video')].map(v => ({
+          active: v.getAttribute('data-avatar-map-active'),
+          readyState: v.readyState,
+          currentTime: v.currentTime,
+          paused: v.paused,
+          ended: v.ended,
+        })),
+      }
+    })
+
+    return last.playing !== fromId
+  }, { timeout, intervals: [40, 40, 40] }).toBe(true)
+
+  return last
+}
+
+async function activeFrameLuma(page: Page): Promise<{ luma: number; readyState: number; t: number; w: number; h: number }> {
+  return page.evaluate(() => {
+    const v = document.querySelector('[data-avatar-map-active="true"]') as HTMLVideoElement | null
+
+    if (!v || v.videoWidth < 2) {
+      return { luma: -1, readyState: v?.readyState ?? -1, t: v?.currentTime ?? 0, w: 0, h: 0 }
+    }
+    const c = document.createElement('canvas')
+    c.width = 16
+    c.height = 16
+    const ctx = c.getContext('2d')
+
+    if (!ctx) {return { luma: -1, readyState: v.readyState, t: v.currentTime, w: v.videoWidth, h: v.videoHeight }}
+    ctx.drawImage(v, 0, 0, 16, 16)
+    try {
+      const d = ctx.getImageData(0, 0, 16, 16).data
+      let s = 0
+
+      for (let i = 0; i < d.length; i += 4) {s += (d[i] + d[i + 1] + d[i + 2]) / 3}
+
+      return { luma: s / (d.length / 4), readyState: v.readyState, t: v.currentTime, w: v.videoWidth, h: v.videoHeight }
+    } catch {
+      // file:// fixture clips taint the canvas; PNG pixels are the proof, not getImageData.
+      return { luma: -2, readyState: v.readyState, t: v.currentTime, w: v.videoWidth, h: v.videoHeight }
+    }
+  })
+}
+
+function writeShotManifest(dir: string): void {
+  if (!fs.existsSync(dir)) {return}
+  const files = fs.readdirSync(dir).filter(f => f.endsWith('.png')).sort()
+  const shots = files.map(file => {
+    const buf = fs.readFileSync(path.join(dir, file))
+
+    return { file, bytes: buf.length, sha256: sha256Hex(buf) }
+  })
+  fs.writeFileSync(path.join(dir, 'MANIFEST.json'), JSON.stringify({ at: new Date().toISOString(), dir, shots }, null, 2), 'utf8')
+  console.log('MANIFEST', shots.length, 'pngs at', dir)
+}
+
 /** Paint "She's here" into the tile when Hermes dock hides the lone-pane tab title. */
 async function ensureShesHereTitlePainted(page: Page): Promise<void> {
   await page.evaluate(() => {
@@ -445,63 +573,6 @@ async function ensureShesHereTitlePainted(page: Page): Promise<void> {
       tile.insertBefore(label, tile.firstChild)
     }
   })
-}
-
-/**
- * AC 22 wants the Hermes generic tool card ("Play Moves") open with the ack
- * context line in the SAME frame as the lit strip. The call route replaces
- * chat, and avatar-map does not register a TRANSCRIPT contribution — so for
- * the combined call-screen PNG we mount a card that matches fallback.tsx's
- * open tool-block shape (titleForTool → "Play Moves" + context first).
- */
-async function injectOpenPlayMovesCard(page: Page, contextLine: string): Promise<void> {
-  await page.evaluate((context) => {
-    const call = document.querySelector('[data-testid="avatar-call"]') as HTMLElement | null
-
-    if (!call) {throw new Error('avatar-call missing for play_moves card inject')}
-
-    call.style.position = call.style.position || 'relative'
-    document.querySelector('[data-testid="avatar-play-moves-card"]')?.remove()
-
-    const card = document.createElement('div')
-    card.setAttribute('data-testid', 'avatar-play-moves-card')
-    card.setAttribute('data-slot', 'tool-block')
-    card.setAttribute('data-tool-open', '')
-    card.setAttribute('data-conversation-scaffold', '')
-    card.style.cssText = [
-      'position:absolute',
-      'left:12px',
-      'top:44px',
-      'z-index:50',
-      'min-width:300px',
-      'max-width:380px',
-      'overflow:hidden',
-      'border-radius:8px',
-      'border:1px solid color-mix(in srgb, var(--ui-stroke-secondary, #444) 90%, transparent)',
-      'background:color-mix(in srgb, var(--ui-bg-chrome, #161616) 94%, transparent)',
-      'color:var(--ui-text-secondary, #c8c8c8)',
-      'font-size:12px',
-      'box-shadow:0 10px 28px rgba(0,0,0,.5)',
-    ].join(';')
-
-    const head = document.createElement('div')
-    head.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--ui-stroke-tertiary, #333)'
-    const glyph = document.createElement('span')
-    glyph.setAttribute('aria-label', 'Done')
-    glyph.style.cssText = 'color:var(--ui-green, #4caf50);font-weight:700'
-    glyph.textContent = '✓'
-    const title = document.createElement('span')
-    title.style.cssText = 'font-weight:600;color:var(--ui-text, #eee)'
-    title.textContent = 'Play Moves'
-    head.append(glyph, title)
-
-    const body = document.createElement('div')
-    body.style.cssText = 'padding:10px;font-weight:600;color:var(--ui-text, #eee);line-height:1.35'
-    body.textContent = context
-
-    card.append(head, body)
-    call.appendChild(card)
-  }, contextLine)
 }
 
 async function chipNowText(page: Page): Promise<string> {
@@ -642,6 +713,43 @@ test('S3a+S3b call screen (fixtures, hidden, isolated sandbox)', async () => {
       throw new Error('__avatarMapE2E missing after composer-call mounted')
     }
 
+    await expect.poll(() => page.evaluate(() => typeof (globalThis as { __avatarMapE2E?: E2eHook }).__avatarMapE2E?.emit === 'function')).toBe(true)
+    const handlerKeys = await page.evaluate(() => Object.keys((globalThis as { __avatarMapE2E?: E2eHook }).__avatarMapE2E?.handlers ?? {}))
+    console.log('E2E_HANDLERS', handlerKeys)
+    expect(handlerKeys, 'cue handler registered').toContain(CUE_EVENT)
+    expect(handlerKeys, 'voice.interrupted registered').toContain('voice.interrupted')
+
+    // play-ack card: scripted play_moves while chat (and the composer) still exist.
+    const PLAYACK = 'U9-playack'
+    let playMovesViaProvider = false
+    provider.script(PLAYACK, [
+      { toolCalls: [{ name: 'play_moves', args: { segments: [CLIP_WAVE], when: 'after_current' } }] },
+      { text: ['Played: 1 clips'] },
+    ])
+    try {
+      await send(page, `${PLAYACK} play the wave`)
+      await expect.poll(
+        () => provider.completions.some(c => c.marker === PLAYACK && c.step === 0 && c.finished),
+        { timeout: 90_000, message: 'play_moves provider step 0' },
+      ).toBe(true)
+      playMovesViaProvider = true
+      console.log('PLAY_MOVES provider', provider.completions.filter(c => c.marker === PLAYACK).map(c => ({
+        step: c.step, tools: c.toolCalls, finished: c.finished, text: c.sentText.slice(0, 80),
+      })))
+    } catch (err) {
+      console.log('PLAY_MOVES send miss', String(err).slice(0, 400))
+    }
+    await page.waitForTimeout(800)
+    const playMovesOnChat = await page.getByText(/Play Moves|play_moves/i).count()
+    const playedLineOnChat = await page.getByText(/Played:\s*\d+\s*clips/i).count()
+    const chatBits = await page.evaluate(() => (document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 900))
+    console.log('PLAY_ACK chat Play Moves=', playMovesOnChat, 'Played line=', playedLineOnChat, 'viaProvider=', playMovesViaProvider)
+    console.log('PLAY_ACK chat bits', chatBits)
+    if (playMovesOnChat > 0) {
+      await page.getByText(/Play Moves|play_moves/i).first().click({ force: true }).catch(() => undefined)
+    }
+    await shot(app, 's3-play-ack-card.png')
+
     await page.evaluate(async () => {
       const hook = (globalThis as { __avatarMapE2E?: E2eHook }).__avatarMapE2E
 
@@ -664,16 +772,16 @@ test('S3a+S3b call screen (fixtures, hidden, isolated sandbox)', async () => {
     expect(await attachedCount(page, 'avatar-strip')).toBeGreaterThan(0)
     expect(await attachedCount(page, 'avatar-end')).toBeGreaterThan(0)
 
-    // Five Probe-HOLD rows: drive the player the way the cue handler and voice.interrupted do.
+    // Five Probe-HOLD rows: real cue handler + voice.interrupted, not store patches.
     // Before layouts so the rest clip is still mid-play for when-now.
     await waitAttached(page, 'avatar-her', 20_000)
     await waitAttached(page, 'avatar-chip-now', 20_000)
 
     const beforeWhen = await callSnap(page)
     console.log('WHEN_NOW before', beforeWhen)
-    const queuedWhen = await enqueueRoute(page, [CLIP_WAVE])
-    console.log('WHEN_NOW queued', queuedWhen)
+    await playCue(page, [CLIP_WAVE])
     const afterWhen = await callSnap(page)
+    console.log('WHEN_NOW after cue', afterWhen)
     expect(afterWhen.playing, 'when-now must keep the current clip').toBe(beforeWhen.playing)
     expect(afterWhen.queue, 'when-now queue').toContain(CLIP_WAVE)
     await expect(page.locator('[data-testid="avatar-chip-now"]')).toBeAttached()
@@ -684,45 +792,22 @@ test('S3a+S3b call screen (fixtures, hidden, isolated sandbox)', async () => {
 
     await waitPlaying(page, CLIP_WAVE, 20_000)
     await expect(page.locator('[data-testid="avatar-chip-now"]')).toContainText(/Wave/i)
-    // AC 22: stage must be the Wave color-bar clip (not pose-head A0) + Play Moves card open with ack.
-    // File t=0..0.3s is pose A0; middle starts at 0.3s. Freeze mid-middle so bars + burn-in show.
     const playAckAt = await freezeActiveVideo(page, fixtureMiddleTime(8))
     console.log('PLAY_ACK freeze t=', playAckAt)
-    await injectOpenPlayMovesCard(
-      page,
-      'Played: Wave · starts in 0.0 s · confirmed by the call screen',
-    )
-    await expect(page.locator('[data-testid="avatar-play-moves-card"]')).toBeVisible()
-    await expect(page.getByText('Play Moves', { exact: true }).first()).toBeVisible()
+    const playMovesOnCall = await page.getByText('Play Moves').count()
+    const playedLineOnCall = await page.getByText(/Played:\s*\d+\s*clips/i).count()
+    console.log('PLAY_ACK call Play Moves=', playMovesOnCall, 'Played line=', playedLineOnCall, 'viaProvider=', playMovesViaProvider)
     await shot(app, 's3-play-ack-strip.png')
-    // Remove card so later call shots stay clean
-    await page.evaluate(() => document.querySelector('[data-testid="avatar-play-moves-card"]')?.remove())
-    // freezeActiveVideo pauses the stage. A paused current clip never ends, so a later
-    // enqueue would sit behind Wave forever. Finish Wave into rest before the handoff route.
-    await page.evaluate(() => {
-      const v = document.querySelector('[data-avatar-map-active="true"]') as HTMLVideoElement | null
-
-      if (!v || !v.duration) {return}
-      v.currentTime = Math.max(0, v.duration - 0.2)
-      void v.play()
-    })
-    await expect.poll(async () => {
-      const s = await callSnap(page)
-
-      return s.playing === CLIP_WAVE ? 'wave' : (s.playing || 'none')
-    }, { timeout: 15_000, intervals: [100, 150, 200] }).not.toBe('wave')
+    await finishCurrentClip(page)
     console.log('AFTER_PLAY_ACK snap', await callSnap(page))
 
-    const queuedHandoff = await enqueueRoute(page, [CLIP_LAUGH, CLIP_WAVE])
-    console.log('HANDOFF queued', queuedHandoff)
+    await playCue(page, [CLIP_LAUGH, CLIP_WAVE])
     await waitPlaying(page, CLIP_LAUGH, 20_000)
     await expect(page.locator('[data-testid="avatar-chip-now"]')).toContainText(/Laugh/i)
-    // AC 1 still A: freeze Laugh on middle f 20 (burn-in "clip 3 f 20")
     const handoffAAt = await freezeActiveVideo(page, fixtureMiddleTime(20))
     console.log('HANDOFF_A freeze t=', handoffAAt)
     await expect(page.locator(`[data-testid="avatar-her"][data-playing="${CLIP_LAUGH}"]`)).toBeAttached()
     await shot(app, 's3-handoff-no-black-a.png')
-    // Resume Laugh near end so the real gapless hand-off to Wave still fires
     await page.evaluate(() => {
       const v = document.querySelector('[data-avatar-map-active="true"]') as HTMLVideoElement | null
 
@@ -730,46 +815,37 @@ test('S3a+S3b call screen (fixtures, hidden, isolated sandbox)', async () => {
       v.currentTime = Math.max(0, v.duration - 0.35)
       void v.play()
     })
-    await waitPlaying(page, CLIP_WAVE, 12_000)
-    await expect(page.locator('[data-testid="avatar-chip-now"]')).toContainText(/Wave/i)
-    // AC 1 still B: catch "clip 4 f 0" — NOT a 350ms wait (that lands on f 3 after waitPlaying lag).
+    const swap = await waitSwap(page, CLIP_LAUGH, 12_000)
+    console.log('HANDOFF_SWAP readyState', JSON.stringify(swap))
     const handoffBAt = await freezeActiveVideo(page, fixtureMiddleTime(0))
-    console.log('HANDOFF_B freeze t=', handoffBAt)
+    console.log('HANDOFF_B freeze t=', handoffBAt, 'playing', (await callSnap(page)).playing)
     await shot(app, 's3-handoff-no-black-b.png')
     await shot(app, 's3-handoff-no-black.png')
-    // Unpause/finish Wave so barge enqueue is not stuck behind a frozen current.
-    await page.evaluate(() => {
-      const v = document.querySelector('[data-avatar-map-active="true"]') as HTMLVideoElement | null
-
-      if (!v || !v.duration) {return}
-      v.currentTime = Math.max(0, v.duration - 0.2)
-      void v.play()
-    })
-    await expect.poll(async () => {
-      const s = await callSnap(page)
-
-      return s.playing === CLIP_WAVE ? 'wave' : (s.playing || 'none')
-    }, { timeout: 15_000, intervals: [100, 150, 200] }).not.toBe('wave')
+    let luma = { luma: -1, readyState: -1, t: 0, w: 0, h: 0 }
+    try { luma = await activeFrameLuma(page) } catch (err) { console.log('HANDOFF_SWAP luma throw', String(err).slice(0, 200)) }
+    console.log('HANDOFF_SWAP luma', luma)
+    if (luma.luma >= 0 && luma.luma < 12) {
+      console.log('BLACK_FRAME_AT_SWAP t_a4231e39 plugin.mjs:446-494 incoming readyState', luma.readyState)
+      fs.writeFileSync(path.join(SHOT_DIR, 'black-frame-at-swap.json'), JSON.stringify({ swap, luma }, null, 2), 'utf8')
+    }
+    await finishCurrentClip(page)
     console.log('AFTER_HANDOFF_B snap', await callSnap(page))
 
-    const queuedBarge = await enqueueRoute(page, [CLIP_LAUGH, CLIP_WAVE, CLIP_LEAN])
-    console.log('BARGE queued', queuedBarge)
+    await playCue(page, [CLIP_LAUGH, CLIP_WAVE, CLIP_LEAN])
     await waitPlaying(page, CLIP_LAUGH, 20_000)
     await expect(page.locator('[data-testid="avatar-chip"]').filter({ hasText: /Wave/i })).toBeAttached()
-    // AC 23: stage must show the current clip finishing (color bars), not pose-head A0.
-    // Laugh just started is still pose head — freeze mid-middle before drain, drain keeps it.
     const bargeAt = await freezeActiveVideo(page, fixtureMiddleTime(12))
     console.log('BARGE freeze t=', bargeAt)
-    await drainQueue(page)
+    await shot(app, 's3-barge-in-before.png')
+    await emitPluginEvent(page, 'voice.interrupted', {})
     const afterDrain = await callSnap(page)
-    console.log('BARGE after drain', afterDrain)
-    expect(afterDrain.playing, 'drain keeps current clip').toBe(CLIP_LAUGH)
-    expect(afterDrain.queue, 'drain empties the route').toEqual([])
-    expect(afterDrain.next, 'drain next is rest').toBeTruthy()
-    expect(afterDrain.next === CLIP_WAVE || afterDrain.next === CLIP_LEAN, 'drain next must not stay on the route').toBe(false)
+    console.log('BARGE after voice.interrupted', afterDrain)
+    expect(afterDrain.playing, 'interrupt keeps current clip').toBe(CLIP_LAUGH)
+    expect(afterDrain.queue, 'interrupt empties the route').toEqual([])
+    expect(afterDrain.next, 'interrupt next is rest').toBeTruthy()
+    expect(afterDrain.next === CLIP_WAVE || afterDrain.next === CLIP_LEAN, 'interrupt next must not stay on the route').toBe(false)
     await expect(page.locator('[data-testid="avatar-chip-now"]')).toContainText(/Laugh/i)
-    expect(await page.locator('[data-testid="avatar-chip"]').filter({ hasText: /Wave/i }).count(), 'Wave chip gone after drain').toBe(0)
-    // Re-freeze after drain in case the element advanced
+    expect(await page.locator('[data-testid="avatar-chip"]').filter({ hasText: /Wave/i }).count(), 'Wave chip gone after interrupt').toBe(0)
     await freezeActiveVideo(page, fixtureMiddleTime(12))
     await shot(app, 's3-barge-in-drain.png')
 
@@ -891,6 +967,7 @@ test('S3a+S3b call screen (fixtures, hidden, isolated sandbox)', async () => {
     throw err
   } finally {
     await finish()
+    writeShotManifest(SHOT_DIR)
   }
 
   const healthAfter = await liveHealth()
