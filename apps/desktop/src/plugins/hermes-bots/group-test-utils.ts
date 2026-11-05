@@ -471,6 +471,9 @@ export async function pluginSdkMock(host: Record<string, unknown>) {
     createBudgetedLoop: undefined,
     gatewayActivationEpoch: () => 0,
     GlyphSpinner: () => null,
+    // Named import in group-chat-view (VH8 header). Must be a component —
+    // undefined crashes React and the room waitFor times out.
+    ListeningLight: () => null,
     host,
     CapabilitiesView: undefined,
     MessageTextContent: undefined,

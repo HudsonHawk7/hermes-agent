@@ -550,23 +550,23 @@ interface GatewayErrorLike {
  *  maps RuntimeStoreError('not_found') to code 4001 with message/reason
  *  `not_found` (session_controls._refusal_data). IPC may also strip the code and
  *  leave only the bare message. All three mean "no such session" for bind. */
-export function isGenuineMissingSessionError(error: GatewayErrorLike | null | undefined): boolean {
+export function isGenuineMissingSessionError(error: GatewayErrorLike | string | null | undefined): boolean {
   if (!error) {
     return false
+  }
+
+  // Across a realm boundary the rejection can be a bare string, not an object.
+  if (typeof error === 'string') {
+    return error.trim() === 'not_found'
   }
 
   if (error.code === 4007) {
     return true
   }
 
-  const reason =
-    error.data && typeof error.data === 'object' ? (error.data as { reason?: unknown }).reason : undefined
+  const reason = error.data && typeof error.data === 'object' ? (error.data as { reason?: unknown }).reason : undefined
 
-  const message = typeof error.message === 'string'
-    ? error.message.trim()
-    : typeof error === 'string'
-      ? error.trim()
-      : ''
+  const message = typeof error.message === 'string' ? error.message.trim() : ''
 
   // Live gateway: 4001 + reason/message not_found is the store miss (not a
   // transport failure). Other 4001 reasons (invalid_params, session_busy, …)
