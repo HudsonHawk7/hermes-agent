@@ -1597,6 +1597,9 @@ export interface RoomEvent {
 export interface RoomActor {
   kind: string
   id: string
+  profile?: string | null
+  display_name?: string | null
+  connection_id?: string | null
 }
 export interface GroupsCreateParams {
   profile?: string | null
@@ -3539,6 +3542,17 @@ export interface SessionHistoryParams {
 export interface SessionHistoryResult {
   count: number
   messages: TranscriptMessage[]
+}
+/** One plugin-authored system line (desktop ``host.voice.note`` — the call-ended line). ``text`` is the line itself (whitespace-trimmed, 500 chars max); ``source`` is an optional label the renderer may show beside it. There is no role field: a note is always a system line. */
+export interface SessionNoteParams {
+  session_id: string
+  profile?: string | null
+  text: string
+  source?: string | null
+}
+export interface SessionNoteResult {
+  ok: boolean
+  session_id: string
 }
 export interface SessionUsageParams {
   session_id: string
@@ -5839,6 +5853,11 @@ export interface ReactionPayload {
 export interface ReviewSummaryPayload {
   text: string
 }
+/** ``methods_session`` ``session.note``: a plugin-authored line for this session's transcript. Live-only — no message row is written, so the line paints once and never replays on resume. The role is fixed server-side: a note is always a system line, never the user's or the agent's voice. */
+export interface SessionNotePayload {
+  text: string
+  source?: string | null
+}
 /** A session-authority local-viewer turn: one line the agent printed through ``_print_fn`` (subagent completion, compaction, errors, budget notices), which main's classic CLI rendered through ``_agent_status_print``. */
 export interface AgentPrintPayload {
   text: string
@@ -6501,6 +6520,8 @@ export interface RpcMethods {
   'session.list': { params: SessionListParams; result: SessionListResult }
   /** Most recent human-facing session; errors fold into a null session_id. */
   'session.most_recent': { params: SessionMostRecentParams; result: SessionMostRecentResult }
+  /** Append a plugin-authored system line to a live session's transcript (live-only, never model input). */
+  'session.note': { params: SessionNoteParams; result: SessionNoteResult }
   /** Redirect the active turn (queued for the next turn while the agent is still building). */
   'session.redirect': { params: SessionCorrectionParams; result: SessionCorrectionResult }
   /** Attach to a stored session: reuse it if live here, else lazy / deferred / cold / eager rebuild. */
@@ -6828,6 +6849,7 @@ export const RPC_METHODS = [
   'session.interrupt',
   'session.list',
   'session.most_recent',
+  'session.note',
   'session.redirect',
   'session.resume',
   'session.save',
@@ -7186,6 +7208,8 @@ export interface BackendGatewayEventMap {
   'session.control.update': SessionControlUpdatePayload
   /** Live session settings snapshot (``server._session_info``); also the ``info`` of create/resume/activate. */
   'session.info': SessionLiveInfo
+  /** A plugin added one system line to this session's transcript. */
+  'session.note': SessionNotePayload
   /** The backend reclaimed a live session out from under its clients. */
   'session.reclaimed': SessionReclaimedPayload
   /** Deferred resume hydration progress. */
@@ -7298,6 +7322,7 @@ export const GATEWAY_EVENT_TYPES = [
   'review.summary',
   'session.control.update',
   'session.info',
+  'session.note',
   'session.reclaimed',
   'session.resume_progress',
   'session.title',

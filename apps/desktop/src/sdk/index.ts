@@ -121,6 +121,7 @@ import {
 } from './profile-request'
 import { sessionsHost } from './sessions'
 import { desktopSettings } from './settings'
+import { createVoiceHost } from './voice'
 
 /** Pane, status bar and titlebar slots; see `./areas` for the mount rules. */
 export { PANES_AREA, STATUSBAR_AREAS, TITLEBAR_AREAS } from './areas'
@@ -575,7 +576,7 @@ async function awaitProfileActivation(
   // by mutation: removing it changed no test outcome.
 }
 
-export const host = {
+const hostBase = {
   state: {
     /** Runtime id of the active chat session (null on a fresh draft). */
     activeSessionId: readonlyAtom<null | string>($activeSessionId),
@@ -1591,6 +1592,11 @@ export const host = {
    *  `host.i18n.languageOptions()` lists what the switcher shows. */
   i18n: i18nHost
 }
+
+/** THE plugin SDK surface. `voice` is attached here rather than inside the
+ *  literal above because its door routes session-scoped RPCs through this
+ *  aggregate's own `request` — see `sdk/voice.ts`. */
+export const host = { ...hostBase, voice: createVoiceHost(hostBase.request) }
 
 // -- react bridge -------------------------------------------------------------
 

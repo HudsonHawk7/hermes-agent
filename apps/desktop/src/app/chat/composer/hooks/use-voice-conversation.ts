@@ -1000,19 +1000,22 @@ export function useVoiceConversation({
   }, [handleTurn])
 
   const toggleMute = useCallback(() => {
-    setMuted(value => {
-      const next = !value
+    // Answer with the value the surface actually applied: the plugin door
+    // (`host.voice.toggleMic`) relays this, so it must never be a guess.
+    const next = !mutedRef.current
 
-      if (next) {
-        clearTurnTimeout()
-        handle.cancel()
-        setStatus('idle')
-      } else if (enabledRef.current && !busyRef.current && statusRef.current === 'idle') {
-        pendingStartRef.current = true
-      }
+    mutedRef.current = next
+    setMuted(next)
 
-      return next
-    })
+    if (next) {
+      clearTurnTimeout()
+      handle.cancel()
+      setStatus('idle')
+    } else if (enabledRef.current && !busyRef.current && statusRef.current === 'idle') {
+      pendingStartRef.current = true
+    }
+
+    return next
   }, [handle])
 
   useEffect(() => {
