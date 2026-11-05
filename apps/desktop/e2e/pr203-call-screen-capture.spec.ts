@@ -866,20 +866,20 @@ test('S3a+S3b call screen (fixtures, hidden, isolated sandbox)', async () => {
     })))
     const playRow = page.locator('[data-tool-row]').filter({ hasText: /Play Moves|play_moves/i }).first()
     await playRow.waitFor({ state: 'attached', timeout: 45_000 }).catch(() => undefined)
-    if (await playRow.count()) {
-      await playRow.evaluate(el => el.scrollIntoView({ block: 'center', inline: 'nearest' })).catch(() => undefined)
-      const toggle = playRow.locator('button[aria-expanded]').first()
-      if (await toggle.count()) {
-        const expanded = await toggle.getAttribute('aria-expanded')
-        if (expanded !== 'true') {
-          await toggle.click({ force: true }).catch(() => undefined)
-        }
-      } else {
-        await playRow.click({ force: true }).catch(() => undefined)
-      }
-    }
+    // Turn-done signal: assistant text is already on chat once play_moves finished.
+    // The Played: N clips line lives in the collapsed disclosure — expand every
+    // poll (one-shot Playwright click misses on hidden windows / waking overlay).
+    await page.getByText(/wave is queued on the call/i).waitFor({ state: 'visible', timeout: 45_000 }).catch(() => undefined)
     try {
       await expect.poll(async () => {
+        await page.evaluate(() => {
+          const rows = [...document.querySelectorAll('[data-tool-row]')] as HTMLElement[]
+          const play = rows.find(el => /Play Moves|play_moves/i.test(el.innerText || el.textContent || ''))
+          if (!play) {return}
+          play.scrollIntoView({ block: 'center', inline: 'nearest' })
+          const btn = play.querySelector('button[aria-expanded]') as HTMLButtonElement | null
+          if (btn && btn.getAttribute('aria-expanded') !== 'true') {btn.click()}
+        }).catch(() => undefined)
         const snap = await page.evaluate(() => {
           const rows = [...document.querySelectorAll('[data-tool-row]')].map(n => {
             const el = n as HTMLElement
