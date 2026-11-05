@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import os
 import threading
@@ -144,6 +145,78 @@ class HostedRoomService:
         """Profiles a SAVED room's roster is checked against. New groups use ``local_profiles``;
         a subclass may keep a seated member valid after it stops being eligible for new groups."""
         return self.local_profiles()
+
+    def _member_media_home(self, profile: str) -> Path | None:
+        homes = getattr(self, "profile_homes", None)
+        if callable(homes):
+            home = homes().get(profile)
+            if home is not None:
+                return Path(home)
+        if profile == "default":
+            return self.root
+        candidate = self.root / "profiles" / profile
+        return candidate if candidate.is_dir() else None
+
+    @staticmethod
+    def _media_failure(kind: str, exc: Exception) -> str:
+        detail = str(exc).lower()
+        if "outside" in detail:
+            reason = "outside allowed folders"
+        elif "no file" in detail:
+            reason = "file not found"
+        elif "larger" in detail or "size limit" in detail or "quota" in detail:
+            reason = "too large"
+        elif "only" in detail or "match" in detail:
+            reason = "unsupported type"
+        else:
+            reason = "could not be verified"
+        return f"({kind} not shared: {reason})"
+
+    def _member_media_event(
+        self, event: discussion.EventPlan, room: Mapping[str, Any], member: discussion.DiscussionMember,
+    ) -> tuple[discussion.EventPlan, tuple[str, ...]]:
+        """Turn a member's local MEDIA tags into committed, room-visible attachments."""
+        from gateway.hosted_room_attachments import AttachmentError, HostedRoomAttachmentStore
+        from gateway.platforms.base import BasePlatformAdapter
+        from hermes_cli.config import read_user_config_raw
+        from tools import preview_upload
+
+        text = str(event.payload["text"])
+        media, cleaned = BasePlatformAdapter.extract_media(text)
+        if not media:
+            return event, ()
+        home = self._member_media_home(member.profile)
+        roots = preview_upload.room_media_roots(
+            read_user_config_raw(home / "config.yaml") if home is not None else {}, home or self.root)
+        store = HostedRoomAttachmentStore(self.db_path)
+        manifest, failures = [], []
+        for index, (path, _voice) in enumerate(media):
+            suffix = Path(path).suffix.lower()
+            visual = "video" if suffix in {".mp4", ".m4v", ".mov", ".webm"} else "picture"
+            if len(manifest) >= 8:
+                failures.append(f"({visual} not shared: attachment limit reached)")
+                continue
+            try:
+                shared = preview_upload.read_upload(path, roots)
+                kind = "video" if shared["mime"].startswith("video/") else "image"
+                saved = store.put(
+                    room_id=str(room["room_id"]), upload_id=f"member-media:{event.event_id}:{index}", kind=kind,
+                    name=shared["name"], mime=shared["mime"], data=base64.b64decode(shared["data"], validate=True))
+                manifest.append({key: saved[key] for key in ("attachment_id", "kind", "name", "size", "mime")})
+            except (preview_upload.UploadRefused, AttachmentError, ValueError) as exc:
+                failures.append(self._media_failure(visual, exc))
+        if not manifest:
+            return replace(event, payload={**event.payload, "text": "\n".join(filter(None, [cleaned, *failures]))}), ()
+        try:
+            _, transitioned = store.commit_message_with_receipt(
+                room_id=str(room["room_id"]), event_id=event.event_id, manifest=manifest,
+                recipient_member_ids=[str(row["member_id"]) for row in room["members"]],
+                viewer_access=True, hold_until_event=True)
+        except AttachmentError as exc:
+            failures.extend(self._media_failure("picture", exc) for _ in manifest)
+            return replace(event, payload={**event.payload, "text": "\n".join(filter(None, [cleaned, *failures]))}), ()
+        return replace(event, payload={**event.payload, "text": "\n".join(filter(None, [cleaned, *failures])),
+                                       "attachments": manifest}), transitioned
 
     def bindings(self) -> tuple[HostedRoomBinding, ...]:
         local_gateway_id = hosted_rooms.local_authority_gateway_id()
@@ -402,8 +475,18 @@ class HostedRoomService:
                 execution_generation=execution_generation if status == "deferred" else None,
                 local_profiles=local_profiles)
             for event in publication.events:
-                appended = hosted_rooms.append_event(
-                    self.db_path, **event.append_kwargs(room_id), expected_latest_seq=cursor)
+                committed = ()
+                if event.kind == "message.member":
+                    event, committed = self._member_media_event(event, room, plan.member)
+                try:
+                    appended = hosted_rooms.append_event(
+                        self.db_path, **event.append_kwargs(room_id), expected_latest_seq=cursor)
+                except Exception:
+                    if committed:
+                        from gateway.hosted_room_attachments import HostedRoomAttachmentStore
+                        HostedRoomAttachmentStore(self.db_path).abort_message_commit(
+                            room_id=room_id, event_id=event.event_id, attachment_ids=committed)
+                    raise
                 cursor = max(cursor, int(appended["seq"]))
             changed = True
         return changed

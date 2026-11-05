@@ -53,7 +53,7 @@ MAX_ATTACHMENT_MIME_CHARS = 127
 MAX_IDENTIFIER_CHARS = 128
 
 _ATTACHMENT_FIELDS = frozenset({"attachment_id", "kind", "name", "size", "mime"})
-_ATTACHMENT_KINDS = frozenset({"image", "pdf", "file"})
+_ATTACHMENT_KINDS = frozenset({"image", "video", "pdf", "file"})
 _ATTACHMENT_ID_RE = re.compile(r"^att_[0-9a-f]{32}$")
 _BLOB_ID_RE = re.compile(r"^blob_[0-9a-f]{32}$")
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
@@ -148,7 +148,7 @@ def _mime(value: Any) -> str:
 
 def _kind(value: Any) -> str:
     if not isinstance(value, str) or value not in _ATTACHMENT_KINDS:
-        raise AttachmentError("attachment kind must be image, pdf, or file")
+        raise AttachmentError("attachment kind must be image, video, pdf, or file")
     return value
 
 
@@ -163,6 +163,10 @@ def _sniff_known_mime(data: bytes) -> str:
         return "image/bmp"
     if len(data) >= 12 and data.startswith(b"RIFF") and data[8:12] == b"WEBP":
         return "image/webp"
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        return "video/mp4"
+    if data.startswith(b"\x1a\x45\xdf\xa3"):
+        return "video/webm"
     if data.startswith(b"%PDF-"):
         return "application/pdf"
     if data.startswith(b"PK\x03\x04"):
@@ -188,6 +192,10 @@ def _validate_mime_and_kind(data: bytes, *, kind: str, mime: str) -> None:
     if kind == "pdf":
         if mime != "application/pdf" or sniffed != "application/pdf":
             raise AttachmentError("PDF bytes do not match application/pdf")
+        return
+    if kind == "video":
+        if not mime.startswith("video/") or sniffed not in {"video/mp4", "video/webm"}:
+            raise AttachmentError("video bytes do not match the declared MIME type")
         return
     if mime.startswith("image/") or mime == "application/pdf":
         raise AttachmentError("image and PDF MIME types require their matching kind")
@@ -247,6 +255,8 @@ def _safe_manifest_entry(value: Any) -> dict[str, Any]:
     mime = _mime(value["mime"])
     if kind == "image" and not mime.startswith("image/"):
         raise AttachmentError("image attachments require an image MIME type")
+    if kind == "video" and not mime.startswith("video/"):
+        raise AttachmentError("video attachments require a video MIME type")
     if kind == "pdf" and mime != "application/pdf":
         raise AttachmentError("PDF attachments require application/pdf")
     return {

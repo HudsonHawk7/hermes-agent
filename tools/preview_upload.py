@@ -42,6 +42,14 @@ UPLOAD_TYPES = {
 #: customer data), which the provider alone may read; ``upload`` hands a file to any site open in the pane.
 PROVIDER_FOLDER_KEYS = (("image_gen", "image_input_dir"), ("video_gen", "image_input_dir"))
 
+# Room replies are shared only with the frozen room roster, unlike a preview upload
+# which hands bytes to an arbitrary site.  They may therefore include generated
+# outputs and screenshot artifacts as the hosted-room media contract requires.
+ROOM_MEDIA_FOLDER_KEYS = (
+    ("image_gen", "output_dir"), ("image_gen", "image_input_dir"), ("image_gen", "screenshots_dir"),
+    ("video_gen", "output_dir"), ("video_gen", "image_input_dir"), ("video_gen", "screenshots_dir"),
+)
+
 #: The profile's retained chat attachments (gateway/session_ingress_media.py): ``native-inputs`` under the documents
 #: cache, which an older home keeps at ``document_cache/`` — ``hermes_constants.get_hermes_dir`` is the one rule for
 #: that, the same one ``gateway.platforms.base.get_document_cache_dir`` applies before it creates the folder.
@@ -63,6 +71,24 @@ def upload_roots(cfg: Any, hermes_home: Path) -> list[tuple[str, Path]]:
     profile's retained attachments once that folder exists (its first attachment creates it)."""
     roots: list[tuple[str, Path]] = []
     for section, key in PROVIDER_FOLDER_KEYS:
+        providers = cfg.get(section) if isinstance(cfg, dict) else None
+        if not isinstance(providers, dict):
+            continue
+        for provider, settings in providers.items():
+            value = settings.get(key) if isinstance(settings, dict) else None
+            if isinstance(value, str) and value.strip():
+                roots.append((f"{section}.{provider}.{key}", Path(value.strip()).expanduser()))
+    home = Path(hermes_home)
+    native = get_hermes_dir(*DOCUMENT_CACHE, home=home) / NATIVE_INPUTS
+    if native.is_dir():
+        roots.append((native.relative_to(home).as_posix(), native))
+    return roots
+
+
+def room_media_roots(cfg: Any, hermes_home: Path) -> list[tuple[str, Path]]:
+    """The profile-local roots from which a member may share room media."""
+    roots: list[tuple[str, Path]] = []
+    for section, key in ROOM_MEDIA_FOLDER_KEYS:
         providers = cfg.get(section) if isinstance(cfg, dict) else None
         if not isinstance(providers, dict):
             continue
