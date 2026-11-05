@@ -718,3 +718,47 @@ def resolve_attachment_image_url(
         if stored_leaf == leaf:
             return f"/api/plugins/kanban/attachments/{att.id}?board={board}"
     return None
+
+
+def withdraw_gm_ask(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    by: str = "timecaps-watch",
+    reason: str = "Withdrawn. The thing being asked about has recovered.",
+) -> bool:
+    """Close an open one-tap without treating it as a GM answer that unblocks work.
+
+    The card leaves Needs you (status ``scheduled``, block kind cleared) so the
+    same card can be parked again on a later drop. A ``gm_decision`` is written
+    so :func:`get_open_gm_ask` reports the ask closed. Does not spawn a worker.
+    """
+    task = _kb.get_task(conn, task_id)
+    if task is None:
+        return False
+    note = (reason or "").strip() or "Withdrawn. The thing being asked about has recovered."
+    with _kbc.write_txn(conn):
+        open_ask = get_open_gm_ask(conn, task_id)
+        if open_ask is not None:
+            ask_id, _payload, _asked_at = open_ask
+            _append_event_id(conn, task_id, GM_DECISION_KIND, {
+                "ask_event_id": ask_id,
+                "key": "withdrawn",
+                "by": by,
+                "via": "timecaps_watch",
+                "withdrawn": True,
+                "note": note,
+            })
+        if task.status not in ("done", "archived"):
+            conn.execute(
+                "UPDATE tasks SET status = 'scheduled', block_kind = NULL, claim_lock = NULL, "
+                "claim_expires = NULL, worker_pid = NULL, current_run_id = NULL "
+                "WHERE id = ? AND status NOT IN ('done', 'archived')",
+                (task_id,),
+            )
+            _kb._append_event(conn, task_id, "scheduled", {"via": "timecaps_watch", "reason": note})
+        _kb.add_comment(conn, task_id, by, note)
+    landed = _kb.get_task(conn, task_id)
+    if landed is None:
+        return False
+    return not (landed.status == "blocked" and landed.block_kind == "needs_input")

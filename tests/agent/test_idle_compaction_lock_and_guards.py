@@ -28,6 +28,7 @@ from unittest.mock import MagicMock, patch
 from hermes_state import SessionDB
 
 from agent.turn_context import build_turn_context
+from agent.turn_context_compaction import run_deferred_idle_compaction
 
 from tests.agent.test_compression_concurrent_fork import _build_agent_with_db
 
@@ -94,8 +95,30 @@ def _history(n: int = 20) -> list:
 
 
 
+def test_idle_compaction_does_not_run_inside_the_live_turn(tmp_path: Path) -> None:
+    """Eligible idle resume must not summarise before the model answers.
+
+    The 26B slot is shared: a turn-start summary steals first-token time and
+    busts the chat prefix cache. Overflow preflight still runs when the
+    request would not fit; idle can always wait until after the reply.
+    """
+    db = SessionDB(db_path=tmp_path / "state.db")
+    sid = "IDLE_DEFER"
+    db.create_session(sid, source="cli")
+    agent = _prep_idle_agent(db, sid)
+    agent.context_compressor.emit_automatic_compaction_status = True
+    del agent.context_compressor.get_automatic_compaction_status_message
+
+    ctx = _run_prologue(agent, _history())
+
+    agent.context_compressor.compress.assert_not_called()
+    pending = getattr(agent, "_pending_idle_compaction", None)
+    assert isinstance(pending, dict), f"expected pending idle compaction, got {pending!r}"
+    assert ctx.current_turn_user_idx == len(ctx.messages) - 1
+
+
 def test_idle_compaction_status_emitted_by_default(tmp_path: Path) -> None:
-    """Control: the default engine keeps the 💤 idle-resume status line."""
+    """Control: the default engine keeps the 💤 idle-resume status line — after the reply."""
     db = SessionDB(db_path=tmp_path / "state.db")
     sid = "IDLE_LOUD"
     db.create_session(sid, source="cli")
@@ -107,7 +130,9 @@ def test_idle_compaction_status_emitted_by_default(tmp_path: Path) -> None:
     events = []
     agent.status_callback = lambda ev, msg: events.append((ev, msg))
 
-    _run_prologue(agent, _history())
+    ctx = _run_prologue(agent, _history())
+    agent.context_compressor.compress.assert_not_called()
+    run_deferred_idle_compaction(agent, ctx.messages)
 
     agent.context_compressor.compress.assert_called_once()
     assert any(
@@ -133,6 +158,7 @@ def test_idle_compaction_defers_to_held_compression_lock(tmp_path: Path) -> None
     history = _history()
 
     ctx = _run_prologue(agent, history)
+    run_deferred_idle_compaction(agent, ctx.messages)
 
     # Skipped: the compressor never ran and the session did not rotate.
     agent.context_compressor.compress.assert_not_called()
@@ -192,9 +218,11 @@ def test_idle_compaction_skips_a_transcript_that_has_not_grown(tmp_path: Path) -
     seam = _pin_compress_seam(agent)
 
     ctx = _run_prologue(agent, _history(), rough_tokens=44_579)
+    run_deferred_idle_compaction(agent, ctx.messages)
 
     seam.assert_not_called()
     agent.context_compressor.compress.assert_not_called()
+    assert getattr(agent, "_pending_idle_compaction", None) is None
     assert agent.session_id == sid
     assert len(ctx.messages) == len(_history()) + 1
     assert ctx.current_turn_user_idx == len(ctx.messages) - 1
@@ -238,6 +266,7 @@ def test_idle_compaction_respects_anti_thrash_breaker(tmp_path: Path) -> None:
     agent.context_compressor = compressor
 
     ctx = _run_prologue(agent, _history())
+    run_deferred_idle_compaction(agent, ctx.messages)
 
     compressor.compress.assert_not_called()
     assert agent.session_id == sid
