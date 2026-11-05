@@ -7,8 +7,12 @@ from agent.message_sanitization import coalesce_tool_call_id, deterministic_call
 from agent.transports.types import ToolCall
 from tools.connectors import is_connector_name
 from tools.connectors.gateway.config import MAX_CALLS_PER_DISPATCH
-from tools.tool_search_catalog import TOOL_CALL_NAME
 from tools.tool_search_validation import normalize_tool_call_entries
+
+# Constant only — do not import tools.tool_search_catalog here. That module
+# imports snowballstemmer at top level; a missing extra must not crash every
+# tool round (e2e sandbox venv has no stemmer, so play_moves never ran).
+TOOL_CALL_NAME = "tool_call"
 
 
 def expand_local_tool_batches(tool_calls: list, *, provider_data: dict | None = None) -> list:
