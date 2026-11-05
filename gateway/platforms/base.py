@@ -1376,12 +1376,12 @@ def _terminal_sentinel_start(text: str) -> int:
     return start if start < end else -1
 
 
-def _mask_media_scan_text(text: str) -> str:
+def _mask_media_scan_text(text: str, inline_tag_deliverable=None) -> str:
     """Offset-preserving mask of protected spans (code, quotes, JSON string values) and of a
     terminal ``<|eos|>`` sentinel, so a tag glued to it ends on whitespace like any other.
     BasePlatformAdapter is defined later in this module; resolved at call time."""
     A = BasePlatformAdapter
-    masked = A._mask_json_string_media(A._mask_protected_spans(text))
+    masked = A._mask_json_string_media(A._mask_protected_spans(text, inline_tag_deliverable))
     start = _terminal_sentinel_start(text)
     if start >= 0:
         masked = _blank_spans(masked, [(start, len(text.rstrip()))])
@@ -3222,10 +3222,12 @@ class BasePlatformAdapter(ABC):
         return [p for p in safe_paths if p]
 
     @staticmethod
-    def _mask_protected_spans(content: str) -> str:
+    def _mask_protected_spans(content: str, inline_tag_deliverable=None) -> str:
         """Blank fenced code, inline code and blockquotes (length-preserving so regex offsets stay
         valid) against MEDIA: false positives; backtick-quoted paths inside MEDIA: tags stay
-        scannable."""
+        scannable. ``inline_tag_deliverable`` replaces the filesystem check that decides whether a
+        whole tag in inline code is real, for callers that must not touch the filesystem."""
+        deliverable = inline_tag_deliverable or validate_media_delivery_path
         spans: list = [m.span() for m in _FENCED_CODE_RE.finditer(content)]
         for m in _INLINE_CODE_RE.finditer(content):
             start = m.start()
@@ -3237,7 +3239,7 @@ class BasePlatformAdapter(ABC):
             inner = m.group(0)[1:-1].strip()
             if inner.upper().startswith("MEDIA:"):
                 candidate = _normalize_media_tag_path(inner[6:])
-                if candidate and validate_media_delivery_path(candidate):
+                if candidate and deliverable(candidate):
                     continue  # Real deliverable tag in inline code — keep it scannable
             spans.append((start, m.end()))
         spans.extend(m.span() for m in re.finditer(r'^>.*$', content, re.MULTILINE))
