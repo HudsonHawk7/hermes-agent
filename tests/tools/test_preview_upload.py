@@ -64,6 +64,22 @@ def test_screen_share_frames_are_never_an_upload_root(home):
     assert "image_gen.sogni.image_input_dir" in str(refused.value)
 
 
+def test_screen_share_frames_are_never_room_media(home):
+    """A room reply is shared with every member, so ``screenshots_dir`` (live frames of the user's screen) is
+    refused there for the same reason it is refused for ``upload``, even when it is configured for both providers."""
+    home["cfg"]["video_gen"] = {"sogni": {"image_input_dir": str(home["pictures"]), "screenshots_dir": str(home["shots"])}}
+    frame = home["shots"] / "frame-0001.png"
+    frame.write_bytes(PNG)
+    roots = up.room_media_roots(home["cfg"], home["home"])
+
+    assert all(folder != home["shots"] for _, folder in roots)
+    assert not any("screenshots_dir" in name for name, _ in roots)
+    with pytest.raises(up.UploadRefused) as refused:
+        up.read_upload(str(frame), roots)
+
+    assert "screenshots_dir" not in str(refused.value)
+
+
 def test_the_profile_s_retained_attachments_count_once_they_exist(home):
     native = home["home"] / "cache" / "documents" / "native-inputs"
     assert all(folder != native for _, folder in _roots(home))

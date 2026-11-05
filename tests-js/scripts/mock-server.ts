@@ -373,6 +373,24 @@ export const PROVIDER_FAILURE_TRIGGER = 'E2E_PROVIDER_FAILURE_TRIGGER'
 export const PROVIDER_FAILURE_MESSAGE = 'E2E invalid_api_key: the mock refused this completion on purpose'
 
 /**
+ * The next two lines name a member-owned picture and a deliberately disallowed
+ * file. Keeping the paths in the room prompt lets each sandbox own its files.
+ */
+export const MEMBER_MEDIA_TRIGGER = 'E2E_MEMBER_MEDIA_TRIGGER'
+const MEMBER_MEDIA_USAGE = `${MEMBER_MEDIA_TRIGGER} requires allowed and disallowed absolute paths on the next two lines`
+
+function memberMediaReply(userText: string): string | null {
+  const lines = userText.split(/\r?\n/)
+  const trigger = lines.findIndex(line => line.includes(MEMBER_MEDIA_TRIGGER))
+
+  if (trigger < 0 || !lines[trigger + 1] || !lines[trigger + 2]) {
+    return null
+  }
+
+  return `Here is the requested picture.\nMEDIA:${lines[trigger + 1]}\nMEDIA:${lines[trigger + 2]}`
+}
+
+/**
  * The same provider failure one step later: the first completion says
  * TOOL_THEN_FAILURE_TEXT and calls a tool, the completion after the tool
  * result is the 401. That pre-tool text is not the member's reply.
@@ -847,6 +865,21 @@ export function startMockServer(options: MockServerOptions = {}): Promise<MockSe
           if (userText.includes(PROVIDER_FAILURE_TRIGGER) || userText.includes(TOOL_THEN_FAILURE_TRIGGER)) {
             res.writeHead(401, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ error: { code: 'invalid_api_key', message: PROVIDER_FAILURE_MESSAGE, type: 'invalid_request_error' } }))
+
+            return
+          }
+
+          if (userText.includes(MEMBER_MEDIA_TRIGGER)) {
+            const reply = memberMediaReply(userText)
+
+            if (reply === null) {
+              res.writeHead(400, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: { code: 'bad_e2e_trigger', message: MEMBER_MEDIA_USAGE, type: 'invalid_request_error' } }))
+            } else if (stream) {
+              streamTextResponse(res, model, reply)
+            } else {
+              nonStreamingTextResponse(res, model, reply)
+            }
 
             return
           }

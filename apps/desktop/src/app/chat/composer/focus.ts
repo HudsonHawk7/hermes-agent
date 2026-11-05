@@ -234,6 +234,11 @@ export const markActiveComposer = (target: ComposerTarget) => {
   activeTarget = target
 }
 
+/** The composer `'active'` currently names, without healing a stale claim.
+ *  A status read must not move the focus bus; {@link getActiveComposer} heals.
+ *  `toggleMic()` with no id reaches this same target. */
+export const activeComposerTarget = (): ComposerTarget => activeTarget
+
 /** Hand the routing key back when a composer unmounts, so `'active'` can never
  *  resolve to a composer that no longer has a subscriber — such a request is
  *  dispatched and then dropped by every mounted composer's target filter, and
@@ -672,6 +677,79 @@ export const requestVoiceToggle = (target: ComposerTarget | 'active' = 'active')
 
 export const onComposerVoiceToggleRequest = (handler: (target: ComposerTarget) => void) =>
   subscribe<{ target: ComposerTarget }>(VOICE_TOGGLE_EVENT, ({ target }) => handler(target))
+
+/** Tokened, acknowledged mute toggle on ONE composer. The plugin door
+ *  (`host.voice.toggleMic`) asks for a toggle and reads back the state the
+ *  surface actually reached — there is no `set(muted)` form anywhere, so a door
+ *  caller can never force the microphone open or closed behind the user's back.
+ *  `'active'` lands on the same composer every other `'active'` verb reaches.
+ *  Fails closed: no mounted surface answering inside the settle window yields
+ *  `null`, never a broadcast to whichever composer happens to be listening. */
+interface VoiceMuteRequestDetail {
+  target: ComposerTarget | 'active'
+  token: number
+}
+
+interface VoiceMuteReplyDetail {
+  muted: boolean
+  token: number
+}
+
+const VOICE_MUTE_EVENT = 'hermes:composer-voice-mute'
+const VOICE_MUTE_REPLY_EVENT = 'hermes:composer-voice-mute-reply'
+const VOICE_MUTE_SETTLE_MS = 50
+
+let voiceMuteToken = 0
+const voiceMutePending = typeof window === 'undefined' ? null : new Map<number, (muted: boolean) => void>()
+
+if (typeof window !== 'undefined') {
+  window.addEventListener(VOICE_MUTE_REPLY_EVENT, event => {
+    const reply = (event as CustomEvent<VoiceMuteReplyDetail>).detail
+    const settle = reply?.token ? voiceMutePending?.get(reply.token) : undefined
+
+    if (settle) {
+      voiceMutePending?.delete(reply.token)
+      settle(reply.muted)
+    }
+  })
+}
+
+export const requestComposerVoiceMute = (
+  target: ComposerTarget | 'active'
+): Promise<null | { muted: boolean }> => {
+  const pending = voiceMutePending
+
+  if (!pending || typeof window === 'undefined') {
+    return Promise.resolve(null)
+  }
+
+  const token = ++voiceMuteToken
+
+  return new Promise(resolve => {
+    pending.set(token, muted => resolve({ muted }))
+    window.dispatchEvent(new CustomEvent<VoiceMuteRequestDetail>(VOICE_MUTE_EVENT, { detail: { target, token } }))
+    window.setTimeout(() => {
+      if (pending.delete(token)) {
+        resolve(null)
+      }
+    }, VOICE_MUTE_SETTLE_MS)
+  })
+}
+
+/** Answer mute requests addressed to THIS composer. `handler` performs the
+ *  toggle and returns the state it reached. Returns the disposer. */
+export const onComposerVoiceMuteRequest = (target: ComposerTarget, handler: () => boolean): (() => void) =>
+  subscribe<VoiceMuteRequestDetail>(VOICE_MUTE_EVENT, detail => {
+    const addressed = detail.target === 'active' ? target === activeTarget : detail.target === target
+
+    if (!addressed) {
+      return
+    }
+
+    const muted = handler()
+
+    dispatchNow<VoiceMuteReplyDetail>(VOICE_MUTE_REPLY_EVENT, { muted, token: detail.token })
+  })
 
 /** Start or stop dictation on one composer. Like voice conversation, the
  * rebindable action targets only the active visible composer. */
