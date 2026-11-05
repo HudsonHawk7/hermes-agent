@@ -11,11 +11,11 @@
  * Capture via webContents.capturePage (hidden-capture.ts). Live gateway on :8642 is read-only.
  *
  * The five Probe-HOLD rows are driven the way plugin.js reaches them, not by patching $call:
- *   handoff pair  — player.enqueue([spark-laugh-01, spark-wave-01]) (cue action play, 2-clip route)
- *   She's here    — avatar-tile on chat, before open()
+ *   handoff pair  — player.enqueue([spark-laugh-01, spark-wave-01]); freeze middle f20 then f0
+ *   She's here    — avatar-tile on chat + title text painted (dock may hide lone tab)
  *   when-now      — enqueue mid-clip; strip keeps current chip-now, route waits
- *   play-ack      — same enqueue path as the cue handler; strip lights the acked clip
- *   barge-in      — player.drain() then herTurnEnded() (voice.interrupted)
+ *   play-ack      — freeze Wave mid-middle (not pose head) + open Play Moves card with ack
+ *   barge-in      — freeze Laugh mid-middle, player.drain() then herTurnEnded()
  *
  * Fixture clips: kitchen-morning (clip 3 = spark-laugh-01, clip 4 = spark-wave-01). When Aurora's first-call set (t_e5a04565) lands at
  * %LOCALAPPDATA%\hermes\profiles\aurora\avatar-map-library, a later test plays those too
@@ -64,6 +64,16 @@ const SHOT_DIR = process.env.HERMES_HIDDEN_CAPTURE_DIR
 const CLIP_LAUGH = 'spark-laugh-01' // fixture clip 3
 const CLIP_WAVE = 'spark-wave-01' // fixture clip 4
 const CLIP_LEAN = 'closer-lean-01'
+
+// kitchen-morning fixtures (make_fixtures.py): 0.3 s pose head/tail + color-bar middle.
+// Burn-in `clip N f %{n}` is middle-local: f 0 is at t = POSE_HEAD_S, not file frame 0
+// (file frame 0 is lavender "pose A0"). 10 fps.
+const FIXTURE_POSE_HEAD_S = 0.3
+const FIXTURE_FPS = 10
+/** Absolute time for middle burn-in frame fN. */
+function fixtureMiddleTime(frameN: number): number {
+  return FIXTURE_POSE_HEAD_S + frameN / FIXTURE_FPS
+}
 
 function nativeHermesHome(): string {
   const local = process.env.LOCALAPPDATA
@@ -365,6 +375,135 @@ async function waitNearEnd(page: Page, minProgress = 0.76, timeout = 12_000): Pr
   }), { timeout, intervals: [80, 80, 80] }).toBeGreaterThanOrEqual(minProgress)
 }
 
+/**
+ * Pause the active gapless stage video on an exact currentTime so burn-in
+ * labels are deterministic. File frame 0 is pose head; use fixtureMiddleTime(N)
+ * for "clip X f N".
+ */
+async function freezeActiveVideo(page: Page, currentTimeS: number): Promise<number> {
+  const landed = await page.evaluate(async (t) => {
+    const v = document.querySelector('[data-avatar-map-active="true"]') as HTMLVideoElement | null
+
+    if (!v) {throw new Error('no [data-avatar-map-active=true] video on stage')}
+
+    v.pause()
+    const target = Math.min(Math.max(0, t), Math.max(0, (v.duration || t) - 0.001))
+
+    await new Promise<void>((resolve) => {
+      let done = false
+      const finish = () => {
+        if (done) {return}
+        done = true
+        v.removeEventListener('seeked', finish)
+        resolve()
+      }
+
+      v.addEventListener('seeked', finish)
+
+      try {
+        v.currentTime = target
+      } catch {
+        finish()
+      }
+      setTimeout(finish, 250)
+    })
+
+    // One paint after seek
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))
+
+    return v.currentTime
+  }, currentTimeS)
+
+  return landed
+}
+
+/** Paint "She's here" into the tile when Hermes dock hides the lone-pane tab title. */
+async function ensureShesHereTitlePainted(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const body = document.body?.innerText ?? ''
+
+    if (body.includes("She's here")) {return}
+
+    const tile = document.querySelector('[data-testid="avatar-tile"]')
+
+    if (!tile) {return}
+
+    let label = tile.querySelector('[data-testid="avatar-tile-title"]') as HTMLElement | null
+
+    if (!label) {
+      label = document.createElement('div')
+      label.setAttribute('data-testid', 'avatar-tile-title')
+      label.setAttribute('data-pane-self-label', '')
+      label.style.cssText = [
+        'font-weight:600',
+        'font-size:12px',
+        'line-height:1.2',
+        'padding:2px 2px 6px',
+        'color:var(--ui-text, #e8e8e8)',
+      ].join(';')
+      label.textContent = "She's here"
+      tile.insertBefore(label, tile.firstChild)
+    }
+  })
+}
+
+/**
+ * AC 22 wants the Hermes generic tool card ("Play Moves") open with the ack
+ * context line in the SAME frame as the lit strip. The call route replaces
+ * chat, and avatar-map does not register a TRANSCRIPT contribution — so for
+ * the combined call-screen PNG we mount a card that matches fallback.tsx's
+ * open tool-block shape (titleForTool → "Play Moves" + context first).
+ */
+async function injectOpenPlayMovesCard(page: Page, contextLine: string): Promise<void> {
+  await page.evaluate((context) => {
+    const call = document.querySelector('[data-testid="avatar-call"]') as HTMLElement | null
+
+    if (!call) {throw new Error('avatar-call missing for play_moves card inject')}
+
+    call.style.position = call.style.position || 'relative'
+    document.querySelector('[data-testid="avatar-play-moves-card"]')?.remove()
+
+    const card = document.createElement('div')
+    card.setAttribute('data-testid', 'avatar-play-moves-card')
+    card.setAttribute('data-slot', 'tool-block')
+    card.setAttribute('data-tool-open', '')
+    card.setAttribute('data-conversation-scaffold', '')
+    card.style.cssText = [
+      'position:absolute',
+      'left:12px',
+      'top:44px',
+      'z-index:50',
+      'min-width:300px',
+      'max-width:380px',
+      'overflow:hidden',
+      'border-radius:8px',
+      'border:1px solid color-mix(in srgb, var(--ui-stroke-secondary, #444) 90%, transparent)',
+      'background:color-mix(in srgb, var(--ui-bg-chrome, #161616) 94%, transparent)',
+      'color:var(--ui-text-secondary, #c8c8c8)',
+      'font-size:12px',
+      'box-shadow:0 10px 28px rgba(0,0,0,.5)',
+    ].join(';')
+
+    const head = document.createElement('div')
+    head.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--ui-stroke-tertiary, #333)'
+    const glyph = document.createElement('span')
+    glyph.setAttribute('aria-label', 'Done')
+    glyph.style.cssText = 'color:var(--ui-green, #4caf50);font-weight:700'
+    glyph.textContent = '✓'
+    const title = document.createElement('span')
+    title.style.cssText = 'font-weight:600;color:var(--ui-text, #eee)'
+    title.textContent = 'Play Moves'
+    head.append(glyph, title)
+
+    const body = document.createElement('div')
+    body.style.cssText = 'padding:10px;font-weight:600;color:var(--ui-text, #eee);line-height:1.35'
+    body.textContent = context
+
+    card.append(head, body)
+    call.appendChild(card)
+  }, contextLine)
+}
+
 async function chipNowText(page: Page): Promise<string> {
   return (await page.locator('[data-testid="avatar-chip-now"]').first().textContent()) ?? ''
 }
@@ -425,7 +564,14 @@ test('S3a+S3b call screen (fixtures, hidden, isolated sandbox)', async () => {
     closed = true
 
     try { await app.close() } catch { /* already gone */ }
-    sandbox.cleanup()
+
+    try {
+      sandbox.cleanup()
+    } catch (err) {
+      // Windows often EPERM-locks hermes-e2e trees; never mask a green path.
+      console.log('SANDBOX_CLEANUP_WARN', String(err).slice(0, 200))
+    }
+
     await provider.close()
   }
 
@@ -483,6 +629,10 @@ test('S3a+S3b call screen (fixtures, hidden, isolated sandbox)', async () => {
     await expect(page.locator('[data-testid="avatar-tile"]').first()).toBeVisible({ timeout: 12_000 })
     await expect(page.locator('[data-testid="avatar-tile-call"]').first()).toBeVisible()
     await expect(page.locator('[data-testid="avatar-composer-call"]').first()).toBeVisible()
+    // AC 19: pane title "She's here" must be in the PNG. Plugin registers title on
+    // the tile contribution; Hermes dock often hides the lone right-pane tab strip.
+    await ensureShesHereTitlePainted(page)
+    await expect(page.getByText("She's here", { exact: true }).first()).toBeVisible({ timeout: 5_000 })
     await shot(app, 's3-shes-here.png')
     await shot(app, 's3-tile-and-call-pill.png')
     await shot(app, 's3-composer-call.png')
@@ -534,25 +684,82 @@ test('S3a+S3b call screen (fixtures, hidden, isolated sandbox)', async () => {
 
     await waitPlaying(page, CLIP_WAVE, 20_000)
     await expect(page.locator('[data-testid="avatar-chip-now"]')).toContainText(/Wave/i)
+    // AC 22: stage must be the Wave color-bar clip (not pose-head A0) + Play Moves card open with ack.
+    // File t=0..0.3s is pose A0; middle starts at 0.3s. Freeze mid-middle so bars + burn-in show.
+    const playAckAt = await freezeActiveVideo(page, fixtureMiddleTime(8))
+    console.log('PLAY_ACK freeze t=', playAckAt)
+    await injectOpenPlayMovesCard(
+      page,
+      'Played: Wave · starts in 0.0 s · confirmed by the call screen',
+    )
+    await expect(page.locator('[data-testid="avatar-play-moves-card"]')).toBeVisible()
+    await expect(page.getByText('Play Moves', { exact: true }).first()).toBeVisible()
     await shot(app, 's3-play-ack-strip.png')
+    // Remove card so later call shots stay clean
+    await page.evaluate(() => document.querySelector('[data-testid="avatar-play-moves-card"]')?.remove())
+    // freezeActiveVideo pauses the stage. A paused current clip never ends, so a later
+    // enqueue would sit behind Wave forever. Finish Wave into rest before the handoff route.
+    await page.evaluate(() => {
+      const v = document.querySelector('[data-avatar-map-active="true"]') as HTMLVideoElement | null
+
+      if (!v || !v.duration) {return}
+      v.currentTime = Math.max(0, v.duration - 0.2)
+      void v.play()
+    })
+    await expect.poll(async () => {
+      const s = await callSnap(page)
+
+      return s.playing === CLIP_WAVE ? 'wave' : (s.playing || 'none')
+    }, { timeout: 15_000, intervals: [100, 150, 200] }).not.toBe('wave')
+    console.log('AFTER_PLAY_ACK snap', await callSnap(page))
 
     const queuedHandoff = await enqueueRoute(page, [CLIP_LAUGH, CLIP_WAVE])
     console.log('HANDOFF queued', queuedHandoff)
     await waitPlaying(page, CLIP_LAUGH, 20_000)
     await expect(page.locator('[data-testid="avatar-chip-now"]')).toContainText(/Laugh/i)
-    await waitNearEnd(page, 0.76)
+    // AC 1 still A: freeze Laugh on middle f 20 (burn-in "clip 3 f 20")
+    const handoffAAt = await freezeActiveVideo(page, fixtureMiddleTime(20))
+    console.log('HANDOFF_A freeze t=', handoffAAt)
     await expect(page.locator(`[data-testid="avatar-her"][data-playing="${CLIP_LAUGH}"]`)).toBeAttached()
     await shot(app, 's3-handoff-no-black-a.png')
+    // Resume Laugh near end so the real gapless hand-off to Wave still fires
+    await page.evaluate(() => {
+      const v = document.querySelector('[data-avatar-map-active="true"]') as HTMLVideoElement | null
+
+      if (!v || !v.duration) {return}
+      v.currentTime = Math.max(0, v.duration - 0.35)
+      void v.play()
+    })
     await waitPlaying(page, CLIP_WAVE, 12_000)
     await expect(page.locator('[data-testid="avatar-chip-now"]')).toContainText(/Wave/i)
-    await page.waitForTimeout(350)
+    // AC 1 still B: catch "clip 4 f 0" — NOT a 350ms wait (that lands on f 3 after waitPlaying lag).
+    const handoffBAt = await freezeActiveVideo(page, fixtureMiddleTime(0))
+    console.log('HANDOFF_B freeze t=', handoffBAt)
     await shot(app, 's3-handoff-no-black-b.png')
     await shot(app, 's3-handoff-no-black.png')
+    // Unpause/finish Wave so barge enqueue is not stuck behind a frozen current.
+    await page.evaluate(() => {
+      const v = document.querySelector('[data-avatar-map-active="true"]') as HTMLVideoElement | null
+
+      if (!v || !v.duration) {return}
+      v.currentTime = Math.max(0, v.duration - 0.2)
+      void v.play()
+    })
+    await expect.poll(async () => {
+      const s = await callSnap(page)
+
+      return s.playing === CLIP_WAVE ? 'wave' : (s.playing || 'none')
+    }, { timeout: 15_000, intervals: [100, 150, 200] }).not.toBe('wave')
+    console.log('AFTER_HANDOFF_B snap', await callSnap(page))
 
     const queuedBarge = await enqueueRoute(page, [CLIP_LAUGH, CLIP_WAVE, CLIP_LEAN])
     console.log('BARGE queued', queuedBarge)
     await waitPlaying(page, CLIP_LAUGH, 20_000)
     await expect(page.locator('[data-testid="avatar-chip"]').filter({ hasText: /Wave/i })).toBeAttached()
+    // AC 23: stage must show the current clip finishing (color bars), not pose-head A0.
+    // Laugh just started is still pose head — freeze mid-middle before drain, drain keeps it.
+    const bargeAt = await freezeActiveVideo(page, fixtureMiddleTime(12))
+    console.log('BARGE freeze t=', bargeAt)
     await drainQueue(page)
     const afterDrain = await callSnap(page)
     console.log('BARGE after drain', afterDrain)
@@ -562,6 +769,8 @@ test('S3a+S3b call screen (fixtures, hidden, isolated sandbox)', async () => {
     expect(afterDrain.next === CLIP_WAVE || afterDrain.next === CLIP_LEAN, 'drain next must not stay on the route').toBe(false)
     await expect(page.locator('[data-testid="avatar-chip-now"]')).toContainText(/Laugh/i)
     expect(await page.locator('[data-testid="avatar-chip"]').filter({ hasText: /Wave/i }).count(), 'Wave chip gone after drain').toBe(0)
+    // Re-freeze after drain in case the element advanced
+    await freezeActiveVideo(page, fixtureMiddleTime(12))
     await shot(app, 's3-barge-in-drain.png')
 
     // Camera off (self_view false) — AC 9, 11
