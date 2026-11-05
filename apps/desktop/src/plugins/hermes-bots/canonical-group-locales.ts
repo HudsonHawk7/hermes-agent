@@ -25,6 +25,7 @@ export interface CanonicalGroupMessages {
   attachFiles: string
   removeAttachment: string
   uploadFailed: string
+  previewFailed: string
   memberWorking: string
   memberQueued: string
   groupWorking: string
@@ -58,6 +59,7 @@ export const CANONICAL_GROUP_LOCALES = {
     attachFiles: 'Attach files',
     removeAttachment: 'Remove attachment',
     uploadFailed: 'Upload failed',
+    previewFailed: 'Could not load preview',
     memberWorking: 'Working',
     memberQueued: 'Queued',
     groupWorking: 'The group is working…'
@@ -89,6 +91,7 @@ export const CANONICAL_GROUP_LOCALES = {
     attachFiles: 'ファイルを添付',
     removeAttachment: '添付ファイルを削除',
     uploadFailed: 'アップロードに失敗しました',
+    previewFailed: 'プレビューを読み込めませんでした',
     memberWorking: '作業中',
     memberQueued: '待機中',
     groupWorking: 'グループが作業中です…'
@@ -120,6 +123,7 @@ export const CANONICAL_GROUP_LOCALES = {
     attachFiles: '附加文件',
     removeAttachment: '移除附件',
     uploadFailed: '上传失败',
+    previewFailed: '无法加载预览',
     memberWorking: '工作中',
     memberQueued: '排队中',
     groupWorking: '群组正在处理…'
@@ -151,6 +155,7 @@ export const CANONICAL_GROUP_LOCALES = {
     attachFiles: '附加檔案',
     removeAttachment: '移除附件',
     uploadFailed: '上傳失敗',
+    previewFailed: '無法載入預覽',
     memberWorking: '工作中',
     memberQueued: '排隊中',
     groupWorking: '群組正在處理…'
@@ -182,6 +187,7 @@ export const CANONICAL_GROUP_LOCALES = {
     attachFiles: 'إرفاق ملفات',
     removeAttachment: 'إزالة المرفق',
     uploadFailed: 'فشل الرفع',
+    previewFailed: 'تعذر تحميل المعاينة',
     memberWorking: 'يعمل',
     memberQueued: 'في الانتظار',
     groupWorking: 'المجموعة تعمل…'
@@ -216,6 +222,7 @@ export const CANONICAL_GROUP_LOCALES = {
     attachFiles: 'Прикрепить файлы',
     removeAttachment: 'Удалить вложение',
     uploadFailed: 'Не удалось загрузить файл',
+    previewFailed: 'Не удалось загрузить предпросмотр',
     memberWorking: 'Работает',
     memberQueued: 'В очереди',
     groupWorking: 'Группа работает…'
@@ -249,6 +256,7 @@ export const CANONICAL_GROUP_LOCALES = {
     attachFiles: 'Joindre des fichiers',
     removeAttachment: 'Retirer la pièce jointe',
     uploadFailed: 'Échec du téléversement',
+    previewFailed: "Impossible de charger l'aperçu",
     memberWorking: 'En cours',
     memberQueued: 'En attente',
     groupWorking: 'Le groupe travaille…'
@@ -283,6 +291,7 @@ export const CANONICAL_GROUP_LOCALES = {
     attachFiles: 'Dateien anhängen',
     removeAttachment: 'Anhang entfernen',
     uploadFailed: 'Hochladen fehlgeschlagen',
+    previewFailed: 'Vorschau konnte nicht geladen werden',
     memberWorking: 'Arbeitet',
     memberQueued: 'In der Warteschlange',
     groupWorking: 'Die Gruppe arbeitet…'
@@ -316,6 +325,7 @@ export const CANONICAL_GROUP_LOCALES = {
     attachFiles: 'Adjuntar archivos',
     removeAttachment: 'Quitar adjunto',
     uploadFailed: 'Error al subir',
+    previewFailed: 'No se pudo cargar la vista previa',
     memberWorking: 'Trabajando',
     memberQueued: 'En cola',
     groupWorking: 'El grupo está trabajando…'
