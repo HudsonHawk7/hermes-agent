@@ -1,7 +1,8 @@
 // The voice door (`host.voice`) is the only way a desktop plugin can see or
-// steer a voice call. Three promises are load-bearing and each one is a test
+// steer a voice call. Four promises are load-bearing and each one is a test
 // here: the status light is READ-ONLY, the mic can only be TOGGLED (never set),
-// and the transcript line is always a SYSTEM line on a session the caller owns.
+// the transcript line is always a SYSTEM line on a session the caller owns, and
+// the per-sentence mouth track is READ-ONLY and cleared when it stops being true.
 //
 // Every verb fails closed — an address with no live composer answers null
 // rather than broadcasting to whichever composer happens to be mounted.
@@ -14,6 +15,12 @@ import {
   resetVoiceConversations,
   type VoiceConversationChange
 } from '@/store/voice-conversation'
+import {
+  clearVoiceEnvelope,
+  publishVoiceEnvelope,
+  resetVoiceEnvelope,
+  type VoicePlaybackEnvelope
+} from '@/store/voice-playback'
 
 import { resolveComposerAddress } from './composer'
 import type * as ComposerModule from './composer'
@@ -34,7 +41,17 @@ const address = (target: 'active' | null | string) => ({ ids: [], stored: '', ta
 const ambientRequest = vi.fn()
 const door = createVoiceHost(ambientRequest)
 
+// A published sentence: closed head/tail, a peak, 25 fps — the exact shape the
+// door hands a plugin.
+const track: VoicePlaybackEnvelope = {
+  durationMs: 1200,
+  fps: 25,
+  rms: [0, 0.4, 0.8, 0.8, 0.4, 0],
+  startedAtMs: 1_790_000_000_000
+}
+
 beforeEach(() => {
+  resetVoiceEnvelope()
   resetVoiceConversations()
   vi.mocked(resolveComposerAddress).mockReset()
   vi.mocked(activeComposerTarget).mockReset()
@@ -44,6 +61,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  resetVoiceEnvelope()
   resetVoiceConversations()
 })
 
@@ -152,8 +170,51 @@ describe('host.voice.conversation — the call-status light', () => {
     off()
   })
 
-  it('exposes no setter for the status', () => {
-    expect(Object.keys(door).sort()).toEqual(['conversation', 'note', 'subscribe', 'toggleMic'])
+  it('exposes no setter and no writer for a read-only surface', () => {
+    expect(Object.keys(door).sort()).toEqual([
+      'conversation',
+      'note',
+      'playback',
+      'subscribe',
+      'subscribePlayback',
+      'toggleMic'
+    ])
+  })
+})
+
+describe('host.voice.playback — one envelope per spoken sentence', () => {
+  it('answers null until a sentence is publishing', () => {
+    expect(door.playback()).toBeNull()
+  })
+
+  it('answers the published sentence envelope the overlay clocks to', () => {
+    publishVoiceEnvelope(track)
+
+    expect(door.playback()).toEqual(track)
+  })
+
+  it('gives a subscriber each publish and the clear, so no stale track is kept', () => {
+    const seen: (null | VoicePlaybackEnvelope)[] = []
+    const off = door.subscribePlayback(next => seen.push(next))
+
+    publishVoiceEnvelope(track)
+    clearVoiceEnvelope()
+    off()
+
+    expect(seen).toEqual([track, null])
+    expect(door.playback()).toBeNull()
+  })
+
+  it('cannot be written through the answer — the track is frozen', () => {
+    publishVoiceEnvelope(track)
+
+    const answer = door.playback()
+
+    expect(() => {
+      answer!.rms[0] = 99
+    }).toThrow()
+
+    expect(door.playback()?.rms[0]).toBe(0)
   })
 })
 
