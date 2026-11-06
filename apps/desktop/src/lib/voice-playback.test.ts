@@ -6,9 +6,15 @@
 import type * as SharedTypes from '@hermes/shared'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { $voicePlayback } from '@/store/voice-playback'
+import { $voicePlayback, clearVoiceEnvelope, voicePlaybackEnvelope } from '@/store/voice-playback'
 
 import { playSpeechText, startSpeechStream, stopVoicePlayback } from './voice-playback'
+
+const flush = async () => {
+  for (let round = 0; round < 4; round += 1) {
+    await vi.advanceTimersByTimeAsync(0)
+  }
+}
 
 const gateway = vi.hoisted(() => {
   let nextUrl: string | null = 'ws://gateway.test/api/ws'
@@ -29,6 +35,16 @@ vi.mock('@hermes/shared', async importOriginal => {
     resolveGatewayWsUrl: async () => gateway.currentUrl()
   }
 })
+
+// The client-direct rung is the sentence path a lipsync overlay lives on; the
+// config is null by default so every other test keeps taking the relay rung,
+// exactly as the real resolver answers in this environment.
+const direct = vi.hoisted(() => ({ config: null as null | Record<string, unknown> }))
+
+vi.mock('@/lib/voice-client-direct', () => ({
+  directTtsConfig: async () => direct.config,
+  synthesizeSpeechClientDirect: async () => new ArrayBuffer(16)
+}))
 
 vi.mock('@/hermes', () => ({
   getApiRequestProfile: () => null,
@@ -102,6 +118,13 @@ class FakeAudioContext {
 
     return Promise.resolve()
   })
+  // One second of constant 0.5 at 16 kHz: every frame carries the same energy,
+  // so the envelope is a flat 1.0 between a closed head and tail.
+  decodeAudioData = vi.fn(async () => ({
+    duration: 1,
+    getChannelData: () => new Float32Array(16_000).fill(0.5),
+    sampleRate: 16_000
+  }))
   resume = vi.fn(() => Promise.resolve())
   createBuffer = vi.fn((_channels: number, length: number, rate: number) => ({
     duration: length / rate,
@@ -124,7 +147,20 @@ class FakeAudio {
   paused = false
   src: string
 
-  addEventListener = vi.fn()
+  listeners = new Map<string, Set<() => void>>()
+
+  addEventListener = vi.fn((type: string, handler: () => void) => {
+    const bucket = this.listeners.get(type) ?? new Set()
+
+    bucket.add(handler)
+    this.listeners.set(type, bucket)
+  })
+  /** Fire `ended` the way a finished sentence does. */
+  finish = () => {
+    for (const handler of [...(this.listeners.get('ended') ?? [])]) {
+      handler()
+    }
+  }
   load = vi.fn()
   pause = vi.fn(() => {
     this.paused = true
@@ -164,6 +200,8 @@ describe('voice-playback teardown (#91991)', () => {
     vi.stubGlobal('Audio', FakeAudio)
     vi.stubGlobal('hermesDesktop', { getConnection: vi.fn(async () => ({ profile: 'test' })) })
     $voicePlayback.set({ audioElement: null, messageId: null, sequence: 0, source: null, status: 'idle' })
+    clearVoiceEnvelope()
+    direct.config = null
   })
 
   afterEach(() => {
@@ -261,6 +299,57 @@ describe('voice-playback teardown (#91991)', () => {
     expect(FakeAudio.instances[0]?.load).toHaveBeenCalled()
     expect($voicePlayback.get().status).toBe('idle')
     await expect(playback).resolves.toBe(false)
+  })
+
+  it('publishes one envelope for the sentence it is about to play, and clears it on a barge', async () => {
+    gateway.setNextUrl(null) // no streaming endpoint → data-url rung
+
+    const playback = playSpeechText('hello world', { messageId: 'm1', source: 'read-aloud' })
+
+    await flush()
+
+    expect($voicePlayback.get().status).toBe('speaking')
+
+    const track = voicePlaybackEnvelope()
+
+    expect(track).not.toBeNull()
+    expect(track?.fps).toBe(25)
+    expect(track?.durationMs).toBe(1000)
+    expect(track?.rms).toHaveLength(25)
+    expect(track?.rms[0]).toBe(0)
+    expect(track?.rms[24]).toBe(0)
+    expect(Math.max(...(track?.rms ?? [0]))).toBe(1)
+    expect(track?.startedAtMs).toBeTypeOf('number')
+
+    stopVoicePlayback()
+
+    expect(voicePlaybackEnvelope()).toBeNull()
+    await playback
+  })
+
+  it('publishes the per-sentence track on the client-direct rung and drops it when the sentence ends', async () => {
+    direct.config = { min_len: 20 }
+    URL.createObjectURL = vi.fn(() => 'blob:sentence')
+    URL.revokeObjectURL = vi.fn()
+
+    const playback = playSpeechText('Hello there.', { messageId: 'm1', source: 'read-aloud' })
+
+    await flush()
+
+    expect(FakeAudio.instances).toHaveLength(1)
+
+    const track = voicePlaybackEnvelope()
+
+    expect(track).not.toBeNull()
+    expect(track?.rms[0]).toBe(0)
+    expect(Math.max(...(track?.rms ?? [0]))).toBe(1)
+
+    // The sentence ends: the overlay must not keep drawing the finished one.
+    FakeAudio.instances[0]?.finish()
+    await flush()
+
+    expect(voicePlaybackEnvelope()).toBeNull()
+    await playback
   })
 
   it('one stop drains BOTH of two overlapping streaming sessions (#91991)', async () => {

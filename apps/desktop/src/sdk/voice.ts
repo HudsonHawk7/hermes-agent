@@ -2,7 +2,7 @@
  * THE voice door (#voice-doors): what a desktop plugin can see and do during a
  * voice call, without reaching into a component.
  *
- * Three verbs, one namespace, and every one of them fails closed:
+ * Four verbs, one namespace, and every one of them fails closed:
  *
  *  - `conversation(sessionId?)` / `subscribe(fn)` — the call-status light:
  *    `idle` / `listening` / `transcribing` / `thinking` / `speaking`, plus the
@@ -17,6 +17,12 @@
  *    (the "Call ended · 2:14" promise). Always a system line: there is no role
  *    parameter, so a plugin cannot write as the user or as the assistant. The
  *    gateway refuses a caller that does not own the session's transport.
+ *  - `playback()` / `subscribePlayback(fn)` — the mouth track of the sentence
+ *    playing right now: `{ startedAtMs, durationMs, fps: 25, rms }`, one row per
+ *    frame between a closed head and a closed tail. READ-ONLY and cleared the
+ *    moment the sentence ends or the playback is stopped, so an avatar can
+ *    never draw a stale mouth. There is no setter and no second TTS: it is
+ *    derived from the audio that is actually playing.
  *
  * Addressing matches `composerHost`: `null` = the active composer, a session id
  * (stored or runtime) = that session's composer, `'new'` = the fresh draft. An
@@ -31,10 +37,16 @@ import {
   voiceConversationForTarget,
   type VoiceConversationSnapshot
 } from '@/store/voice-conversation'
+import {
+  subscribePlaybackEnvelope,
+  type VoicePlaybackEnvelope,
+  voicePlaybackEnvelope
+} from '@/store/voice-playback'
 
 import { resolveComposerAddress } from './composer'
 
 export type { VoiceConversationChange, VoiceConversationSnapshot, VoiceConversationStatus } from '@/store/voice-conversation'
+export type { VoicePlaybackEnvelope } from '@/store/voice-playback'
 
 export interface VoiceNoteResult {
   ok: boolean
@@ -111,6 +123,17 @@ export const createVoiceHost = (ambientRequest: AmbientRequest) => ({
       text: line
     })
   },
+
+  /** The mouth track of the sentence playing right now, or null when nothing
+   *  is: `{ startedAtMs, durationMs, fps, rms }` with `rms` 0..1 per frame. The
+   *  first and last frame are closed, so a sentence always starts and ends with
+   *  a shut mouth. Frozen — a plugin cannot rewrite what the user heard. */
+  playback: (): null | VoicePlaybackEnvelope => voicePlaybackEnvelope(),
+
+  /** Every playback publish and every clear (sentence end, stop, barge-in), for
+   *  an overlay that wants an event instead of a poll. Returns the unsubscribe. */
+  subscribePlayback: (listener: (next: null | VoicePlaybackEnvelope) => void): (() => void) =>
+    subscribePlaybackEnvelope(listener),
 
   /** Every conversation publish or clear in this window.
    *  Key a session's light on `change.storedSessionId`, not

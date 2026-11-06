@@ -336,41 +336,50 @@ async def _retire_profile_authority(authority, timeout=None):
     authority.retiring = True
     if getattr(authority.runner, 'session_ticket_store', None) is not None:
         _publish_served_set(authority.runner)  # discovery and tickets stop naming it now
-    stop_authority_work(authority)
-    from gateway.session_llm_oneshot import stop as stop_oneshots
-    stop_oneshots(authority)
-    service = getattr(authority, 'hosted_room_service', None)
-    rooms = None if service is None else asyncio.ensure_future(asyncio.to_thread(service.stop, timeout=timeout))
     try:
-        await join_authority_work(authority, timeout)
-        workers_stopped = True
-    except TimeoutError:
-        logger.error('Profile %s workers did not stop; ownership retained', authority.profile_id)
-        workers_stopped = False
-    rooms_stopped = rooms is None or await rooms is not False
-    if not rooms_stopped:
-        logger.error('Profile %s hosted rooms did not stop; ownership retained', authority.profile_id)
-    if not (workers_stopped and rooms_stopped):
-        return False
-    # Idle drains and receipt watchers wait on admissions this profile will no longer run.
-    rest = _authority_tasks(authority)
-    for task in rest:
-        task.cancel()
-    if rest:
-        await asyncio.gather(*rest, return_exceptions=True)
-    unbind_owner(authority)
-    # Ownership is released next; until a successor bumps the epoch, A's epoch still fences its
-    # writes as current, so a stale connection to A must find it retired instead.
-    authority.retired = True
-    # No drain is left to answer an observer (a session_busy pause keeps API/webhook/Bot ones
-    # waiting): release them all. Their rows stay queued for the next owner, so nothing is resent.
-    from hermes_state_runtime import RuntimeStoreError
-    authority.native_waiters.clear()
-    for waiter in authority.waiters.values():
-        if not waiter.done():
-            waiter.set_exception(RuntimeStoreError('runtime_draining'))
-    authority.waiters.clear()
-    return True
+        stop_authority_work(authority)
+        from gateway.session_llm_oneshot import stop as stop_oneshots
+        stop_oneshots(authority)
+        service = getattr(authority, 'hosted_room_service', None)
+        rooms = None if service is None else asyncio.ensure_future(asyncio.to_thread(service.stop, timeout=timeout))
+        try:
+            await join_authority_work(authority, timeout)
+            workers_stopped = True
+        except TimeoutError:
+            logger.error('Profile %s workers did not stop; ownership retained', authority.profile_id)
+            workers_stopped = False
+        rooms_stopped = rooms is None or await rooms is not False
+        if not rooms_stopped:
+            logger.error('Profile %s hosted rooms did not stop; ownership retained', authority.profile_id)
+        if not (workers_stopped and rooms_stopped):
+            return False
+        # Idle drains and receipt watchers wait on admissions this profile will no longer run.
+        rest = _authority_tasks(authority)
+        for task in rest:
+            task.cancel()
+        if rest:
+            await asyncio.gather(*rest, return_exceptions=True)
+        unbind_owner(authority)
+        # Ownership is released next; until a successor bumps the epoch, A's epoch still fences its
+        # writes as current, so a stale connection to A must find it retired instead.
+        authority.retired = True
+        # No drain is left to answer an observer (a session_busy pause keeps API/webhook/Bot ones
+        # waiting): release them all. Their rows stay queued for the next owner, so nothing is resent.
+        from hermes_state_runtime import RuntimeStoreError
+        authority.native_waiters.clear()
+        for waiter in authority.waiters.values():
+            if not waiter.done():
+                waiter.set_exception(RuntimeStoreError('runtime_draining'))
+        authority.waiters.clear()
+        return True
+    except Exception:
+        # Unexpected failure (e.g. TypeError on a no-arg interrupt) must not leave
+        # the profile half-retired: restore discovery so it stays served.
+        if not getattr(authority, 'retired', False):
+            authority.retiring = False
+            if getattr(authority.runner, 'session_ticket_store', None) is not None:
+                _publish_served_set(authority.runner)
+        raise
 
 
 class ProfileOwnershipRetained(RuntimeError):

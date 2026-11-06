@@ -2,11 +2,13 @@
  * Process census for the core lane, per platform.
  *
  * Linux reads /proc: a process belongs to a sandbox when its environment names the sandbox
- * HERMES_HOME (orphans reparented to init included). Other platforms have no readable foreign
- * environment, so membership is the process tree rooted at every gateway pid a sandbox
- * `gateway.lock` has ever recorded (remembered per sandbox, so the census still sees a stopped
- * gateway's orphans after its lock is gone). Windows keeps a dead parent's id in
- * ParentProcessId, so the tree walk still reaches orphans there.
+ * HERMES_HOME (orphans reparented to init included). Windows has no /proc, so the environment is
+ * read out of the process itself (`process-environment.ts`: PEB → process parameters → UTF-16
+ * block); a command-line match is not a substitute, because a sandbox gateway's argv is just
+ * `gateway run --quiet` with no home in it. The tree rooted at every gateway pid a sandbox
+ * `gateway.lock` has ever recorded stays as the second way in (remembered per sandbox, so the
+ * census still sees a stopped gateway's children). Windows keeps a dead parent's id in
+ * ParentProcessId, so that tree walk still reaches orphans there.
  *
  * `HERMES_E2E_PROC_CENSUS=ps` forces the tree census on Linux (how the non-/proc path is tested).
  */
@@ -15,6 +17,8 @@ import { spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
+
+import { pathUnder, samePath, windowsProcessHomes } from './process-environment'
 
 export interface ProcInfo {
   pid: number
@@ -90,6 +94,51 @@ function lockedGatewayPids(hermesHome: string): number[] {
   })
 }
 
+/** Processes worth asking about their environment: gateway runners and the python hosts behind them. */
+function environmentCandidates(all: ProcInfo[]): number[] {
+  return all
+    .filter(proc => proc.pid !== process.pid && /gateway|hermes|python/i.test(proc.cmdline))
+    .map(proc => proc.pid)
+}
+
+/** `HERMES_HOME` per pid; empty unless the environment has to be read out of the process (Windows). */
+function environmentHomes(all: ProcInfo[]): Map<number, string> {
+  if (procfsCensus || process.platform !== 'win32') {
+    return new Map()
+  }
+
+  return windowsProcessHomes(environmentCandidates(all))
+}
+
+/** The live install's own home — the one gateway a sweep must never signal. */
+export function isLiveHermesHome(hermesHome: string): boolean {
+  const localAppData = process.env.LOCALAPPDATA
+  const homes = [
+    localAppData ? path.join(localAppData, 'hermes') : null,
+    path.join(os.homedir(), '.hermes'),
+  ].filter((home): home is string => Boolean(home))
+
+  return homes.some(home => samePath(home, hermesHome))
+}
+
+/**
+ * Is this home a sandbox one — under a tmp/scratch root, or a profile's `cache\scratch`?
+ *
+ * The live install home and a real profile home (`profiles\<name>`, no `cache\scratch`) are never
+ * sandboxes however dead their parent is: `profiles\probe` is how a companion legitimately runs.
+ */
+export function isSandboxHome(hermesHome: string, roots: string[]): boolean {
+  if (isLiveHermesHome(hermesHome)) {
+    return false
+  }
+
+  if (roots.some(root => pathUnder(hermesHome, root))) {
+    return true
+  }
+
+  return /[\\/]profiles[\\/][^\\/]+[\\/]cache[\\/]scratch([\\/]|$)/i.test(hermesHome)
+}
+
 /** Every live process belonging to the sandbox whose HERMES_HOME is `hermesHome` (orphans included). */
 export function sandboxProcessesOf(hermesHome: string, exclude = process.pid): ProcInfo[] {
   if (procfsCensus) {
@@ -108,6 +157,14 @@ export function sandboxProcessesOf(hermesHome: string, exclude = process.pid): P
   recordedRoots.set(hermesHome, roots)
   const all = listProcesses()
   const live = new Set(all.map(proc => proc.pid))
+
+  // The environment is the membership test where it can be read: a lock file may already be gone,
+  // and the command line never names the home. A dead parent changes nothing.
+  for (const [pid, home] of environmentHomes(all)) {
+    if (live.has(pid) && samePath(home, hermesHome)) {
+      roots.add(pid)
+    }
+  }
 
   for (const pid of lockedGatewayPids(hermesHome)) {
     if (live.has(pid)) {
@@ -238,6 +295,24 @@ export function defaultSandboxReapRoots(): string[] {
     }
   }
 
+  // Every agent's own `tmp` (Aurora's survivors lived under S:\\ForceAgents\\aurora\\tmp\\pw-*).
+  // One directory listing of the shared agents root, never a disk walk.
+  try {
+    for (const entry of fs.readdirSync(path.join('S:', 'ForceAgents'), { withFileTypes: true })) {
+      if (!entry.isDirectory()) {
+        continue
+      }
+
+      const candidate = path.join('S:', 'ForceAgents', entry.name, 'tmp')
+
+      if (fs.existsSync(candidate)) {
+        roots.add(path.resolve(candidate))
+      }
+    }
+  } catch {
+    // No shared agents root on this host.
+  }
+
   try {
     roots.add(path.resolve(os.tmpdir()))
   } catch {
@@ -296,6 +371,7 @@ function looksLikeSandboxCmdline(cmdline: string): boolean {
 export function orphanSandboxProcesses(roots: string[] = defaultSandboxReapRoots()): ProcInfo[] {
   const all = listProcesses()
   const live = new Set(all.map(proc => proc.pid))
+  const envHomes = environmentHomes(all)
   const normalizedRoots = roots.map(root => path.resolve(root)).filter(Boolean)
 
   // Also treat agent worktree paths as roots when HERMES_E2E points there.
@@ -337,6 +413,14 @@ export function orphanSandboxProcesses(roots: string[] = defaultSandboxReapRoots
       return false
     }
 
+    // Environment first: it is the only place a sandbox gateway's home shows up. A home that is the
+    // live root or a real profile home is never a sandbox, however dead its parent is.
+    const home = envHomes.get(proc.pid)
+
+    if (home && isSandboxHome(home, normalizedRoots)) {
+      return true
+    }
+
     if (!looksLikeSandboxCmdline(proc.cmdline)) {
       return false
     }
@@ -353,29 +437,40 @@ export function orphanSandboxProcesses(roots: string[] = defaultSandboxReapRoots
   })
 }
 
+/** Tree-kill a pid: `taskkill /T /F` on Windows, whole process group elsewhere. Never throws. */
+export function treeKill(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false
+  }
+
+  try {
+    if (process.platform === 'win32') {
+      spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
+        stdio: 'ignore',
+        windowsHide: true,
+        timeout: 15_000,
+      })
+    } else {
+      try {
+        process.kill(-pid, 'SIGKILL')
+      } catch {
+        process.kill(pid, 'SIGKILL')
+      }
+    }
+
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** Tree-kill orphan sandbox processes (dead parent + sandbox path). Returns killed pids. */
 export function reapOrphanSandboxProcesses(roots: string[] = defaultSandboxReapRoots()): number[] {
   const killed: number[] = []
 
   for (const proc of orphanSandboxProcesses(roots)) {
-    try {
-      if (process.platform === 'win32') {
-        spawnSync('taskkill', ['/PID', String(proc.pid), '/T', '/F'], {
-          stdio: 'ignore',
-          windowsHide: true,
-          timeout: 15_000,
-        })
-      } else {
-        try {
-          process.kill(-proc.pid, 'SIGKILL')
-        } catch {
-          process.kill(proc.pid, 'SIGKILL')
-        }
-      }
-
+    if (treeKill(proc.pid)) {
       killed.push(proc.pid)
-    } catch {
-      // already gone or access denied
     }
   }
 

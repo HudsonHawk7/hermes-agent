@@ -38,7 +38,7 @@ const MEMBERS: GroupMember[] = [
 
 /** Render the composer the way a room does: value owned by the caller (the
  *  draft atom in production), popover scoped to the seated members. */
-async function mount(initial = '') {
+async function mount(initial = '', members: GroupMember[] = MEMBERS) {
   const { GroupMentionInput } = await import('./group-chat-parts')
   const onChange = vi.fn()
   const onSubmitDraft = vi.fn()
@@ -49,7 +49,7 @@ async function mount(initial = '') {
     return (
       <GroupMentionInput
         aria-label="Message Core"
-        members={MEMBERS}
+        members={members}
         onChange={next => {
           onChange(next)
           setValue(next)
@@ -173,7 +173,7 @@ describe('insertion', () => {
   })
 })
 
-describe('keyboard (#89884)', () => {
+describe('keyboard (#89884 + t_53595138)', () => {
   it('submits on Enter and leaves Shift+Enter to the textarea', async () => {
     const { input, onSubmitDraft } = await mount('a room prompt')
 
@@ -186,7 +186,7 @@ describe('keyboard (#89884)', () => {
     expect(onSubmitDraft).toHaveBeenCalledTimes(1)
   })
 
-  it('inserts the highlighted mention on Enter while the popover is open', async () => {
+  it('inserts the highlighted mention on Enter while the query is still a prefix', async () => {
     const { input, onChange, onSubmitDraft } = await mount()
 
     typeInto(input, 'hey @alp')
@@ -194,6 +194,44 @@ describe('keyboard (#89884)', () => {
 
     expect(onChange).toHaveBeenLastCalledWith('hey @alpha ')
     expect(onSubmitDraft).not.toHaveBeenCalled()
+  })
+
+  it('sends on Enter after the full member name is already typed (menu open)', async () => {
+    const { input, onChange, onSubmitDraft } = await mount()
+
+    typeInto(input, 'hey @alpha')
+    // Menu still open with @alpha highlighted, but the handle is complete.
+    expect(options().some(label => label.startsWith('@alpha'))).toBe(true)
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    expect(onSubmitDraft).toHaveBeenCalledTimes(1)
+    // Must not re-insert / rewrite the draft.
+    expect(onChange).not.toHaveBeenCalledWith('hey @alpha ')
+  })
+
+  it('sends on Enter when a unique full handle is typed even if a prefix sibling is first', async () => {
+    const { input, onChange, onSubmitDraft } = await mount('', [
+      { handle: 'second-bot', name: 'second-bot', title: '' },
+      { handle: 'second', name: 'second', title: '' }
+    ])
+
+    typeInto(input, '@second')
+    expect(options().some(label => label.startsWith('@second-bot'))).toBe(true)
+    expect(options().some(label => label.startsWith('@second'))).toBe(true)
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    expect(onSubmitDraft).toHaveBeenCalledTimes(1)
+    expect(onChange).not.toHaveBeenCalledWith('@second-bot ')
+  })
+
+  it('lets Shift+Enter make a newline even while the mention menu is open', async () => {
+    const { input, onChange, onSubmitDraft } = await mount()
+
+    typeInto(input, 'hey @alp')
+    fireEvent.keyDown(input, { key: 'Enter', shiftKey: true })
+
+    expect(onSubmitDraft).not.toHaveBeenCalled()
+    expect(onChange).not.toHaveBeenCalledWith('hey @alpha ')
   })
 
   // #93528: Enter here confirms composed Chinese/Japanese/Korean text. It must

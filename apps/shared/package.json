@@ -13,6 +13,7 @@
     "./format": "./src/format.ts",
     "./fuzzy": "./src/fuzzy.ts",
     "./gateway-events": "./src/gateway-events.ts",
+    "./gateway-contract.generated": "./src/gateway-contract.generated.ts",
     "./i18n": "./src/i18n.ts",
     "./json-rpc-channel": "./src/json-rpc-channel.ts",
     "./model-search-text": "./src/model-search-text.ts",

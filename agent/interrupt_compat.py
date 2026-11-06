@@ -19,6 +19,24 @@ def _accepts_keyword(callable_obj: Any, name: str) -> bool:
     )
 
 
+def _accepts_positional(callable_obj: Any) -> bool:
+    """Return whether a callable accepts a positional argument.
+
+    When the signature cannot be inspected, return True so MagicMock /
+    unknown callables keep today's positional-message ABI.
+    """
+    try:
+        parameters = inspect.signature(callable_obj).parameters.values()
+    except (TypeError, ValueError):
+        return True
+    kinds = (
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.VAR_POSITIONAL,
+    )
+    return any(p.kind in kinds for p in parameters)
+
+
 def request_hard_interrupt(
     agent: Any,
     message: str | None = None,
@@ -29,9 +47,12 @@ def request_hard_interrupt(
 
     New agents expose ``hard_interrupt(message=None)``; third-party agents and old test
     doubles may only expose ``interrupt(message=None)`` and must not receive keyword
-    arguments they do not know. ``tool_reason`` is a trusted, fixed category that may be
-    exposed in model-visible tool cancellation output, forwarded only when the callable
-    explicitly supports it. Returns ``False`` only when neither callable is available.
+    arguments they do not know. A positional message is passed only when the
+    signature accepts one (``ManagedWorker.interrupt`` does not). Unknown
+    callables keep the positional-message ABI. ``tool_reason`` is a trusted, fixed
+    category that may be exposed in model-visible tool cancellation output,
+    forwarded only when the callable explicitly supports it. Returns ``False``
+    only when neither callable is available.
     """
     # Static lookup first: a dynamic ``__getattr__`` proxy (unspecced MagicMock, RPC
     # facade) must not be treated as genuinely implementing the new ABI.
@@ -50,6 +71,10 @@ def request_hard_interrupt(
         kwargs["tool_reason"] = tool_reason
     if message is None:
         interrupt(**kwargs)
-    else:
+    elif _accepts_positional(interrupt):
         interrupt(message, **kwargs)
+    elif _accepts_keyword(interrupt, "message"):
+        interrupt(message=message, **kwargs)
+    else:
+        interrupt(**kwargs)
     return True

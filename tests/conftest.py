@@ -1079,53 +1079,36 @@ def _remove_relocated_basetemp(config) -> None:
 def _processes_with_hermes_home_under(roots) -> list[int]:
     """PIDs (never this process) whose environment names a ``HERMES_HOME`` inside one of *roots*.
 
-    Linux only (``/proc/<pid>/environ``; unreadable entries are another user's and skipped).
-    Elsewhere the scan is empty: a test-spawned daemon there is the per-test guard's problem.
+    Delegates to ``tests.process_custody``, which reads the environment (``/proc`` on Linux,
+    the process PEB through psutil on Windows) because ``gateway run`` argv names no home.
     """
-    if not sys.platform.startswith("linux") or not os.path.isdir("/proc"):
-        return []
-    resolved = [Path(r).resolve() for r in roots if r]
-    found = []
-    for entry in os.scandir("/proc"):
-        if not entry.name.isdigit() or int(entry.name) == os.getpid():
-            continue
-        try:
-            with open(f"/proc/{entry.name}/environ", "rb") as handle:
-                environ = handle.read().split(b"\0")
-        except OSError:
-            continue
-        home = next((item[12:] for item in environ if item.startswith(b"HERMES_HOME=")), None)
-        if not home:
-            continue
-        try:
-            path = Path(os.fsdecode(home)).resolve()
-        except (OSError, ValueError):
-            continue
-        if any(path == root or path.is_relative_to(root) for root in resolved):
-            found.append(int(entry.name))
-    return found
+    from tests.process_custody import processes_with_hermes_home_under
+
+    return processes_with_hermes_home_under(roots)
+
+
+def _reap_hermes_pids(pids) -> None:
+    """Terminate test-spawned processes as trees; ``taskkill /T /F`` on Windows."""
+    from tests.process_custody import reap_pids
+
+    reap_pids(pids)
 
 
 def _reap_session_hermes_processes(config) -> list[int]:
-    """SIGTERM every process still running against a Hermes home this session created.
+    """Kill every process still running against a Hermes home this session created.
 
     Tests that run a real ``hermes chat -q`` child get a grandchild ``gateway run`` (detached, own
     session) that no per-test subprocess patch can see, and pytest's tmp cleanup removes only
     directories: each one used to outlive the run at ~250 MB. The session basetemp and the session
-    sandbox home bound exactly what this run created, so nothing else is ever signalled.
+    sandbox home bound exactly what this run created, so nothing else is ever signalled — the live
+    gateway and real profile homes sit outside those roots by construction.
     """
-    import signal
-
     factory = getattr(config, "_tmp_path_factory", None)
     # The basetemp pytest already created (never create one at teardown just to scan it).
     roots = [getattr(config, "_hermes_relocated_basetemp", None), os.environ.get("HERMES_TEST_SANDBOX_HOME"),
              getattr(factory, "_basetemp", None)]
     pids = _processes_with_hermes_home_under(roots)
-    for pid in pids:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
+    _reap_hermes_pids(pids)
     return pids
 
 

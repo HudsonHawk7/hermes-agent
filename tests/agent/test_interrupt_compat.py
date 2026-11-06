@@ -123,3 +123,45 @@ def test_tui_subagent_interrupt_is_an_explicit_hard_stop() -> None:
     assert len(agent.calls) == 1
     assert agent.calls[0][0] == "hard"
     assert subagent_id in agent.calls[0][1]
+
+
+def test_no_arg_interrupt_is_called_without_a_positional_message() -> None:
+    class _NoArg:
+        def __init__(self):
+            self.calls = 0
+
+        def interrupt(self):
+            self.calls += 1
+
+    agent = _NoArg()
+    ok = request_hard_interrupt(
+        agent, "Profile stopping", tool_reason="gateway shutdown"
+    )
+    assert ok is True
+    assert agent.calls == 1
+
+
+def test_managed_worker_interrupt_is_called_without_a_positional_message() -> None:
+    from gateway.session_managed_worker import ManagedWorker
+
+    frames = []
+    worker = ManagedWorker.__new__(ManagedWorker)
+    worker.control = frames.append
+    ok = request_hard_interrupt(
+        worker, "Profile stopping", tool_reason="gateway shutdown"
+    )
+    assert ok is True
+    assert frames == [{"type": "stop"}]
+
+
+def test_keyword_only_interrupt_receives_the_message() -> None:
+    class _KwOnly:
+        def __init__(self):
+            self.message = None
+
+        def interrupt(self, *, message=None):
+            self.message = message
+
+    agent = _KwOnly()
+    assert request_hard_interrupt(agent, "stop now") is True
+    assert agent.message == "stop now"

@@ -62,12 +62,24 @@ def test_recycled_pid_is_reclaimed_without_being_signalled(board):
 
 def test_matching_fingerprint_keeps_the_live_worker(board):
     """The same PID with ITS OWN fingerprint (recorded at spawn) is our worker: the expired claim is
-    extended rather than reclaimed, and the timeout path signals it."""
+    extended rather than reclaimed when a fresh heartbeat proves progress, and the timeout path signals it."""
     from gateway.status import get_process_start_time
 
     conn = board
     killed = []
     tid = _claimed_running(conn, pid=os.getpid(), started_at=get_process_start_time(os.getpid()))
+    # Stall rule: extend requires a fresh heartbeat, not pid_alive alone.
+    now = int(time.time())
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET last_heartbeat_at = ? WHERE id = ?",
+            (now, tid),
+        )
+        conn.execute(
+            "UPDATE task_runs SET last_heartbeat_at = ? WHERE id = "
+            "(SELECT current_run_id FROM tasks WHERE id = ?)",
+            (now, tid),
+        )
     assert kbd._worker_alive(os.getpid(), get_process_start_time(os.getpid())) is True
     assert kb.release_stale_claims(conn) == 0
     assert kb.get_task(conn, tid).status == "running"
