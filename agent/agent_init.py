@@ -1545,6 +1545,18 @@ def _parse_compression_config(agent, _agent_cfg) -> CompressionSettings:
     )
     if summary_max_tokens is not None:
         summary_max_tokens = _positive_int(summary_max_tokens)
+    if summary_max_tokens is not None:
+        # A cap the summary floor cannot fit at 75% must refuse startup. A silent
+        # smaller ask is how every summary was cut off (finish_reason=length).
+        from agent.context_compressor import minimum_summary_wire_cap, summary_cap_too_small
+        if summary_cap_too_small(summary_max_tokens):
+            raise ValueError(
+                "compression.summary_max_tokens="
+                f"{summary_max_tokens} is too small for the summary floor. "
+                "The prompt target must fit in 75% of the cap, so the smallest "
+                f"legal cap is {minimum_summary_wire_cap()}. "
+                "Refusing to start. No silent default."
+            )
     # Non-system head messages to protect (system prompt is always protected); 0 is a
     # legitimate "system prompt + summary + tail".
     protect_first = max(0, int(cfg.get("protect_first_n", 3)))

@@ -47,13 +47,17 @@ def test_default_config_leaves_summary_max_tokens_uncapped():
     assert cs.summary_max_tokens is None
 
 
-def test_parse_summary_max_tokens_null_stays_uncapped_and_positive_int_is_kept():
+def test_parse_summary_max_tokens_null_stays_uncapped_and_a_too_small_cap_refuses():
+    from agent.context_compressor import minimum_summary_wire_cap
     assert _parse_compression_config(
         _agent(), {"compression": {"summary_max_tokens": None}},
     ).summary_max_tokens is None
+    legal = minimum_summary_wire_cap()
     assert _parse_compression_config(
-        _agent(), {"compression": {"summary_max_tokens": 512}},
-    ).summary_max_tokens == 512
+        _agent(), {"compression": {"summary_max_tokens": legal}},
+    ).summary_max_tokens == legal
+    with pytest.raises(ValueError, match="compression.summary_max_tokens"):
+        _parse_compression_config(_agent(), {"compression": {"summary_max_tokens": 512}})
 
 
 def test_summary_call_omits_max_tokens_when_summary_max_tokens_unset():
