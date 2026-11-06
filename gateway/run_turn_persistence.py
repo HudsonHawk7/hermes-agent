@@ -51,11 +51,21 @@ LOCAL_EXHAUSTION_TRIM_NOTE = (
 _LOCAL_TRIM_KEEP_TAIL = 4
 
 
+def _is_tool_turn_part(message) -> bool:
+    """A tool result, or the assistant turn that requested it. Those stay together."""
+    if not isinstance(message, dict):
+        return False
+    if str(message.get("role") or "") == "tool" or message.get("tool_call_id"):
+        return True
+    return bool(message.get("tool_calls"))
+
+
 def trim_oldest_middle_turns(messages, *, keep_tail: int = _LOCAL_TRIM_KEEP_TAIL):
     """Drop the oldest middle turns. Keep a short head and the recent tail, plus one visible note.
 
     Returns the new list, or None when there is no middle to drop. The session id is unchanged.
     The head is the system prompt only, so an old first exchange is not pinned back into the chat.
+    The tail starts on a turn boundary, so a tool call is not split from its result.
     """
     if not isinstance(messages, list) or not messages:
         return None
@@ -63,8 +73,13 @@ def trim_oldest_middle_turns(messages, *, keep_tail: int = _LOCAL_TRIM_KEEP_TAIL
     tail_n = max(0, int(keep_tail))
     if len(messages) <= head_n + tail_n + 1:
         return None
+    start = len(messages) - tail_n
+    while start > head_n and _is_tool_turn_part(messages[start]):
+        start -= 1
+    if start <= head_n:
+        return None
     note = {"role": "user", "content": LOCAL_EXHAUSTION_TRIM_NOTE}
-    return list(messages[:head_n]) + [note] + list(messages[-tail_n:])
+    return list(messages[:head_n]) + [note] + list(messages[start:])
 
 
 def _acp_launch(runner, source) -> bool:
@@ -374,9 +389,9 @@ class GatewayTurnPersistenceMixin:
             # A local companion chat is never wiped. Trim the oldest middle turns, or
             # queue that trim until this turn's admission settles. The session id stays.
             deferred = bool(session_key) and self._hmwa_defer_exhaustion_reset(session_entry, session_key, source)
-            if not deferred:
-                await self._hmwa_trim_exhausted_local_session(session_entry)
-            response = (response or "") + LOCAL_EXHAUSTION_TRIM_NOTE
+            trimmed = False if deferred else await self._hmwa_trim_exhausted_local_session(session_entry)
+            if trimmed:
+                response = (response or "") + "\n\n" + LOCAL_EXHAUSTION_TRIM_NOTE
         elif agent_result.get("compression_exhausted") and session_entry and session_key:
             if not self._hmwa_defer_exhaustion_reset(session_entry, session_key, source):
                 session_entry = await self._hmwa_rotate_exhausted_session(session_entry, session_key, source)
@@ -400,31 +415,36 @@ class GatewayTurnPersistenceMixin:
         authority.deferred_resets[session_key] = lambda: self._hmwa_trim_exhausted_local_session(session_entry)
         return True
 
-    async def _hmwa_trim_exhausted_local_session(self, session_entry):
-        """Drop the oldest middle turns. Keep the session id. Never rotate."""
+    async def _hmwa_trim_exhausted_local_session(self, session_entry) -> bool:
+        """Write the trimmed transcript through the store. True only if that write landed."""
         session_id = getattr(session_entry, "session_id", None)
+        store = getattr(self, "session_store", None)
+        if not session_id or store is None:
+            return False
         logger.info(
             "Trimming oldest middle turns of local session %s after compression exhaustion. Chat kept.",
             session_id,
         )
         try:
-            messages = self.load_transcript(session_id)
+            messages = store.load_transcript(session_id)
         except Exception:
             logger.exception("Could not read local session %s to trim it; chat was kept", session_id)
-            return
+            return False
         trimmed = trim_oldest_middle_turns(messages)
         if trimmed is None:
             logger.info("Local session %s has no middle to trim; chat was kept", session_id)
-            return
+            return False
         try:
-            wrote = self.rewrite_transcript(
-                session_id, trimmed, compression_lock_holder="local-exhaustion-trim",
+            wrote = store.rewrite_transcript(
+                session_id, trimmed, active_only=False, reject_active_turn_lease=False,
             )
         except Exception:
             logger.exception("Could not persist the trim for local session %s; chat was kept", session_id)
-            return
-        if not wrote:
+            return False
+        if wrote is not True:
             logger.error("Trim did not persist for local session %s; chat was kept", session_id)
+            return False
+        return True
 
     async def _hmwa_rotate_exhausted_session(self, session_entry, session_key, source):
         """The compression-exhaustion auto-reset itself; returns the route's (fresh) entry."""

@@ -865,6 +865,12 @@ class GatewayAgentCacheMixin:
             if release_after_turn and state is not None:
                 state.turn.retired_agents.append(agent)
             return
+        from agent.background_review import release_review_before_next_model
+        release_review_before_next_model(
+            agent,
+            timeout=2.0,
+            message="cached agent evict; review must release the GPU",
+        )
         if commit_memory:
             target, args = self._commit_then_release_soft, (agent, session_key, True)
         else:

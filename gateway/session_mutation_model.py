@@ -43,6 +43,13 @@ def _current_route(authority, live, old):
 
 
 async def prepare_model(authority, live, payload, prepared):
+    from agent.background_review import release_cached_review_before_model_load
+    route = getattr(live, "route", None) if live is not None else None
+    runner = getattr(authority, "runner", None)
+    if route and runner is not None:
+        released = await asyncio.to_thread(release_cached_review_before_model_load, runner, route)
+        if not released:
+            raise RuntimeStoreError("review_holding_gpu")
     from gateway.session_policy import restore_policy, bind_launch_key, bound_route_holds, route_launch_key
     from gateway.session_policy_credentials import recover_config_secrets
     from hermes_cli.model_switch import apply_model_selection, switch_model

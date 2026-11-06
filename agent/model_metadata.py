@@ -637,6 +637,62 @@ def local_ollama_served_context(show_data: Any, ps_payload: Any, model: str) -> 
     return None
 
 
+_FIT_VRAM_FRACTION = 0.99
+_PARTIAL_FIT_WARNING = "{model} doesn't fully fit on the card with pictures; replies can take minutes"
+_FIT_CACHE: dict = {}
+_FIT_TTL_SECONDS = 30.0
+
+
+def model_fit_warning_from_ps(model: str, payload: Any) -> Optional[str]:
+    """Plain warning when a loaded Ollama model is only partly on the GPU.
+
+    Compares ``/api/ps`` ``size_vram`` with ``size``. Does not change the model.
+    """
+    if not model or not isinstance(payload, dict):
+        return None
+    wanted = str(model).strip().lower()
+    wanted_base = wanted.split(":", 1)[0]
+    for row in payload.get("models") or []:
+        if not isinstance(row, dict):
+            continue
+        names = {
+            str(row.get("name") or "").strip().lower(),
+            str(row.get("model") or "").strip().lower(),
+        }
+        names.discard("")
+        if wanted not in names and wanted_base not in {name.split(":", 1)[0] for name in names}:
+            continue
+        size = row.get("size")
+        vram = row.get("size_vram")
+        if not isinstance(size, (int, float)) or not isinstance(vram, (int, float)) or size <= 0:
+            return None
+        if vram / size >= _FIT_VRAM_FRACTION:
+            return None
+        return _PARTIAL_FIT_WARNING.format(model=model)
+    return None
+
+
+def local_model_fit_warning(model: str, base_url: str) -> Optional[str]:
+    """Live ``/api/ps`` fit warning for one local model. Cached so a heartbeat does not hammer Ollama."""
+    import time
+    key = (str(model), _server_root(base_url))
+    now = time.monotonic()
+    hit = _FIT_CACHE.get(key)
+    if hit and now - hit[0] < _FIT_TTL_SECONDS:
+        return hit[1]
+    warning = None
+    try:
+        import httpx
+        with httpx.Client(timeout=2.0, verify=model_metadata_http.resolve_verify(base_url)) as client:
+            resp = client.get(f"{key[1]}/api/ps")
+        if resp.status_code == 200:
+            warning = model_fit_warning_from_ps(model, resp.json())
+    except Exception:
+        warning = None
+    _FIT_CACHE[key] = (now, warning)
+    return warning
+
+
 # (host, canonical paths, model ids, context) — see _endpoint_scoped_context_length.
 _ENDPOINT_SCOPED_CONTEXT = (
     ("api.kimi.com", {"/coding", "/coding/v1"}, {"k3", "kimi-k3", "kimi-k3-cot"}, 1_048_576),
@@ -1675,7 +1731,14 @@ def _query_local_context_length_uncached(model: str, base_url: str, api_key: str
         "lm-studio": lambda client: _lmstudio_context(client, lmstudio_url, model),
         "llamacpp": lambda client: llamacpp_context(client, server_url, model),
     }.get(server_type)
-    probes = ([typed] if typed else []) + [_model_detail_ctx, lambda client: _openai_models_list_context(client, server_url, model)]
+    probes = [typed] if typed else []
+    # An Ollama miss must stay a miss. /v1/models often echoes the GGUF card (262144),
+    # which is not the window the server allocated.
+    if server_type != "ollama":
+        probes.extend([
+            _model_detail_ctx,
+            lambda client: _openai_models_list_context(client, server_url, model),
+        ])
     try:
         with httpx.Client(timeout=3.0, headers=_auth_headers(api_key), verify=model_metadata_http.resolve_verify(base_url)) as client:
             return next((ctx for ctx in (probe(client) for probe in probes) if ctx is not None), None)
@@ -2236,9 +2299,10 @@ def _resolve_provider_aware_context_length(model: str, base_url: str, api_key: s
         ctx = _resolve_endpoint_context_length(model, base_url, api_key=api_key)
         if ctx is not None:
             return ctx
-    # 5e. Ollama native /api/show for any base_url that is not a known non-Ollama provider (there
-    # the POST always 404s and cost ~300ms on the first turn).
-    if base_url:
+    # 5e. Ollama native /api/show for a remote URL that is not a known non-Ollama provider (there
+    # the POST always 404s and cost ~300ms on the first turn). A local endpoint is answered by
+    # the served-window probe below; the GGUF card must not win first.
+    if base_url and not is_local_endpoint(base_url):
         inferred = _infer_provider_from_url(base_url)
         ctx = _query_ollama_api_show(model, base_url, api_key=api_key) if inferred is None or "ollama" in inferred else None
         if ctx is not None:

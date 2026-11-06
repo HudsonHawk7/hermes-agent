@@ -263,3 +263,26 @@ describe('handleSessionInfoEvent rebuilt-runtime re-bind', () => {
     expect(ctx.deps.activeSessionIdRef.current).toBe('runtime-old')
   })
 })
+
+describe('handleSessionInfoEvent model fit warning', () => {
+  it('says in plain words when a picked model only partly fits', async () => {
+    const { $notifications, dismissNotification } = await import('@/store/notifications')
+
+    dismissNotification('model-fit-sess-fit')
+    const ctx = sessionInfoEvent({
+      activeSessionId: 'sess-fit',
+      cwd: '/repo/eval',
+      explicitSid: 'sess-fit'
+    })
+
+    ctx.payload = {
+      ...ctx.payload,
+      model_fit_warning: "solara:gemma4-31b-uncensored doesn't fully fit on the card with pictures; replies can take minutes"
+    }
+
+    handleSessionInfoEvent(ctx)
+
+    expect($notifications.get().some(note => note.message.includes("doesn't fully fit on the card"))).toBe(true)
+    dismissNotification('model-fit-sess-fit')
+  })
+})

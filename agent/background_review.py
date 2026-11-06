@@ -167,6 +167,67 @@ def cancel_background_review_for_live_turn(
         )
 
 
+def release_review_before_next_model(
+    agent: Any,
+    *,
+    timeout: float | None = None,
+    message: str = "model switch; review must release the GPU before the next model loads",
+) -> bool:
+    """Cancel an in-flight review and wait until it releases the GPU.
+
+    False means the review is still holding the card. Callers that are about to load
+    another local model must not proceed on False. A missing review is already released.
+    """
+    if agent is None:
+        return True
+    with _optional_lock(agent, "_background_review_lock"):
+        run = getattr(agent, "_background_review_run", None)
+        legacy = getattr(agent, "_background_review_agent", None)
+    if run is None and legacy is None:
+        return True
+    review_agent = legacy if run is None else run.cancel()
+    if review_agent is not None:
+        _interrupt_background_review(
+            review_agent,
+            message=message,
+            tool_reason="model switch; review must release the GPU",
+        )
+    if run is None:
+        return True
+    wait = _BACKGROUND_REVIEW_CANCEL_TIMEOUT_SECONDS if timeout is None else timeout
+    return bool(run.request_done.wait(timeout=wait))
+
+
+def release_cached_review_before_model_load(runner: Any, session_key: str, *, timeout: float | None = None) -> bool:
+    """Desktop ``session.model`` path. True when no review holds the GPU for this route."""
+    if runner is None or not session_key:
+        return True
+    cache = getattr(runner, "_agent_cache", None)
+    if not cache:
+        return True
+    lock = getattr(runner, "_agent_cache_lock", None)
+    if lock:
+        with lock:
+            entry = cache.get(session_key)
+    else:
+        entry = cache.get(session_key)
+    from gateway.run_agent_cache import _first_agent
+    agent = _first_agent(entry)
+    if agent is None:
+        return True
+    try:
+        from gateway.run import _AGENT_PENDING_SENTINEL
+    except Exception:
+        _AGENT_PENDING_SENTINEL = None
+    if agent is _AGENT_PENDING_SENTINEL:
+        return True
+    return release_review_before_next_model(
+        agent,
+        timeout=timeout,
+        message="session.model switch; review must release the GPU before the next model loads",
+    )
+
+
 # Aux-model routing: by default ("auto") the fork runs on the MAIN model and replays the full
 # conversation as warm cache reads. When auxiliary.background_review.{provider,model} routes it
 # to a DIFFERENT model the cache is cold anyway, so the fork replays a compact digest instead.

@@ -542,6 +542,22 @@ def effort_fields(config, tier, model, provider, base_url, api_mode=None):
     return {'reasoning_effort': effort, 'reasoning_effort_wire': wire, 'service_tier': tier, 'fast': fast}
 
 
+def _model_fit_warning(agent, policy, model):
+    """Plain words when a picked local model only partly fits. Never swaps the model."""
+    base_url = getattr(agent, "base_url", None) if agent is not None else None
+    if not base_url and policy is not None:
+        base_url = getattr(policy, "base_url", None)
+    if not model or not base_url:
+        return None
+    from agent.model_metadata import is_local_endpoint, local_model_fit_warning
+    if not is_local_endpoint(str(base_url)):
+        return None
+    try:
+        return local_model_fit_warning(str(model), str(base_url))
+    except Exception:
+        return None
+
+
 def local_session_info(authority, ref):
     live = authority.sessions[ref.session_id]
     agent = authority.agent(ref)
@@ -579,6 +595,11 @@ def local_session_info(authority, ref):
         if warning := ' '.join(filter(None, notices)):
             info['config_warning'] = warning
     info.update(_classic_cli_fields(authority, ref, live, agent, policy))
+    fit = _model_fit_warning(agent, policy, info.get("model"))
+    if fit:
+        info["model_fit_warning"] = fit
+    elif info.get("model"):
+        info["model_fit_warning"] = ""
     return info
 
 

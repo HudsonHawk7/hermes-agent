@@ -6,6 +6,7 @@ import { modelOptionsQueryKey } from '@/lib/model-options'
 import { reconcileApprovalModeForProfile } from '@/store/approval-mode'
 import { clearSettledClarifyRequest } from '@/store/clarify'
 import { reconcileSessionCompacting } from '@/store/compaction'
+import { dismissNotification, notify } from '@/store/notifications'
 import { requestDesktopOnboardingForCredentialWarning } from '@/store/onboarding'
 import { pendingSnapshotFence, reconcilePendingSubmissions } from '@/store/pending-submissions'
 import { followActiveSessionCwd } from '@/store/projects'
@@ -181,6 +182,18 @@ export function handleSessionInfoEvent(ctx: GatewayEventContext): boolean {
     // Apply session-scoped fields when the event targets the active
     // session, OR when it's a global broadcast and we have no session.
     const apply = (explicitSid ? isActiveEvent : !activeSessionIdRef.current) || rebound
+
+    if (apply && sessionId) {
+      const fitId = `model-fit-${sessionId}`
+      const fitWarning = typeof payload?.model_fit_warning === 'string' ? payload.model_fit_warning.trim() : ''
+
+      if (fitWarning) {
+        notify({ id: fitId, kind: 'warning', message: fitWarning })
+      } else if (payload && Object.prototype.hasOwnProperty.call(payload, 'model_fit_warning')) {
+        dismissNotification(fitId)
+      }
+    }
+
     const statePatch = sessionInfoStatePatch(payload)
     const hasStatePatch = hasSessionInfoStatePatch(statePatch)
     const modelChanged = typeof payload?.model === 'string'

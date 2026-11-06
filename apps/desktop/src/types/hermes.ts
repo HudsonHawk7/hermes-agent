@@ -869,6 +869,8 @@ export interface SessionRuntimeInfo {
   approval_mode?: 'manual' | 'off' | 'smart'
   branch?: string
   config_warning?: string
+  /** Plain warning when a picked local model only partly fits on the GPU. Empty means it fits or was not checked. */
+  model_fit_warning?: string
   credential_warning?: string
   cwd?: string
   desktop_contract?: number
