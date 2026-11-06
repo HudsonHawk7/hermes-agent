@@ -274,6 +274,24 @@ describe('session resolution', () => {
   })
 })
 
+describe('missing-session classification', () => {
+  it('treats 4007, not_found reason/message, and a bare not_found string as genuine misses', async () => {
+    const { turns } = await loadRoom()
+
+    expect(turns.isGenuineMissingSessionError(Object.assign(new Error('x'), { code: 4007 }))).toBe(true)
+    expect(
+      turns.isGenuineMissingSessionError(
+        Object.assign(new Error('not_found'), { code: 4001, data: { reason: 'not_found' } })
+      )
+    ).toBe(true)
+    expect(turns.isGenuineMissingSessionError(new Error('not_found'))).toBe(true)
+    expect(turns.isGenuineMissingSessionError('not_found')).toBe(true)
+    expect(turns.isGenuineMissingSessionError('  not_found  ')).toBe(true)
+    expect(turns.isGenuineMissingSessionError('network blip')).toBe(false)
+    expect(turns.isGenuineMissingSessionError(null)).toBe(false)
+  })
+})
+
 describe('session-gone classification', () => {
   it('treats 4001 and "not in memory" as recoverable, 4007 as not', async () => {
     const { turns } = await loadRoom()
