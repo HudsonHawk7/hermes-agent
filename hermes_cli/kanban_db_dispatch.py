@@ -151,30 +151,46 @@ class DispatchResult:
     Reclaim/promotion bookkeeping still ran; deferred tasks stay queued."""
 
 
-def describe_suppression(results: Iterable[Optional[DispatchResult]]) -> str:
-    """One line naming why the tick(s) held ready work back, or ``""``.
+# Log key for a quota/auth hold. The internal reason stays ``blocker_auth``
+# (existing guard tests). The warning text must not use that key: the secret
+# redactor treats a key ending in ``auth`` as a credential and replaces the
+# task id with ``***``.
+_GUARD_LOG_KEY = {"blocker_auth": "quota_or_auth_hold"}
+# A run that finished the work. Stale quota text from an earlier attempt is
+# not a reason to park the next spawn.
+_SUCCESS_RUN_OUTCOMES = frozenset({"completed", "review_requested"})
 
-    ``active_pr=1, recent_success=2, rate_limited=1, skipped_locked=1,
-    memory_pressure=critical`` — the respawn-guard reasons counted per task
-    plus the tick-level holds. Feeds the "dispatcher stuck" warnings of the
-    CLI daemon and the embedded gateway dispatcher, which otherwise report a
-    bare zero-spawn count while ``hermes kanban tail`` is the only place the
-    guard reason is written (#111910).
+
+def describe_suppression(results: Iterable[Optional[DispatchResult]]) -> str:
+    """One line naming why the tick(s) held work back, or ``""``.
+
+    Each held task id is named with its guard reason
+    (``quota_or_auth_hold=t_abc,t_def``). Tick-level holds that are not a
+    task list stay as counts. The quota key is not ``blocker_auth`` — that
+    suffix is eaten by the secret redactor, which turned the task id into
+    ``***`` (#111910, HTS-004).
     """
+    ids_by_reason: dict[str, list[str]] = {}
     counts: dict[str, int] = {}
     pressure: Optional[str] = None
     for res in results:
         if res is None:
             continue
-        for _task_id, reason in res.respawn_guarded:
-            counts[reason] = counts.get(reason, 0) + 1
+        for task_id, reason in res.respawn_guarded:
+            key = _GUARD_LOG_KEY.get(reason, reason)
+            ids_by_reason.setdefault(key, []).append(task_id)
         if res.rate_limited:
-            counts["rate_limited"] = counts.get("rate_limited", 0) + len(res.rate_limited)
+            ids_by_reason.setdefault("rate_limited", []).extend(res.rate_limited)
         if res.skipped_locked:
             counts["skipped_locked"] = counts.get("skipped_locked", 0) + 1
         if res.memory_pressure:
             pressure = res.memory_pressure
-    parts = [f"{k}={v}" for k, v in sorted(counts.items())]
+    parts = [
+        f"{key}={','.join(ids)}"
+        for key, ids in sorted(ids_by_reason.items())
+        if ids
+    ]
+    parts.extend(f"{key}={count}" for key, count in sorted(counts.items()))
     if pressure:
         parts.append(f"memory_pressure={pressure}")
     return ", ".join(parts)
@@ -1624,7 +1640,14 @@ def check_respawn_guard(
     # benign commands such as ``claude auth status`` (#117097).
     err = _kb._lossy_text(row["last_failure_error"])
     latest_outcome = latest_run["outcome"] if latest_run is not None else None
-    if err and latest_outcome != "crashed" and _RESPAWN_BLOCKER_RE.search(err):
+    # A later success (completed or review_requested) supersedes a stale quota
+    # stamp. Only a failure outcome may park the next spawn on that text.
+    if (
+        err
+        and latest_outcome not in _SUCCESS_RUN_OUTCOMES
+        and latest_outcome != "crashed"
+        and _RESPAWN_BLOCKER_RE.search(err)
+    ):
         return "blocker_auth"
 
     # Review-lane spawns stop here: a recent completed run and a fresh PR URL
