@@ -250,6 +250,56 @@ def load_background_review_settings() -> tuple[bool, dict[str, Any]]:
         return True, {}
 
 
+def _local_chat_must_keep_one_model(agent: Any) -> bool:
+    """True when this chat's model is on a local GPU. A review must not load a second one."""
+    runtime: dict[str, Any] = {}
+    current = getattr(agent, "_current_main_runtime", None)
+    if callable(current):
+        with suppress(Exception):
+            got = current()
+            if isinstance(got, dict):
+                runtime = got
+    base_url = runtime.get("base_url") or getattr(agent, "base_url", None) or ""
+    if not base_url:
+        return False
+    from agent.model_metadata import is_local_endpoint
+    return is_local_endpoint(str(base_url))
+
+
+def _review_model_stale(agent: Any, runtime: Optional[dict[str, Any]]) -> bool:
+    """The chat model changed after this review was resolved. Do not call the old model."""
+    current = getattr(agent, "model", None)
+    resolved = (runtime or {}).get("model")
+    if not current or not resolved or current == resolved:
+        return False
+    return _local_chat_must_keep_one_model(agent)
+
+
+def abort_background_review_for_model_switch(
+    agent: Any, *, new_model: str, old_model: Optional[str] = None,
+    new_provider: Optional[str] = None, old_provider: Optional[str] = None,
+) -> bool:
+    """Cancel an in-flight review before a switch loads the next model.
+
+    A local GPU cannot hold the old review model and the new chat model at once.
+    Returns whether a review was still in flight.
+    """
+    previous = old_model if old_model is not None else getattr(agent, "model", None)
+    previous_provider = old_provider if old_provider is not None else getattr(agent, "provider", None)
+    model_changed = bool(new_model) and new_model != previous
+    provider_changed = bool(new_provider) and new_provider != previous_provider
+    if not model_changed and not provider_changed:
+        return False
+    run = getattr(agent, "_background_review_run", None)
+    in_flight = run is not None and not run.request_done.is_set()
+    cancel_background_review_for_live_turn(
+        agent,
+        message=f"model switch {previous} -> {new_model}; review must not hold the old model",
+        tool_reason="model switch",
+    )
+    return in_flight
+
+
 def _resolve_review_runtime(agent: Any, task_cfg: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """Resolve provider/model/credentials for the review fork. Default (auto / unset / same as
     parent): the parent's live runtime with ``routed=False`` (codex_app_server -> codex_responses
@@ -273,6 +323,13 @@ def _resolve_review_runtime(agent: Any, task_cfg: Optional[dict[str, Any]] = Non
     if not (task_provider and task_provider != "auto" and task_model) or (
         task_provider == (agent.provider or "") and task_model == (agent.model or "")  # same as parent
     ):
+        return parent
+    if _local_chat_must_keep_one_model(agent):
+        # A second local model loads beside the chat and the GM's turn waits on the GPU.
+        logger.info(
+            "background review stays on the chat model %s; a second local model would hold the GPU",
+            agent.model,
+        )
         return parent
     try:
         from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -1181,7 +1238,9 @@ def _run_review_fork(
 
         _reset_background_review_read_marks()
     try:
-        if review_run is None or review_run.begin_request(st.review_agent):
+        if _review_model_stale(agent, _rt):
+            logger.info("background review cancelled: chat model changed before the review call")
+        elif review_run is None or review_run.begin_request(st.review_agent):
             # Routed -> digest (cache cold anyway); same model -> full snapshot (warm cache reads).
             st.review_agent.run_conversation(
                 user_message=(

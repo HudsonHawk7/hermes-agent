@@ -2429,6 +2429,13 @@ def switch_model(
     snapshot and re-raises (callers catch)."""
     old_model = agent.model
     old_provider = agent.provider
+    # Drop an in-flight review before anything that can load the next model. A local
+    # GPU cannot hold both, and the GM's turn is the one that must get the card.
+    from agent.background_review import abort_background_review_for_model_switch
+    abort_background_review_for_model_switch(
+        agent, new_model=new_model, old_model=old_model,
+        new_provider=new_provider, old_provider=old_provider,
+    )
     # ── Reload credential pool for the new provider (issue #52727) ── Without this,
     # ``recover_with_credential_pool`` sees a ``pool.provider != agent.provider`` mismatch and
     # short-circuits, leaving the new provider with no rotation/recovery on 401/429 and burning the original
