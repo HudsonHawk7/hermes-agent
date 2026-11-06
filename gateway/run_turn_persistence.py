@@ -43,6 +43,30 @@ if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
 logger = logging.getLogger("gateway.run")
 
 
+# Visible to the user. Must not say the chat was reset — the session id stays.
+LOCAL_EXHAUSTION_TRIM_NOTE = (
+    "Older middle turns were trimmed so this chat could continue. "
+    "The recent turns are still here. This chat was not reset."
+)
+_LOCAL_TRIM_KEEP_TAIL = 4
+
+
+def trim_oldest_middle_turns(messages, *, keep_tail: int = _LOCAL_TRIM_KEEP_TAIL):
+    """Drop the oldest middle turns. Keep a short head and the recent tail, plus one visible note.
+
+    Returns the new list, or None when there is no middle to drop. The session id is unchanged.
+    The head is the system prompt only, so an old first exchange is not pinned back into the chat.
+    """
+    if not isinstance(messages, list) or not messages:
+        return None
+    head_n = 1 if isinstance(messages[0], dict) and messages[0].get("role") == "system" else 0
+    tail_n = max(0, int(keep_tail))
+    if len(messages) <= head_n + tail_n + 1:
+        return None
+    note = {"role": "user", "content": LOCAL_EXHAUSTION_TRIM_NOTE}
+    return list(messages[:head_n]) + [note] + list(messages[-tail_n:])
+
+
 def _acp_launch(runner, source) -> bool:
     """An editor session: ACP shows no reasoning event yet, so its reply keeps the projected block."""
     from gateway.session_setting_commands import local_policy
@@ -346,6 +370,13 @@ class GatewayTurnPersistenceMixin:
             # (``admission_conflict``). The caller gets the typed ``compression_exhausted`` result instead.
             logger.info("Keeping API session %s after compression exhaustion.",
                         session_entry.session_id if session_entry else "?")
+        elif agent_result.get("compression_exhausted") and getattr(source, "platform", None) == Platform.LOCAL and session_entry:
+            # A local companion chat is never wiped. Trim the oldest middle turns, or
+            # queue that trim until this turn's admission settles. The session id stays.
+            deferred = bool(session_key) and self._hmwa_defer_exhaustion_reset(session_entry, session_key, source)
+            if not deferred:
+                await self._hmwa_trim_exhausted_local_session(session_entry)
+            response = (response or "") + LOCAL_EXHAUSTION_TRIM_NOTE
         elif agent_result.get("compression_exhausted") and session_entry and session_key:
             if not self._hmwa_defer_exhaustion_reset(session_entry, session_key, source):
                 session_entry = await self._hmwa_rotate_exhausted_session(session_entry, session_key, source)
@@ -353,10 +384,12 @@ class GatewayTurnPersistenceMixin:
         return response, session_entry
 
     def _hmwa_defer_exhaustion_reset(self, session_entry, session_key, source):
-        """True when the reset was handed to the authority drain. A LOCAL session (the Bot Chat a
-        ``hermes peer dm`` lands in) resets its target in the store, which refuses while an admission
-        on it is started (``session_busy``): this turn's own. The drain runs the reset right after it
-        settles this admission, before it claims any successor (the Bot Chat's retry included)."""
+        """True when the local trim was handed to the authority drain.
+
+        A LOCAL session's store refuses a rewrite while this turn's admission is still
+        started. The drain trims after it settles, before the next message. It must not
+        rotate the session — that wipe is the lost context.
+        """
         from gateway.session_ingress import executing_admission
         if getattr(source, "platform", None) != Platform.LOCAL or not executing_admission.get():
             return False
@@ -364,9 +397,34 @@ class GatewayTurnPersistenceMixin:
         authority = active_authority(self)
         if authority is None:
             return False
-        authority.deferred_resets[session_key] = lambda: self._hmwa_rotate_exhausted_session(
-            session_entry, session_key, source)
+        authority.deferred_resets[session_key] = lambda: self._hmwa_trim_exhausted_local_session(session_entry)
         return True
+
+    async def _hmwa_trim_exhausted_local_session(self, session_entry):
+        """Drop the oldest middle turns. Keep the session id. Never rotate."""
+        session_id = getattr(session_entry, "session_id", None)
+        logger.info(
+            "Trimming oldest middle turns of local session %s after compression exhaustion. Chat kept.",
+            session_id,
+        )
+        try:
+            messages = self.load_transcript(session_id)
+        except Exception:
+            logger.exception("Could not read local session %s to trim it; chat was kept", session_id)
+            return
+        trimmed = trim_oldest_middle_turns(messages)
+        if trimmed is None:
+            logger.info("Local session %s has no middle to trim; chat was kept", session_id)
+            return
+        try:
+            wrote = self.rewrite_transcript(
+                session_id, trimmed, compression_lock_holder="local-exhaustion-trim",
+            )
+        except Exception:
+            logger.exception("Could not persist the trim for local session %s; chat was kept", session_id)
+            return
+        if not wrote:
+            logger.error("Trim did not persist for local session %s; chat was kept", session_id)
 
     async def _hmwa_rotate_exhausted_session(self, session_entry, session_key, source):
         """The compression-exhaustion auto-reset itself; returns the route's (fresh) entry."""
