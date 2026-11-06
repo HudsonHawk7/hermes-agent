@@ -590,6 +590,53 @@ def _ollama_show_context(data: dict[str, Any], *, gguf_first: bool, minimum: Opt
     return None
 
 
+def _ps_context_length(ps_payload: Any, model: str) -> Optional[int]:
+    """Loaded-model window from an Ollama ``/api/ps`` payload. That is the context the server allocated."""
+    rows = ps_payload.get("models") if isinstance(ps_payload, dict) else ps_payload
+    if not isinstance(rows, list):
+        return None
+    wanted = (model or "").strip().lower()
+    wanted_base = wanted.split(":", 1)[0]
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        names = {
+            str(row.get("name") or "").strip().lower(),
+            str(row.get("model") or "").strip().lower(),
+        }
+        names.discard("")
+        if wanted not in names and wanted_base not in {name.split(":", 1)[0] for name in names}:
+            continue
+        ctx = row.get("context_length")
+        if isinstance(ctx, (int, float)) and int(ctx) > 0:
+            return int(ctx)
+    return None
+
+
+def local_ollama_served_context(show_data: Any, ps_payload: Any, model: str) -> Optional[int]:
+    """Context a local Ollama server will actually accept.
+
+    Prefer the loaded model's ``context_length`` from ``/api/ps`` (the served window).
+    Else Modelfile ``parameters.num_ctx``. Never the GGUF model card. That training
+    max (often 262144) is not the window the server allocated (65536 here), and
+    treating it as the limit lets a chat grow until Ollama refuses it.
+    """
+    served = _ps_context_length(ps_payload, model)
+    if served:
+        return served
+    if isinstance(show_data, dict):
+        for line in str(show_data.get("parameters") or "").splitlines():
+            parts = line.strip().split()
+            if "num_ctx" in line and len(parts) >= 2:
+                try:
+                    value = int(parts[-1])
+                except ValueError:
+                    continue
+                if value > 0:
+                    return value
+    return None
+
+
 # (host, canonical paths, model ids, context) — see _endpoint_scoped_context_length.
 _ENDPOINT_SCOPED_CONTEXT = (
     ("api.kimi.com", {"/coding", "/coding/v1"}, {"k3", "kimi-k3", "kimi-k3-cot"}, 1_048_576),
@@ -1601,10 +1648,19 @@ def _query_local_context_length_uncached(model: str, base_url: str, api_key: str
     except Exception:
         server_type = None
     def _ollama_ctx(client) -> Optional[int]:
-        # Ollama: num_ctx (runtime window) before the GGUF training max, or conversations
-        # grow past what Ollama allocated and silently truncate. Matches query_ollama_num_ctx().
-        resp = client.post(f"{server_url}/api/show", json={"name": model})
-        return _ollama_show_context(resp.json(), gguf_first=False) if resp.status_code == 200 else None
+        # Served window only. /api/ps context_length is what this process will accept;
+        # num_ctx is the Modelfile override. The GGUF card is the training max and must
+        # not become the chat limit (262144 card vs 65536 served).
+        show = client.post(f"{server_url}/api/show", json={"name": model})
+        show_data = show.json() if show.status_code == 200 else None
+        ps_payload = None
+        try:
+            ps = client.get(f"{server_url}/api/ps")
+            if ps.status_code == 200:
+                ps_payload = ps.json()
+        except Exception:
+            ps_payload = None
+        return local_ollama_served_context(show_data, ps_payload, model)
     def _model_detail_ctx(client) -> Optional[int]:
         # LM Studio / vLLM / llama.cpp / Anthropic-compat proxies: /v1/models/{model}.
         # Skipped for unrecognised servers (server_type None, e.g. LiteLLM proxies): they commonly
