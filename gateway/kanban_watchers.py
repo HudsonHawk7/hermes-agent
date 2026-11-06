@@ -371,3 +371,27 @@ class GatewayKanbanWatchersMixin:
                 logger.exception("kanban worker-temp janitor: pass failed")
 
             await self._sleep_between_ticks(float(interval_minutes) * 60.0)
+
+    async def _timecaps_watch_watcher(self) -> None:
+        """Re-map T: when the Time Capsule share returns.
+
+        One pass every five minutes. First pass a minute after boot. No window
+        and no scheduled task: this is a gateway loop, same as the janitor.
+        """
+        import sys
+
+        if sys.platform != "win32":
+            return
+        await asyncio.sleep(60)
+        while self._running:
+            try:
+                from hermes_cli.timecaps_watch import run_timecaps_watch_once
+
+                result = await _to_thread_process_service(run_timecaps_watch_once)
+                if result and result != "ok":
+                    logger.info("timecaps watch: %s", result)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("timecaps watch: pass failed")
+            await self._sleep_between_ticks(300)

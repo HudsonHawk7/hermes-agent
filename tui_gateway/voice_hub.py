@@ -22,9 +22,13 @@ transport rides along internally so pause/resume can find the caller, but it is 
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
-from typing import Callable, Optional
+from contextlib import suppress
+from typing import Any, Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 # The three published statuses. ``idle`` is also "paused": capture is closed either way, and the
 # four-field contract has no room for a fifth value (see ``stop_reason`` for which one it was).
@@ -47,6 +51,8 @@ class VoiceHub:
         self._status = IDLE
         self._surface: Optional[str] = None
         self._transport: object = None
+        self._guard: Optional[Any] = None
+        self._owns_guard = False
         self._since = float(clock())
         self._stop_reason: Optional[str] = None
 
@@ -84,14 +90,64 @@ class VoiceHub:
             self._transport = transport
             self._surface = surface or self._surface or "auto"
 
-    def armed(self, surface: str, transport: object) -> dict:
-        """Capture is open for ``surface`` — the arm succeeded, whatever the old state was."""
+    def armed(self, surface: str, transport: object, guard: Any = None) -> dict:
+        """Capture is open for ``surface`` — the arm succeeded, whatever the old state was.
+
+        ``guard`` is the listening guard (``tools.voice_guard``) built for this arm, or ``None``
+        when config does not ask for one. It lives exactly as long as the arm: the Hub never
+        builds one itself and never reads config to decide, so a restarted gateway has no guard
+        until a surface asks for the mic (VH1 AC1/AC3).
+        """
         with self._lock:
             self._transport = transport
             self._surface = surface or self._surface or "auto"
+            # The Hub owns a guard it was handed at arm time, so release/reset must close it.
+            self._guard, self._owns_guard = guard, guard is not None
             self._status, self._stop_reason = ARMED, None
             self._since = float(self._clock())
             return self.state()
+
+    def republish_armed(self, surface: str) -> None:
+        """Publish ``armed`` again for a claim that is already live (VH8's poll heal).
+
+        A repaint, not a new arm: the detector is still running under the same owner, so nothing
+        about the guard in force changes here. Re-arming through :meth:`armed` would drop the
+        guard this Hub owns — and leak it — which is why the heal path calls this instead.
+        """
+        with self._lock:
+            if self._transport is None:
+                return
+            self._surface = surface or self._surface or "auto"
+            self._status, self._stop_reason = ARMED, None
+            self._since = float(self._clock())
+
+    def attach_guard(self, guard: Any) -> None:
+        """Publish an already-running listener's guard for the doctor read. Reporting only.
+
+        The listener owns this guard's lifetime; the Hub must never close it out from under a live
+        capture stream, so ``attach_guard`` clears the ownership flag a claim may have set. ``None``
+        clears the read — after that :meth:`guard_state` reports nothing rather than the counters of
+        a guard that is already gone, which is what a restarted gateway has to look like.
+        """
+        with self._lock:
+            self._guard, self._owns_guard = guard, False
+
+    def guard_state(self) -> Optional[dict]:
+        """The armed guard's counters, or ``None`` when no guard is in force.
+
+        Deliberately NOT part of :meth:`state`: clients pin the four-field contract (VH1 AC4),
+        and this is a doctor/log read (``voice_hub.guard``).
+        """
+        with self._lock:
+            guard = self._guard
+        if guard is None:
+            return None
+        try:
+            return guard.state()
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            # A closed/partial backend must not take a status read down — but say so in the log.
+            logger.warning("voice_hub.guard: guard state unavailable: %s", exc, exc_info=True)
+            return None
 
     def pause(self, transport: object, reason: str = "paused") -> bool:
         """Close capture but keep the claim (mic handed to a voice turn, phrase detected)."""
@@ -111,6 +167,7 @@ class VoiceHub:
             self._transport, self._surface = None, None
             self._status, self._stop_reason = STOPPED, reason
             self._since = float(self._clock())
+            self._drop_guard()
             return True
 
     def reset(self) -> None:
@@ -118,6 +175,15 @@ class VoiceHub:
         with self._lock:
             self._transport, self._surface, self._stop_reason = None, None, None
             self._status, self._since = IDLE, float(self._clock())
+            self._drop_guard()
+
+    def _drop_guard(self) -> None:
+        """Forget the guard; close it only when the Hub owns it (caller holds the lock)."""
+        guard, owns = self._guard, self._owns_guard
+        self._guard, self._owns_guard = None, False
+        if guard is not None and owns:
+            with suppress(OSError, RuntimeError, ValueError):
+                guard.close()
 
     def _transition(self, transport: object, status: str, reason: Optional[str]) -> bool:
         """Move to ``status`` iff ``transport`` holds the claim (caller holds the lock)."""

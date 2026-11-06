@@ -75,6 +75,32 @@ class TestCustomReasoningWireShape:
         assert eb == {"think": False}
         assert tl == {"reasoning_effort": "none"}
 
+    def test_ollama_minimal_maps_to_none(self, custom_profile):
+        """Ollama /v1 treats reasoning_effort=minimal as thinking ON.
+
+        extra_body.think is ignored on /v1 (only /api/chat honours it).
+        The only off switch is top-level reasoning_effort=none. A configured
+        agent.reasoning_effort=minimal therefore leaked thousands of
+        reasoning tokens on gemma4-26b until this map.
+        """
+        eb, tl = custom_profile.build_api_kwargs_extras(
+            reasoning_config={"enabled": True, "effort": "minimal"},
+            model="solara:gemma4-26b-uncensored",
+            base_url="http://127.0.0.1:11434/v1",
+        )
+        assert tl == {"reasoning_effort": "none"}
+        assert eb.get("think") is False
+
+    def test_non_ollama_minimal_stays_minimal(self, custom_profile):
+        """Hosted OpenAI-compat endpoints still get the graded 'minimal' value."""
+        eb, tl = custom_profile.build_api_kwargs_extras(
+            reasoning_config={"enabled": True, "effort": "minimal"},
+            model="glm-5.2",
+            base_url="https://ark.example/v1",
+        )
+        assert tl == {"reasoning_effort": "minimal"}
+        assert "think" not in eb
+
     def test_disabled_omits_think_on_mistral(self, custom_profile):
         """Strict OpenAI-compat hosts forbid extra ``think`` (HTTP 422)."""
         eb, tl = custom_profile.build_api_kwargs_extras(

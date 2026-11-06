@@ -87,6 +87,7 @@ import {
   updateGroupChat
 } from './group-chat'
 import type { GroupChatRoom } from './group-chat'
+import { isGroupChatNearBottom, observeGroupChatLogResize, scrollGroupChatToBottom } from './group-chat-follow'
 import { GroupClarifyCard, GroupImageControls, GroupMentionInput } from './group-chat-parts'
 import type { GroupRoomPrompt } from './group-chat-parts'
 import { GroupMemberPicker } from './group-chat-view-members'
@@ -590,9 +591,17 @@ export function GroupChatWorkspace(props: GroupChatWorkspaceProps) {
   const bindings = useValue($canonicalGroupBindings)
   const connectionId = useValue(host.state.connectionId)
   const profile = useValue(host.state.profile)
-  const binding = canonicalGroupBindingFor(bindings, { connectionId: connectionId ?? '', profile }, props.group, props.origin ?? 'name')
 
-  if (binding) {return <CanonicalGroupWorkspace binding={binding} onBack={props.onBack} visible={props.visible} />}
+  const binding = canonicalGroupBindingFor(
+    bindings,
+    { connectionId: connectionId ?? '', profile },
+    props.group,
+    props.origin ?? 'name'
+  )
+
+  if (binding) {
+    return <CanonicalGroupWorkspace binding={binding} onBack={props.onBack} visible={props.visible} />
+  }
 
   return <GroupExecutionGate {...props} />
 }
@@ -615,7 +624,10 @@ function GroupExecutionGate(props: GroupChatWorkspaceProps) {
   const [lookupAttempt, setLookupAttempt] = useState(0)
   const lookupStatus = lookup?.source === source ? lookup.status : 'pending'
   useEffect(() => {
-    if (mode !== 'canonical') {return}
+    if (mode !== 'canonical') {
+      return
+    }
+
     let cancelled = false
     setLookup({ source, status: 'pending' })
     setError('')
@@ -623,9 +635,15 @@ function GroupExecutionGate(props: GroupChatWorkspaceProps) {
     const origin = props.origin ?? 'name'
     void resolveCanonicalGroup(route, props.group, origin)
       .then(resolved => {
-        if (cancelled) {return}
+        if (cancelled) {
+          return
+        }
 
-        if (resolved) {publishCanonicalGroup(route, props.group, resolved, origin)} else {setLookup({ source, status: 'missing' })}
+        if (resolved) {
+          publishCanonicalGroup(route, props.group, resolved, origin)
+        } else {
+          setLookup({ source, status: 'missing' })
+        }
       })
       .catch(e => {
         if (!cancelled) {
@@ -634,7 +652,9 @@ function GroupExecutionGate(props: GroupChatWorkspaceProps) {
         }
       })
 
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+    }
   }, [mode, source, props.group, props.origin, lookupAttempt, connectionId, profile])
   useEffect(() => {
     let cancelled = false
@@ -648,7 +668,11 @@ function GroupExecutionGate(props: GroupChatWorkspaceProps) {
     }
 
     void canonicalGroupRequest<unknown>({ connectionId: connectionId ?? '', profile }, 'groups.capabilities')
-      .then(result => { if (!cancelled) {setCapability({ source, mode: groupExecutionMode(result) })} })
+      .then(result => {
+        if (!cancelled) {
+          setCapability({ source, mode: groupExecutionMode(result) })
+        }
+      })
       .catch(e => {
         if (!cancelled) {
           setCapability({ source, mode: 'unavailable' })
@@ -656,46 +680,76 @@ function GroupExecutionGate(props: GroupChatWorkspaceProps) {
         }
       })
 
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+    }
   }, [connectionId, profile, gateway, source])
 
-  if (mode === 'legacy') {return <LegacyGroupChatWorkspace {...props} />}
+  if (mode === 'legacy') {
+    return <LegacyGroupChatWorkspace {...props} />
+  }
 
   // A `canonical:` key names an existing room; it never seeds a new one.
-  const canCreate = mode === 'canonical' && lookupStatus === 'missing' && canonicalGroupKeyRoute(props.group, props.origin ?? 'name') === null
+  const canCreate =
+    mode === 'canonical' &&
+    lookupStatus === 'missing' &&
+    canonicalGroupKeyRoute(props.group, props.origin ?? 'name') === null
 
-  const message = mode !== 'canonical'
-    ? mode === 'unavailable' ? b.canonical.driverUnavailable : 'Checking group driver…'
-    : lookupStatus === 'pending' ? t.gatewayGroupOpen.opening
-      : lookupStatus === 'failed' ? t.gatewayGroupOpen.lookupFailed
-        : canCreate ? 'This is a legacy Desktop room. Start a gateway-owned group with these members; the old history stays here and is not replayed.'
-          : t.gatewayGroupOpen.missing
+  const message =
+    mode !== 'canonical'
+      ? mode === 'unavailable'
+        ? b.canonical.driverUnavailable
+        : 'Checking group driver…'
+      : lookupStatus === 'pending'
+        ? t.gatewayGroupOpen.opening
+        : lookupStatus === 'failed'
+          ? t.gatewayGroupOpen.lookupFailed
+          : canCreate
+            ? 'This is a legacy Desktop room. Start a gateway-owned group with these members; the old history stays here and is not replayed.'
+            : t.gatewayGroupOpen.missing
 
-  return <div className="grid gap-3 p-3">
-    <h2>{props.group}</h2>
-    <p>{message}</p>
-    {error && <p role="alert">{error}</p>}
-    {mode === 'canonical' && lookupStatus !== 'pending' && !canCreate &&
-      <Button onClick={() => setLookupAttempt(value => value + 1)} variant="secondary">{t.common.retry}</Button>}
-    <Button disabled={!canCreate || busy} onClick={() => {
-      const route = { connectionId: connectionId ?? '', profile }
+  return (
+    <div className="grid gap-3 p-3">
+      <h2>{props.group}</h2>
+      <p>{message}</p>
+      {error && <p role="alert">{error}</p>}
+      {mode === 'canonical' && lookupStatus !== 'pending' && !canCreate && (
+        <Button onClick={() => setLookupAttempt(value => value + 1)} variant="secondary">
+          {t.common.retry}
+        </Button>
+      )}
+      <Button
+        disabled={!canCreate || busy}
+        onClick={() => {
+          const route = { connectionId: connectionId ?? '', profile }
 
-      const sourceCurrent = groupCreationSource(route, activationEpoch)
+          const sourceCurrent = groupCreationSource(route, activationEpoch)
 
-      if (!canCreate || !sourceCurrent()) {
-        setError(b.canonical.driverUnavailable)
+          if (!canCreate || !sourceCurrent()) {
+            setError(b.canonical.driverUnavailable)
 
-        return
-      }
+            return
+          }
 
-      setBusy(true)
-      void createCanonicalGroup(route, props.group, props.members)
-        .then(({ room }) => {
-          if (sourceCurrent()) {openGroupChat(registerCanonicalGroup(route, room), 'key')}
-        })
-        .catch(e => { if (sourceCurrent()) {setError(String(e))} }).finally(() => setBusy(false))
-    }}>Start gateway group</Button>
-  </div>
+          setBusy(true)
+          void createCanonicalGroup(route, props.group, props.members)
+            .then(({ room }) => {
+              if (sourceCurrent()) {
+                openGroupChat(registerCanonicalGroup(route, room), 'key')
+              }
+            })
+            .catch(e => {
+              if (sourceCurrent()) {
+                setError(String(e))
+              }
+            })
+            .finally(() => setBusy(false))
+        }}
+      >
+        Start gateway group
+      </Button>
+    </div>
+  )
 }
 
 function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: GroupChatWorkspaceProps) {
@@ -883,40 +937,81 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
   // composer, otherwise the reply box of that thread. Data URLs, already
   // downscaled — they ride the send into every responding member's session.
 
-  // Scroll anchoring (#89835): rooms used to open at scroll position 0 and
-  // stay there while replies streamed in. Scroll the bottom sentinel into
-  // view on mount and whenever the log grows — but only when the user is
-  // already near the bottom, so reading history is never yanked away.
+  // Scroll anchoring (#89835 + t_53595138): stick to the newest line while the
+  // reader is near the bottom. Follow ANY content height change (streaming
+  // text into the same entry, late-loading images) via ResizeObserver — not
+  // only log.length / running flips. The room body is a plain overflow div
+  // (no scroll-area-viewport ancestor), so the viewport ref is the listener
+  // target. When the reader has scrolled up, show Jump-to-latest instead of
+  // yanking them down. Sending always re-sticks and jumps.
+  const logViewportRef = useRef<HTMLDivElement | null>(null)
+  const logContentRef = useRef<HTMLDivElement | null>(null)
   const bottomSentinelRef = useRef<HTMLDivElement | null>(null)
   const stickToBottomRef = useRef(true)
-  // eslint-disable-next-line no-restricted-syntax -- tracks live scroll position from a DOM listener, not an atom
-  useEffect(() => {
-    const sentinel = bottomSentinelRef.current
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false)
 
-    if (!sentinel) {
+  const jumpToLatest = (behavior: ScrollBehavior = 'auto') => {
+    stickToBottomRef.current = true
+    setShowJumpToLatest(false)
+    const viewport = logViewportRef.current
+
+    if (viewport) {
+      scrollGroupChatToBottom(viewport, behavior)
+
       return
     }
 
-    const viewport = sentinel.closest('[data-slot="scroll-area-viewport"]')
+    bottomSentinelRef.current?.scrollIntoView({
+      block: 'end',
+      behavior
+    })
+  }
 
-    if (viewport) {
-      const onScroll = () => {
-        stickToBottomRef.current = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 80
-      }
+  // eslint-disable-next-line no-restricted-syntax -- tracks live scroll position from a DOM listener, not an atom
+  useEffect(() => {
+    const viewport = logViewportRef.current
 
-      viewport.addEventListener('scroll', onScroll, {
-        passive: true
-      })
-
-      return () => viewport.removeEventListener('scroll', onScroll)
+    if (!viewport) {
+      return
     }
-  }, [])
+
+    // First layout of this room (and each room switch): land at the latest
+    // before position sync. A sync read of scrollTop 0 here would mark
+    // stick=false and skip every later follow, including ResizeObserver.
+    stickToBottomRef.current = true
+    setShowJumpToLatest(false)
+    scrollGroupChatToBottom(viewport, 'auto')
+
+    const onScroll = () => {
+      const near = isGroupChatNearBottom(viewport)
+      stickToBottomRef.current = near
+      setShowJumpToLatest(!near)
+    }
+
+    viewport.addEventListener('scroll', onScroll, {
+      passive: true
+    })
+
+    return () => viewport.removeEventListener('scroll', onScroll)
+  }, [group])
+
+  useEffect(() => {
+    const viewport = logViewportRef.current
+    const content = logContentRef.current
+
+    if (!viewport || !content || typeof ResizeObserver === 'undefined') {
+      return
+    }
+
+    return observeGroupChatLogResize(content, viewport, () => stickToBottomRef.current)
+  }, [group])
+
   useEffect(() => {
     if (stickToBottomRef.current) {
-      bottomSentinelRef.current?.scrollIntoView({
-        block: 'end'
-      })
+      jumpToLatest('auto')
     }
+    // jumpToLatest closes over stable refs; length/running still force a pass
+    // when stick is true (empty → first message, working indicator).
   }, [room.log.length, room.running])
 
   // Retained-pane reopen (#89835 follow-up): a hot-mounted room pane stays
@@ -928,10 +1023,7 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
   // eslint-disable-next-line no-restricted-syntax -- previous-value tracker for the hidden → visible edge; lagging a render IS the contract
   useEffect(() => {
     if (visible && !wasVisibleRef.current) {
-      stickToBottomRef.current = true
-      bottomSentinelRef.current?.scrollIntoView({
-        block: 'end'
-      })
+      jumpToLatest('auto')
     }
 
     wasVisibleRef.current = visible
@@ -974,16 +1066,45 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
   // open reply box when one owns the composer, else the main (new-thread)
   // composer. Matches the 1:1 chat's drop affordance.
   const [dragOver, setDragOver] = useState(false)
+  // Click-to-enlarge for a user image shown in the log.
+  const [previewImage, setPreviewImage] = useState<null | { alt: string; src: string }>(null)
+
+  // While the room is mounted, kill Chromium's default "navigate to the dropped
+  // file" behavior for any miss outside our handlers (header chrome, empty
+  // gaps, Electron shell). preventDefault on dragover is required for drop to fire.
+  useEffect(() => {
+    const blockFileNav = (event: globalThis.DragEvent) => {
+      if ([...(event.dataTransfer?.types || [])].includes('Files')) {
+        event.preventDefault()
+      }
+    }
+
+    window.addEventListener('dragover', blockFileNav)
+    window.addEventListener('drop', blockFileNav)
+
+    return () => {
+      window.removeEventListener('dragover', blockFileNav)
+      window.removeEventListener('drop', blockFileNav)
+    }
+  }, [])
 
   const dropFiles = (event: DragEvent<HTMLDivElement>) => {
-    const files = [...(event.dataTransfer?.files || [])]
+    const hasFiles = [...(event.dataTransfer?.types || [])].includes('Files')
     setDragOver(false)
+
+    // Always stop a Files drop from navigating the window, even when the
+    // payload is empty or filtered out later.
+    if (hasFiles) {
+      event.preventDefault()
+      event.stopPropagation()
+    }
+
+    const files = [...(event.dataTransfer?.files || [])]
 
     if (!files.length) {
       return
     }
 
-    event.preventDefault()
     void filesToGroupAttachments(files).then(picked => addImages(replyThread, picked))
   }
 
@@ -1198,6 +1319,10 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
       return
     }
 
+    // Sending always re-sticks to the newest line (GM: never leave the view
+    // parked a little above the bottom after a send).
+    jumpToLatest('auto')
+
     const before = groupComposerDraftSnapshot(composerKeyRef.current)
 
     const cleared = updateComposerDraft(current => ({
@@ -1230,6 +1355,8 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
     if (!text && !images.length) {
       return
     }
+
+    jumpToLatest('auto')
 
     const before = groupComposerDraftSnapshot(composerKeyRef.current)
 
@@ -1269,7 +1396,7 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
     }
 
     return (
-      <div className="flex flex-wrap items-center gap-1.5 px-1 pb-1">
+      <div className="flex flex-wrap items-center gap-1.5 px-1 pb-1" data-testid="group-pending-attachments">
         {images.map((img, index) => (
           <div
             className="flex items-center gap-1 rounded-md border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) px-1 py-0.5"
@@ -1482,16 +1609,47 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
                     <span className="max-w-48 truncate">{img.name || 'attached file'}</span>
                   </div>
                 ) : (
-                  <img
-                    alt={img.name || 'attached image'}
-                    className="max-h-40 max-w-60 rounded-md border border-(--ui-stroke-secondary) object-contain"
+                  <button
+                    className="cursor-zoom-in rounded-md border border-(--ui-stroke-secondary) p-0"
                     key={`${entryKey}:img:${imgIndex}`}
-                    src={img.data}
-                    title={img.name || 'attached image'}
-                  />
+                    onClick={() =>
+                      setPreviewImage({
+                        alt: img.name || 'attached image',
+                        src: img.data
+                      })
+                    }
+                    title={img.name || b.group.enlargeImage}
+                    type="button"
+                  >
+                    <img
+                      alt={img.name || 'attached image'}
+                      className="max-h-40 max-w-60 rounded-md object-contain"
+                      src={img.data}
+                    />
+                  </button>
                 )
               )}
             </div>
+          ) : null}
+          {/* Vision receipt under a member reply that answered an image turn. */}
+          {entry.from?.kind === 'member' && entry.vision && entry.vision.count > 0 ? (
+            entry.vision.saw ? (
+              <div
+                className="mt-1 w-fit rounded-full border border-(--ui-stroke-secondary) bg-(--ui-bg-secondary) px-2 py-0.5 text-[0.65rem] text-(--ui-text-secondary)"
+                data-testid="group-vision-saw"
+                title={entry.vision.mode === 'native' ? 'native vision' : undefined}
+              >
+                {b.group.sawImages(entry.vision.attached ?? entry.vision.count)}
+              </div>
+            ) : (
+              <div
+                className="mt-1 w-fit rounded-md border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-[0.65rem] text-red-600 dark:text-red-400"
+                data-testid="group-vision-miss"
+                title={entry.vision.reason || undefined}
+              >
+                {b.group.missedImage(entry.from.name || 'Member', entry.vision.reason || b.group.missedImageFallback)}
+              </div>
+            )
           ) : null}
         </div>
       </div>
@@ -1579,6 +1737,7 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
       onDragOver={event => {
         if ([...(event.dataTransfer?.types || [])].includes('Files')) {
           event.preventDefault()
+          event.stopPropagation()
           setDragOver(true)
         }
       }}
@@ -1586,11 +1745,32 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
     >
       {dragOver ? (
         <div
-          className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center border-2 border-dashed border-(--ui-accent) text-sm font-medium text-(--ui-accent)"
+          className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center border-2 border-dashed border-(--ui-accent) bg-(--ui-accent)/5 text-sm font-medium text-(--ui-accent)"
           key={'dropzone'}
         >
           {replyThread ? b.group.dropToThread : b.group.dropToRoom}
         </div>
+      ) : null}
+      {previewImage ? (
+        <Dialog
+          onOpenChange={open => {
+            if (!open) {
+              setPreviewImage(null)
+            }
+          }}
+          open
+        >
+          <DialogContent className="max-h-[90vh] max-w-[90vw] overflow-auto p-2">
+            <DialogHeader>
+              <DialogTitle>{previewImage.alt}</DialogTitle>
+            </DialogHeader>
+            <img
+              alt={previewImage.alt}
+              className="mx-auto max-h-[80vh] max-w-full object-contain"
+              src={previewImage.src}
+            />
+          </DialogContent>
+        </Dialog>
       ) : null}
       {header}
       <GroupHoldStatus
@@ -1599,39 +1779,55 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
         members={members}
       />
       {activityPanel}
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-        {/* minmax(0,1fr): an implicit grid track is min-content sized, so one */}
-        {/* unbreakable code line widened every entry to its own width and the */}
-        {/* log scrolled sideways as a whole instead of the code block (#91878). */}
-        <div className="grid grid-cols-[minmax(0,1fr)] gap-1.5 px-2.5 pb-2">
-          {room.log.length
-            ? logChildren
-            : [
-                <div className="px-2 py-4 text-center text-xs text-(--ui-text-tertiary)" key={'empty'}>
-                  {b.group.composerPlaceholder}
-                </div>
-              ]}
-          {roomClarifies.map(entry => (
-            <GroupClarifyCard
-              entry={entry}
-              key={`clarify:${entry.thread || 'legacy'}:${entry.memberKey}:${entry.requestId}`}
-              members={members}
-            />
-          ))}
-          {room.running ? (
-            <div className="px-2 py-1 text-[0.7rem] italic text-(--ui-text-quaternary)" key={'working'}>
-              {roomClarifies.length
-                ? b.group.waitingForAnswer
-                : room.turn
-                  ? b.group.memberThinking(displayName(room.turn, botRosterMeta(room.turn, allMeta)))
-                  : b.group.roomWorking}
-            </div>
-          ) : null}
-          {/* Scroll anchor (#89835): rooms opened at scroll position 0, mid- */
-          /* history. The effect below scrolls this sentinel into view on */
-          /* mount and on log growth — unless the user has scrolled up. */}
-          <div aria-hidden key={'bottom-sentinel'} ref={bottomSentinelRef} />
+      <div className="relative min-h-0 flex-1">
+        <div className="h-full min-h-0 overflow-y-auto overscroll-contain" ref={logViewportRef}>
+          {/* minmax(0,1fr): an implicit grid track is min-content sized, so one */}
+          {/* unbreakable code line widened every entry to its own width and the */}
+          {/* log scrolled sideways as a whole instead of the code block (#91878). */}
+          <div className="grid grid-cols-[minmax(0,1fr)] gap-1.5 px-2.5 pb-2" ref={logContentRef}>
+            {room.log.length
+              ? logChildren
+              : [
+                  <div className="px-2 py-4 text-center text-xs text-(--ui-text-tertiary)" key={'empty'}>
+                    {b.group.composerPlaceholder}
+                  </div>
+                ]}
+            {roomClarifies.map(entry => (
+              <GroupClarifyCard
+                entry={entry}
+                key={`clarify:${entry.thread || 'legacy'}:${entry.memberKey}:${entry.requestId}`}
+                members={members}
+              />
+            ))}
+            {room.running ? (
+              <div className="px-2 py-1 text-[0.7rem] italic text-(--ui-text-quaternary)" key={'working'}>
+                {roomClarifies.length
+                  ? b.group.waitingForAnswer
+                  : room.turn
+                    ? b.group.memberThinking(displayName(room.turn, botRosterMeta(room.turn, allMeta)))
+                    : b.group.roomWorking}
+              </div>
+            ) : null}
+            {/* Scroll anchor (#89835): rooms opened at scroll position 0, mid- */}
+            {/* history. The effect below scrolls this sentinel into view on */}
+            {/* mount and on log growth — unless the user has scrolled up. */}
+            <div aria-hidden key={'bottom-sentinel'} ref={bottomSentinelRef} />
+          </div>
         </div>
+        {showJumpToLatest ? (
+          <div className="pointer-events-none absolute inset-x-0 bottom-2 z-10 flex justify-center">
+            <Button
+              aria-label={b.group.jumpToLatest}
+              className="pointer-events-auto shadow-md"
+              onClick={() => jumpToLatest('smooth')}
+              size="sm"
+              type="button"
+              variant="secondary"
+            >
+              {b.group.jumpToLatest}
+            </Button>
+          </div>
+        ) : null}
       </div>
       <div className="border-t border-(--ui-stroke-secondary) p-2">
         <form
@@ -1735,7 +1931,13 @@ function GroupChatMainView({ group, origin }: GroupChatMainViewProps) {
   const visible = useValue($visible)
 
   return (
-    <GroupChatWorkspace group={group} members={members} onBack={() => closeGroupChatMainTab(group)} origin={origin} visible={visible} />
+    <GroupChatWorkspace
+      group={group}
+      members={members}
+      onBack={() => closeGroupChatMainTab(group)}
+      origin={origin}
+      visible={visible}
+    />
   )
 }
 
