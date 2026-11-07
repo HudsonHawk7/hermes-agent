@@ -218,6 +218,16 @@ def describe_suppression(results: Iterable[Optional[DispatchResult]]) -> str:
             ids_by_reason.setdefault(key, []).append(task_id)
         if res.rate_limited:
             ids_by_reason.setdefault("rate_limited", []).extend(res.rate_limited)
+        for task_id, assignee, _running in res.skipped_per_profile_capped:
+            ids_by_reason.setdefault("per_profile_cap", []).append(
+                f"{task_id}({assignee})"
+            )
+        if res.skipped_nonspawnable:
+            ids_by_reason.setdefault("not_dispatchable", []).extend(
+                res.skipped_nonspawnable
+            )
+        if res.skipped_unassigned:
+            ids_by_reason.setdefault("unassigned", []).extend(res.skipped_unassigned)
         if res.skipped_locked:
             counts["skipped_locked"] = counts.get("skipped_locked", 0) + 1
         if res.memory_pressure:
@@ -230,7 +240,7 @@ def describe_suppression(results: Iterable[Optional[DispatchResult]]) -> str:
     parts.extend(f"{key}={count}" for key, count in sorted(counts.items()))
     if pressure:
         parts.append(f"memory_pressure={pressure}")
-    return ", ".join(parts)
+    return "; ".join(parts)
 
 
 # Bounded registry of recently-reaped worker exits, filled by the reap loop in
@@ -2463,7 +2473,27 @@ def dispatch_profile_allowlist_summary() -> str:
             "profile, or the config could not be read — omit the key to allow any)")
 
 
-def _has_spawnable(conn: sqlite3.Connection, status: str) -> bool:
+_UNSET_CAP = object()
+
+
+def _assignees_at_cap(conn: sqlite3.Connection, cap: Optional[int]) -> set[str]:
+    """Assignees already at ``cap`` running workers. Empty when no cap is set."""
+    if not isinstance(cap, int) or cap <= 0:
+        return set()
+    rows = conn.execute(
+        "SELECT assignee, COUNT(*) AS n FROM tasks "
+        "WHERE status = 'running' AND assignee IS NOT NULL "
+        "GROUP BY assignee"
+    ).fetchall()
+    return {row["assignee"] for row in rows if int(row["n"]) >= cap}
+
+
+def _has_spawnable(
+    conn: sqlite3.Connection,
+    status: str,
+    *,
+    max_in_progress_per_profile: Any = None,
+) -> bool:
     rows = conn.execute(
         "SELECT DISTINCT assignee FROM tasks "
         "WHERE status = ? AND assignee IS NOT NULL AND claim_lock IS NULL",
@@ -2471,26 +2501,60 @@ def _has_spawnable(conn: sqlite3.Connection, status: str) -> bool:
     ).fetchall()
     if not rows:
         return False
+    at_cap = _assignees_at_cap(conn, max_in_progress_per_profile)
+    waiting = [row["assignee"] for row in rows if row["assignee"] not in at_cap]
+    if not waiting:
+        return False
     profile_exists = _profile_exists_fn()
     if profile_exists is None:
         # Can't introspect — assume spawnable, preserve legacy behavior.
         return True
-    return any(profile_exists(row["assignee"]) for row in rows)
+    return any(profile_exists(assignee) for assignee in waiting)
 
 
-def has_spawnable_ready(conn: sqlite3.Connection) -> bool:
-    """True iff a ready+assigned+unclaimed task maps to a real Hermes profile.
+def _resolve_profile_cap(explicit: Any) -> Any:
+    if explicit is _UNSET_CAP:
+        return configured_max_in_progress_per_profile()
+    return explicit
 
-    Lets health telemetry tell "stuck" (``0 spawned`` with spawnable work) from
-    "correctly idle" (only control-plane lanes waiting on ``claim_task``). Falls
-    back to "any assigned" when ``profile_exists`` is unimportable.
+
+def has_spawnable_ready(
+    conn: sqlite3.Connection,
+    *,
+    max_in_progress_per_profile: Any = _UNSET_CAP,
+) -> bool:
+    """True iff a ready card can be spawned this tick.
+
+    Spawnable means assigned, unclaimed, a real Hermes profile, and not already
+    at ``max_in_progress_per_profile``. A full lane, a foreign seat, or an
+    unassigned card is idle, not stuck. Omit the cap to read the configured one;
+    pass ``None`` for no cap. Falls back to "any assigned" when
+    ``profile_exists`` is unimportable.
     """
-    return _has_spawnable(conn, "ready")
+    return _has_spawnable(
+        conn, "ready",
+        max_in_progress_per_profile=_resolve_profile_cap(max_in_progress_per_profile),
+    )
 
 
-def has_spawnable_review(conn: sqlite3.Connection) -> bool:
+def has_spawnable_review(
+    conn: sqlite3.Connection,
+    *,
+    max_in_progress_per_profile: Any = _UNSET_CAP,
+) -> bool:
     """:func:`has_spawnable_ready` for the review column."""
-    return _has_spawnable(conn, "review")
+    return _has_spawnable(
+        conn, "review",
+        max_in_progress_per_profile=_resolve_profile_cap(max_in_progress_per_profile),
+    )
+
+
+def tick_is_stuck(*, spawned: int, spawnable_uncapped: bool) -> bool:
+    """True only when a dispatchable, uncapped card was not spawned.
+
+    Capacity holds, foreign seats, and unassigned cards are not a failed spawn.
+    """
+    return spawned == 0 and spawnable_uncapped
 
 
 def review_dispatch_enabled() -> bool:
@@ -3672,11 +3736,13 @@ def run_daemon(
             # Re-resolved every tick (config load is mtime-cached) so operator
             # edits apply without a restart.
             max_in_progress = resolve_max_in_progress(configured_max_in_progress())
+            per_profile = configured_max_in_progress_per_profile()
             with contextlib.closing(_kbc.connect()) as conn:
                 res = dispatch_once(
                     conn,
                     max_spawn=max_spawn,
                     max_in_progress=max_in_progress,
+                    max_in_progress_per_profile=per_profile,
                     failure_limit=failure_limit,
                 )
             if on_tick is not None:

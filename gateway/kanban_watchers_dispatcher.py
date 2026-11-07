@@ -234,7 +234,15 @@ class _KanbanDispatcher:
                 conn = None
                 try:
                     conn = _kbc().connect(board=slug)
-                    if kbd.has_spawnable_ready(conn) or (_review_probe and kbd.has_spawnable_review(conn)):
+                    if kbd.has_spawnable_ready(
+                        conn,
+                        max_in_progress_per_profile=self.settings.max_in_progress_per_profile,
+                    ) or (
+                        _review_probe and kbd.has_spawnable_review(
+                            conn,
+                            max_in_progress_per_profile=self.settings.max_in_progress_per_profile,
+                        )
+                    ):
                         return True
                 except Exception:
                     continue
