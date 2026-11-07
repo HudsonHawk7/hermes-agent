@@ -218,7 +218,7 @@ def provider_readiness_status(provider: dict, config: dict, *, features=None, is
 
 def _web_registry_readiness(provider: dict) -> str:
     """Keyless, untiered web rows are ready only when their registry provider is available: the only such
-    row's ``is_available()`` is an account login (OpenAI Native = openai-codex), hence ``needs_auth``.
+    row's ``is_available()`` is a Codex login on a Codex main transport (OpenAI Native), hence ``needs_auth``.
     Free-tier rows are exempt: they run on the public keyless ring, which ``is_available()`` ignores."""
     backend = provider.get("web_backend")
     if not backend or provider.get("web_tier"):

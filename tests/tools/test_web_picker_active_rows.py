@@ -97,4 +97,9 @@ def test_keyless_row_readiness_follows_registry_availability(monkeypatch):
     assert provider_readiness_status(native_row, {"web": {}}) == "needs_auth"
     assert {provider_readiness_status(p, {"web": {}}) for p in free_rows} == {"ready"}
     monkeypatch.setattr(native, "has_codex_credentials", lambda: True)
+    # Ready means usable now: a Codex login on a non-Codex main transport is not ready.
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"model": {"provider": "openai-codex", "api_mode": "codex_responses"}},
+    )
     assert provider_readiness_status(native_row, {"web": {}}) == "ready"
