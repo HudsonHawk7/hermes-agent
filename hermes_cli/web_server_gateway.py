@@ -304,7 +304,7 @@ _ACTION_LOG_FILES: dict[str, str] = {
     **{name: f"action-{name}.log" for name in (
         "doctor", "security-audit", "backup", "import", "checkpoints-prune", "skills-install",
         "skills-uninstall", "skills-update", "curator-run", "prompt-size", "dump", "config-migrate",
-        "tools-post-setup",
+        "tools-post-setup", "carry-merge",
     )},
 }
 

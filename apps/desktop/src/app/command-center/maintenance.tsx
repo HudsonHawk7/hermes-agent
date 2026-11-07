@@ -5,14 +5,17 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
   type ActionResponse,
+  type CarryMergePlan,
   type CuratorStatusResponse,
   type DebugShareResponse,
   getActionStatus,
+  getCarryMergePlan,
   getCuratorStatus,
   getMemoryStatus,
   type MemoryStatusResponse,
   resetMemory,
   runBackup,
+  runCarryMerge,
   runCurator,
   runDebugShare,
   runDoctor,
@@ -88,6 +91,7 @@ export function MaintenancePanel() {
     const { name } = tailTarget
     let cancelled = false
     let polls = 0
+    let reportedPid: null | number = null
     let timer: null | number = null
 
     const poll = async () => {
@@ -101,6 +105,28 @@ export function MaintenancePanel() {
         setActionStatus(status)
         upsertDesktopActionTask(status)
         polls += 1
+
+        if (
+          name === 'carry-merge' &&
+          !status.running &&
+          status.exit_code !== null &&
+          reportedPid !== status.pid
+        ) {
+          reportedPid = status.pid
+
+          if (status.exit_code === 0) {
+            notify({
+              kind: 'success',
+              message: 'Every step exited 0.',
+              title: 'Force carry merge finished'
+            })
+          } else {
+            const tail = status.lines.filter(Boolean).slice(-8).join('\n')
+            const message = tail || `Force carry merge failed (exit ${status.exit_code}).`
+            setError(message)
+            notifyError(new Error(message), 'Force carry merge failed')
+          }
+        }
 
         if (status.running && polls < ACTION_POLL_LIMIT) {
           timer = window.setTimeout(() => void poll(), ACTION_POLL_MS)
@@ -137,6 +163,57 @@ export function MaintenancePanel() {
     },
     [mm]
   )
+
+  const mergeCarry = useCallback(async () => {
+    setError('')
+
+    let planned: CarryMergePlan
+
+    try {
+      planned = await getCarryMergePlan()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      notifyError(err, 'Force carry merge refused')
+
+      return
+    }
+
+    if (planned.checks_out_another_branch || planned.commands.length < 3) {
+      const message = 'Force carry merge plan is not safe to run.'
+
+      setError(message)
+      notifyError(new Error(message), 'Force carry merge refused')
+
+      return
+    }
+
+    const accepted = await confirm({
+      confirmLabel: 'Merge and rebuild',
+      description:
+        'This fetches HudsonHawk7/hermes-agent force/carry into this install and rebuilds. It does not switch branch. A failed step is shown here and in the log.',
+      details: [
+        { label: 'Install', value: planned.repo },
+        { label: 'Fetch', value: planned.commands[0] },
+        { label: 'Merge', value: planned.commands[1] },
+        { label: 'Rebuild', value: `${planned.commands[2]} (cwd ${planned.repo})` }
+      ],
+      title: 'Merge the fork and rebuild?'
+    })
+
+    if (!accepted) {
+      return
+    }
+
+    try {
+      const started = await runCarryMerge()
+
+      setActionStatus(null)
+      setTailTarget({ name: started.name })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+      notifyError(err, 'Force carry merge failed')
+    }
+  }, [])
 
   const shareDebug = useCallback(async () => {
     setSharing(true)
@@ -226,6 +303,13 @@ export function MaintenancePanel() {
           disabled={sharing}
           label={sharing ? mm.debugShareRunning : mm.debugShare}
           onRun={() => void shareDebug()}
+        />
+
+        <OpRow
+          description="Fetches HudsonHawk7/hermes-agent force/carry into this install and rebuilds. Does not switch branch. Asks before it runs, and a failed step stays on screen."
+          disabled={actionStatus?.running === true}
+          label="Merge fork force/carry"
+          onRun={() => void mergeCarry()}
         />
 
         {share && Object.keys(share.urls).length > 0 && (

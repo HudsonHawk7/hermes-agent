@@ -566,6 +566,45 @@ async def run_doctor(profile: Optional[str] = None):
                          prefix="Failed to run doctor", profile=profile)
 
 
+def carry_merge_spawn_argv(repo: Path) -> list[str]:
+    """The exact command the button starts. Absolute --repo, never the cwd."""
+    return ["carry", "merge", "--repo", str(repo)]
+
+
+@router.get("/api/ops/carry-merge/plan")
+async def carry_merge_plan():
+    """Name the fetch, merge, and rebuild before anything runs."""
+    from hermes_cli.carry_merge import CarryMergeError, plan
+
+    try:
+        return plan(None)
+    except CarryMergeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/api/ops/carry-merge")
+async def run_carry_merge(profile: Optional[str] = None):
+    """Merge the fork's force/carry into this install and rebuild.
+
+    Refuses before spawn when the install is not already on force/carry or has
+    no HudsonHawk7/hermes-agent remote. A failed step stays non-zero in the log.
+    """
+    from hermes_cli.carry_merge import CarryMergeError, plan
+
+    try:
+        info = plan(None)
+    except CarryMergeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    repo = Path(str(info["repo"]))
+    return _spawn_action(
+        carry_merge_spawn_argv(repo),
+        "carry-merge",
+        log_msg="Failed to spawn carry merge",
+        prefix="Failed to run carry merge",
+        profile=profile,
+    )
+
+
 @router.post("/api/ops/security-audit")
 async def run_security_audit(profile: Optional[str] = None):
     return _spawn_action(
