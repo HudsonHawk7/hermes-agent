@@ -12,6 +12,12 @@ model drives search server-side. The transport performs that swap; this class ex
 Auth gating lives here rather than in the transport because the transport must stay
 reachable for a user who configured this backend but has not signed in yet — they get the
 clear "sign in" error from :meth:`search` rather than a silently different backend.
+
+Autodetect must not treat a Codex login as enough. ``is_available`` is true only when
+that login exists AND the active main model is provider ``openai-codex`` (the transport
+that swaps in the built-in). ``api_mode: codex_responses`` alone is not that transport:
+xAI and others persist the same wire mode and cannot host it. An explicit
+``web.search_backend`` pin is not gated by this check.
 """
 
 from __future__ import annotations
@@ -61,6 +67,49 @@ def has_codex_credentials() -> bool:
         return False
 
 
+_CODEX_PROVIDER = "openai-codex"
+_CODEX_API_MODE = "codex_responses"
+
+
+def active_main_hosts_builtin() -> bool:
+    """True when the active main model is the Codex transport that hosts the built-in.
+
+    That transport is provider ``openai-codex``. Its overlay declares api_mode
+    ``codex_responses``, but that mode alone is not the host: xAI and others persist
+    the same wire mode. A frozen session config wins over the file, so a mid-session
+    switch counts. Cheap config read. Fail closed. Never calls a credential resolver.
+    """
+    try:
+        model = _active_model()
+        provider = str(model.get("provider") or "").strip().lower()
+        if provider != _CODEX_PROVIDER:
+            return False
+        api_mode = str(model.get("api_mode") or "").strip().lower()
+        return not api_mode or api_mode == _CODEX_API_MODE
+    except Exception:
+        return False
+
+
+def _active_model() -> dict:
+    """Model block of the active runtime config, or ``{}``. Frozen session first."""
+    try:
+        import sys
+
+        runtime = sys.modules.get("hermes_cli.runtime_provider")
+        if runtime is not None:
+            frozen = runtime._FROZEN_RUNTIME_CONFIG.get()
+            if isinstance(frozen, dict):
+                model = frozen.get("model")
+                return model if isinstance(model, dict) else {}
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+        model = cfg.get("model") if isinstance(cfg, dict) else None
+        return model if isinstance(model, dict) else {}
+    except Exception:
+        return {}
+
+
 class OpenAINativeWebSearchProvider(BaseWebSearchProvider):
     """Marker provider: the Codex Responses transport swaps the client ``web_search``
     function for the server-executed built-in when this backend is active."""
@@ -69,7 +118,9 @@ class OpenAINativeWebSearchProvider(BaseWebSearchProvider):
     DISPLAY_NAME = "OpenAI Native Web Search (Codex Responses)"
 
     def is_available(self) -> bool:
-        return has_codex_credentials()
+        # Creds alone are not enough: a pool login on an xAI/ollama main transport
+        # makes autodetect pick this backend, then every search fails client-side.
+        return has_codex_credentials() and active_main_hosts_builtin()
 
     def search(self, query: str, limit: int = 5) -> dict[str, Any]:
         """Never called on a successful native turn — the transport replaces the tool
