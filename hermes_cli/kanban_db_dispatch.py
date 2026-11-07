@@ -187,9 +187,15 @@ class DispatchResult:
 # redactor treats a key ending in ``auth`` as a credential and replaces the
 # task id with ``***``.
 _GUARD_LOG_KEY = {"blocker_auth": "quota_or_auth_hold"}
-# A run that finished the work. Stale quota text from an earlier attempt is
-# not a reason to park the next spawn.
-_SUCCESS_RUN_OUTCOMES = frozenset({"completed", "review_requested"})
+# A run that finished, or handed the card back without failing. Stale quota
+# text from an earlier attempt is not a reason to park the next spawn.
+# A real auth failure on the latest run is not in this set, so it still holds.
+_NON_FAILURE_RUN_OUTCOMES = frozenset({
+    "completed",
+    "review_requested",
+    "changes_requested",
+    "approved",
+})
 
 
 def describe_suppression(results: Iterable[Optional[DispatchResult]]) -> str:
@@ -2070,11 +2076,12 @@ def check_respawn_guard(
     # benign commands such as ``claude auth status`` (#117097).
     err = _kb._lossy_text(row["last_failure_error"])
     latest_outcome = latest_run["outcome"] if latest_run is not None else None
-    # A later success (completed or review_requested) supersedes a stale quota
-    # stamp. Only a failure outcome may park the next spawn on that text.
+    # A later non-failure end (completed, review_requested, changes_requested,
+    # approved) supersedes a stale quota stamp. Only a failure on the latest
+    # run may park the next spawn on that text.
     if (
         err
-        and latest_outcome not in _SUCCESS_RUN_OUTCOMES
+        and latest_outcome not in _NON_FAILURE_RUN_OUTCOMES
         and latest_outcome != "crashed"
         and _RESPAWN_BLOCKER_RE.search(err)
     ):
