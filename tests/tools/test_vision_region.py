@@ -172,8 +172,9 @@ class TestSchemaAndHandler:
         src = _make_png(tmp_path / "img.png", 100, 50)
         seen = {}
 
-        async def _fake_native(image_url, question, task_id=None, region=None):
+        async def _fake_native(image_url, question, task_id=None, region=None, source_note=None):
             seen["region"] = region
+            seen["source_note"] = source_note
             return {"_multimodal": True, "content": []}
 
         monkeypatch.setattr(vision_tools, "_vision_analyze_native", _fake_native)
@@ -186,3 +187,4 @@ class TestSchemaAndHandler:
             )
         )
         assert seen["region"] == [1, 2, 30, 40]
+        assert seen["source_note"] is None
