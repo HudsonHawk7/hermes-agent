@@ -655,11 +655,13 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, 
             return extracted
 
         # The extension is a claim, so this message names only the extension;
-        # the content-sniffing path names the actual magic-byte type.
-        if has_binary_extension(str(_resolved)):
+        # the content-sniffing path names the actual magic-byte type. A missing host file falls
+        # through to the read below, whose "File not found" names similar files instead.
+        if has_binary_extension(str(_resolved)) and (
+                not _file_ops_uses_host_paths(_get_file_ops(task_id)) or _resolved.exists()):
             return tool_error(
                 f"Cannot read binary file '{path}' ({_resolved.suffix.lower()}). "
-                "Use vision_analyze for images, or terminal to inspect binary files.")
+                "Use vision_analyze for images, video_analyze for videos, or terminal to inspect binary files.")
 
         resolved_str = str(_resolved)
         cached_not_found = _check_not_found_cache("read", resolved_str, task_id)
