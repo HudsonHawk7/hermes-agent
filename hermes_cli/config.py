@@ -2371,6 +2371,12 @@ def _load_config_impl(*, want_deepcopy: bool) -> dict[str, Any]:
                     user_config.pop("max_turns", None)
 
                 config = _deep_merge(config, user_config)
+                # Preserve top-level sections from user config that are not in DEFAULT_CONFIG
+                # (e.g. scene_builder and other Force plugins). This makes load_config_readonly()
+                # always expose them even if the typed model or canonicalize drops them.
+                for k, v in user_config.items():
+                    if k not in DEFAULT_CONFIG:
+                        config[k] = v
                 from hermes_cli.moa_config import apply_user_moa_presets
                 apply_user_moa_presets(config, user_config)
                 # A copy of the file that just parsed is what a FRESH process falls back to when the
