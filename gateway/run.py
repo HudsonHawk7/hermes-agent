@@ -1622,6 +1622,13 @@ _hermes_home = get_process_hermes_home()
 from hermes_cli.env_loader import load_hermes_dotenv
 _env_path = _hermes_home / '.env'
 load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).resolve().parents[1] / '.env')
+# The boot export ran before this load. Re-point temps now that the profile's
+# write-safe root and scratch pin are in the environment.
+try:
+    from hermes_constants import sync_scratch_tmp_after_profile_env
+    sync_scratch_tmp_after_profile_env()
+except Exception:
+    pass
 
 
 def _reload_runtime_env_preserving_config_authority() -> None:

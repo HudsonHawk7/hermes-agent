@@ -16,7 +16,13 @@ from tests.waiting import wait_until
 import psutil
 import pytest
 
-from hermes_constants import apply_scratch_tmp_env, get_scratch_dir, prune_scratch_dir
+from hermes_constants import (
+    apply_scratch_tmp_env,
+    export_scratch_tmp_env,
+    get_scratch_dir,
+    prune_scratch_dir,
+    sync_scratch_tmp_after_profile_env,
+)
 
 
 def test_scratch_env_follows_home_and_respects_user_tmpdir(tmp_path):
@@ -826,4 +832,63 @@ def test_relocated_prune_log_goes_to_hermes_home(tmp_path, monkeypatch):
     assert log.is_file()
     assert "idle" in log.read_text(encoding="utf-8-sig")
     assert not (safe.parent / "logs" / "scratch-prune.log").exists()
+
+
+def _clear_temps(monkeypatch):
+    for key in ("TMPDIR", "TMP", "TEMP", "HERMES_SCRATCH_DIR"):
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_scratch_pin_survives_reexport(tmp_path):
+    """An explicit HERMES_SCRATCH_DIR is not wiped when temps are exported again."""
+    home = tmp_path / "home"
+    pinned = tmp_path / "pinned"
+    env = {"HERMES_HOME": str(home), "HERMES_SCRATCH_DIR": str(pinned)}
+    assert apply_scratch_tmp_env(env) is True
+    assert env["TMPDIR"] == env["TMP"] == env["TEMP"] == str(pinned)
+    assert env["HERMES_SCRATCH_DIR"] == str(pinned)
+    assert apply_scratch_tmp_env(env) is True
+    assert env["TMPDIR"] == str(pinned)
+    assert env["HERMES_SCRATCH_DIR"] == str(pinned)
+    proof = pinned / "proof.txt"
+    proof.write_text("ok", encoding="utf-8")
+    assert proof.read_text(encoding="utf-8") == "ok"
+
+
+def test_profile_pin_replaces_boot_tmpdir(tmp_path, monkeypatch):
+    """A pin that arrives after the boot export replaces the classic temp dir."""
+    home = tmp_path / "home"
+    pinned = tmp_path / "pinned"
+    _pin_home(monkeypatch, home)
+    monkeypatch.delenv("HERMES_WRITE_SAFE_ROOT", raising=False)
+    _clear_temps(monkeypatch)
+    assert export_scratch_tmp_env() is True
+    assert os.environ["TMPDIR"] == str(home / "cache" / "scratch")
+    monkeypatch.setenv("HERMES_SCRATCH_DIR", str(pinned))
+    assert sync_scratch_tmp_after_profile_env() is True
+    assert os.environ["TMPDIR"] == os.environ["TMP"] == os.environ["TEMP"] == str(pinned)
+    assert os.environ["HERMES_SCRATCH_DIR"] == str(pinned)
+
+
+def test_exported_tmpdir_and_prompt_follow_safe_root(tmp_path, monkeypatch):
+    """After the profile safe root is known, temps and the prompt name that scratch."""
+    home = tmp_path / "home"
+    safe = tmp_path / "safe"
+    _pin_home(monkeypatch, home)
+    monkeypatch.delenv("HERMES_WRITE_SAFE_ROOT", raising=False)
+    _clear_temps(monkeypatch)
+    assert export_scratch_tmp_env() is True
+    assert os.environ["TMPDIR"] == str(home / "cache" / "scratch")
+    monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(safe))
+    assert sync_scratch_tmp_after_profile_env() is True
+    expected = str(safe / "scratch")
+    assert os.environ["TMPDIR"] == os.environ["TMP"] == os.environ["TEMP"] == expected
+    from agent.prompt_builder import _local_host_hints
+    hints = "\n".join(_local_host_hints())
+    assert f"Scratch directory: {expected}" in hints
+    from agent.file_safety import is_write_denied
+    proof = Path(expected) / "proof.txt"
+    assert is_write_denied(str(proof)) is False
+    proof.write_text("ok", encoding="utf-8")
+    assert proof.read_text(encoding="utf-8") == "ok"
 

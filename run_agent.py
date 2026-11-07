@@ -94,6 +94,13 @@ from hermes_cli.timeouts import get_provider_request_timeout, get_provider_stale
 
 _hermes_home = get_hermes_home()  # read by agent_init via _ra()._hermes_home
 _loaded_env_paths = load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).parent / '.env')
+# The boot export ran before this load. Re-point temps now that the profile's
+# write-safe root and scratch pin are in the environment.
+try:
+    from hermes_constants import sync_scratch_tmp_after_profile_env
+    sync_scratch_tmp_after_profile_env()
+except Exception:
+    pass
 for _env_path in _loaded_env_paths:
     logger.info("Loaded environment variables from %s", _env_path)
 if not _loaded_env_paths:

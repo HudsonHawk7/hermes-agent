@@ -715,6 +715,13 @@ from hermes_cli.env_loader import load_hermes_dotenv
 # helpers inside the import probe) — ``_early_recovery._should_skip_external_secret_sources``
 # owns that argv check for every dotenv load in the process. See #73381.
 load_hermes_dotenv(project_env=PROJECT_ROOT / ".env")
+# The boot export ran before this load. Re-point temps now that the profile's
+# write-safe root and scratch pin are in the environment.
+try:
+    from hermes_constants import sync_scratch_tmp_after_profile_env
+    sync_scratch_tmp_after_profile_env()
+except Exception:
+    pass
 
 # Bridge security.redact_secrets → HERMES_REDACT_SECRETS BEFORE hermes_logging
 # imports agent.redact, which snapshots the flag exactly once at import. A
