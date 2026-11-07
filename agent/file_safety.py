@@ -219,10 +219,22 @@ def build_write_denied_prefixes(home: str) -> list[str]:
     return [os.path.realpath(p) + os.sep for p in paths]
 
 
+# Directories the kanban dispatcher hands a worker to write in: its task workspace and
+# its run temp folder under ``kanban.worker_temp_root``.
+_HERMES_ASSIGNED_WRITE_DIR_VARS = ("HERMES_KANBAN_WORKSPACE", "HERMES_WORKER_TEMP_ROOT")
+
+
 def get_safe_write_roots() -> set[str]:
-    """Resolved HERMES_WRITE_SAFE_ROOT paths (``os.pathsep``-separated list)."""
+    """Resolved write-safe roots: the ``HERMES_WRITE_SAFE_ROOT`` list (``os.pathsep``-separated)
+    plus, when that list is set, the directories Hermes itself assigned this process to write in
+    (``_HERMES_ASSIGNED_WRITE_DIR_VARS``). Hermes must never point a worker at a folder and then
+    refuse the write. Unset ``HERMES_WRITE_SAFE_ROOT`` still means no safe-root restriction."""
+    configured = [p for p in os.getenv("HERMES_WRITE_SAFE_ROOT", "").split(os.pathsep) if p]
+    if not configured:
+        return set()
+    assigned = [os.getenv(var, "").strip() for var in _HERMES_ASSIGNED_WRITE_DIR_VARS]
     roots: set[str] = set()
-    for path in filter(None, os.getenv("HERMES_WRITE_SAFE_ROOT", "").split(os.pathsep)):
+    for path in (*configured, *(p for p in assigned if p and os.path.isabs(os.path.expanduser(p)))):
         with suppress(OSError, ValueError):
             roots.add(os.path.realpath(os.path.expanduser(path)))
     return roots

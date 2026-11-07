@@ -32,7 +32,7 @@ import { writeEnvFile, writeMockProviderConfig } from '../../../tests-js/scripts
 import { type MockServerOptions, startMockServer } from '../../../tests-js/scripts/mock-server'
 import { isDesktopE2eHidden } from '../electron/e2e-hidden'
 
-import { electronProcessesMatching } from './core/process-census'
+import { electronProcessesMatching, sandboxProcessesOf } from './core/process-census'
 import { resolveElectronBinary } from './electron-binary'
 import { installErrorBannerGuard } from './test'
 
@@ -292,15 +292,21 @@ export function reapSandboxGatewayRuns(hermesHome: string): {
     }
   }
 
-  // Also kill any gateway-run process whose parent was just killed (pair child).
-  // Tree-kill usually covers this; this is a belt-and-suspenders pass.
-  const afterKill = listGatewayRunProcesses()
+  // Second pass: the environment census. A `gateway run` whose lock is already gone — or was never
+  // written because the worker died mid-spec — shows its home only in its own environment, so the
+  // command-line pass below can never see it. `sandboxProcessesOf` compares environments.
   const killedSet = new Set(killed)
 
-  for (const proc of afterKill) {
-    // Parent may already be gone; if cmdline is gateway and we still have lock
-    // pids alive as parents, tree-kill again. Fallback: if hermesHome marker
-    // appears in cmdline (rare), kill it.
+  for (const proc of sandboxProcessesOf(hermesHome)) {
+    if (!killedSet.has(proc.pid)) {
+      killProcessTree(proc.pid)
+      killed.push(proc.pid)
+      killedSet.add(proc.pid)
+    }
+  }
+
+  // Last resort: a gateway-run whose command line does happen to name the home.
+  for (const proc of listGatewayRunProcesses()) {
     const cmd = proc.commandLine.toLowerCase()
     const homeNeedle = hermesHome.replace(/\\/g, '/').toLowerCase()
     const homeNeedleWin = hermesHome.replace(/\//g, '\\').toLowerCase()
@@ -507,12 +513,24 @@ export function buildAppEnv(sandbox: Sandbox, extra: Record<string, string> = {}
     ? path.join(REPO_ROOT, '.venv', 'Scripts')
     : path.join(REPO_ROOT, '.venv', 'bin')
 
-  const pathKey = process.platform === 'win32' && clean.Path && !clean.PATH ? 'Path' : 'PATH'
-  const priorPath = clean[pathKey] ?? clean.PATH ?? clean.Path ?? ''
-
+  // Windows spawn() reads `Path`; Node also copies `PATH`. If only one is
+  // updated, Electron still finds the live install's hermes first. A worktree
+  // `venv` symlink into the live install then becomes the backend interpreter.
+  const priorPath = clean.PATH ?? clean.Path ?? ''
   const nextPath = priorPath
     ? `${venvBin}${path.delimiter}${priorPath}`
     : venvBin
+  clean.PATH = nextPath
+  if (process.platform === 'win32') {
+    clean.Path = nextPath
+  }
+
+  const worktreePython = process.platform === 'win32'
+    ? path.join(REPO_ROOT, '.venv', 'Scripts', 'python.exe')
+    : path.join(REPO_ROOT, '.venv', 'bin', 'python')
+  if (!clean.HERMES_DESKTOP_PYTHON && fs.existsSync(worktreePython)) {
+    clean.HERMES_DESKTOP_PYTHON = worktreePython
+  }
 
   // Windows/Electron resolve userData via APPDATA + name. Point them at the
   // sandbox so a faked HOME never leaves Electron unable to resolve paths
@@ -524,7 +542,6 @@ export function buildAppEnv(sandbox: Sandbox, extra: Record<string, string> = {}
 
   return {
     ...clean,
-    [pathKey]: nextPath,
     HERMES_HOME: sandbox.hermesHome,
     HERMES_DESKTOP_USER_DATA_DIR: sandbox.userDataDir,
     HERMES_DESKTOP_IGNORE_EXISTING: '1',

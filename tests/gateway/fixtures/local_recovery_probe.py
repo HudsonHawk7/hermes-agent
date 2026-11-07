@@ -14,6 +14,7 @@ import time
 
 from websockets.asyncio.client import connect
 from tests.gateway.test_normal_runtime_boot import control
+from tests.process_custody import kill_tree, spawn
 from tests.waiting import async_wait_until
 
 
@@ -74,7 +75,7 @@ def websocket(home, desc, **kw):
 def daemon(root, home, env, *, barrier, fixture='local_recovery_daemon.py'):
     command = [sys.executable, str(root / 'tests/gateway/fixtures' / fixture)] if barrier else [sys.executable, '-m', 'gateway.run']
     with (home / ('first.log' if barrier else 'restart.log')).open('w+') as log:
-        proc = subprocess.Popen(command, cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
+        proc = spawn(command, cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         try:
             deadline = time.monotonic() + 120
             desc = {}
@@ -92,7 +93,7 @@ def daemon(root, home, env, *, barrier, fixture='local_recovery_daemon.py'):
             yield proc, desc
         finally:
             if proc.poll() is None:
-                proc.kill()
+                kill_tree(proc)
             proc.wait(timeout=10)
 
 

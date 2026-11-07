@@ -197,3 +197,15 @@ describe('dedupeGeneratedImageEchoesInParts', () => {
     expect(dedupeGeneratedImageEchoesInParts(parts)).toEqual(parts)
   })
 })
+
+describe('video_generate results', () => {
+  it('strips the generated video path the model restated in prose', () => {
+    const parts = [
+      { result: { success: true, video: '/tmp/gen/clip.mp4' }, toolName: 'video_generate', type: 'tool-call' },
+      { text: 'Here it is /tmp/gen/clip.mp4', type: 'text' }
+    ]
+
+    expect(generatedImageEchoSources(parts)).toEqual(['/tmp/gen/clip.mp4'])
+    expect(dedupeGeneratedImageEchoesInParts(parts)[1]).toMatchObject({ text: 'Here it is ' })
+  })
+})

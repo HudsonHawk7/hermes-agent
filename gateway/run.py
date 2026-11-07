@@ -1393,7 +1393,7 @@ def _last_transcript_timestamp(history: Optional[list[dict[str, Any]]]) -> Any:
 
 
 # Tool output may hold literal MEDIA: examples (docs, logs); only deliberate media producers may auto-append.
-_AUTO_APPEND_MEDIA_TOOL_NAMES = {"text_to_speech", "text_to_speech_tool", "image_generate"}
+_AUTO_APPEND_MEDIA_TOOL_NAMES = {"text_to_speech", "text_to_speech_tool", "image_generate", "video_generate"}
 
 # Replay-history canonicalization lives in agent/replay_cleanup.py so every resume
 # surface and the send path share one implementation.
@@ -1423,7 +1423,8 @@ def _strip_auto_continue_noise(content: Any) -> Any:
     return text
 
 # Tools whose deliverable is a JSON payload with a local-file path field rather than a literal ``MEDIA:`` tag.
-_JSON_MEDIA_TOOL_PATH_FIELDS = ("host_image", "image", "agent_visible_image")
+_JSON_MEDIA_TOOL_PATH_FIELDS = ("host_image", "image", "agent_visible_image", "video")
+_JSON_MEDIA_TOOLS = {"image_generate", "video_generate"}
 
 
 # Extension-anchored MEDIA: matcher (mirrors the dispatch site); a bare ``MEDIA:`` in prose never auto-appends.
@@ -1472,8 +1473,8 @@ def _collect_auto_append_media_tags(
             continue
         content = str(msg.get("content") or "")
         tool_name = tool_name_by_call_id.get(call_id)
-        # image_generate emits a JSON path field, not a MEDIA: tag; extract it: deterministic delivery.
-        if tool_name == "image_generate" and "MEDIA:" not in content:
+        # image_generate / video_generate emit a JSON path field, not a MEDIA: tag; extract it: deterministic delivery.
+        if tool_name in _JSON_MEDIA_TOOLS and "MEDIA:" not in content:
             try:
                 payload = json.loads(content)
             except Exception:
@@ -1497,6 +1498,44 @@ def _collect_auto_append_media_tags(
             has_voice_directive = True
 
     return media_tags, has_voice_directive
+
+
+def _collect_cron_inbound_media_tags(
+    messages: list[dict[str, Any]], history_offset: int = 0,
+    history_media_paths: Optional[set] = None) -> list[str]:
+    """Collect MEDIA tags from this turn's cron / no-agent bot-chat user admission.
+
+    Cron script output is admitted as a user message shaped by ``bot_chat_message``
+    (``[Cronjob \"…\" output — …]``). Those MEDIA lines must attach to the companion reply
+    even when she omits or mangles paths — delivery must not depend on the model copying
+    file paths exactly.
+    """
+    from gateway.platforms.base import BasePlatformAdapter
+
+    history_media_paths = history_media_paths or set()
+    if not messages:
+        return []
+    if history_offset > len(messages):
+        # Compression shrank the list; scan every user message that looks like a cron admission.
+        turn_msgs = messages
+    else:
+        turn_msgs = messages[history_offset:]
+    tags: list[str] = []
+    for msg in turn_msgs:
+        if msg.get("role") != "user":
+            continue
+        content = str(msg.get("content") or "")
+        if "MEDIA:" not in content:
+            continue
+        # bot_chat_message prefix: [Cronjob "name" output — …
+        if "[Cronjob " not in content and "[cronjob " not in content.lower():
+            continue
+        media_files, _ = BasePlatformAdapter.extract_media(content)
+        for path, _is_voice in media_files:
+            if path and path not in history_media_paths:
+                tags.append(f"MEDIA:{path}")
+                history_media_paths = history_media_paths | {path}
+    return list(dict.fromkeys(tags))
 
 
 def _collect_history_media_paths(agent_history: list[dict[str, Any]]) -> set:
@@ -1528,7 +1567,7 @@ def _collect_history_media_paths(agent_history: list[dict[str, Any]]) -> set:
         if role == "assistant":
             continue
         cid = str(msg.get("tool_call_id") or msg.get("call_id") or "")
-        if tool_name_by_call_id.get(cid) == "image_generate":
+        if tool_name_by_call_id.get(cid) in _JSON_MEDIA_TOOLS:
             try:
                 payload = json.loads(content)
             except Exception:

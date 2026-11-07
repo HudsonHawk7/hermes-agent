@@ -80,7 +80,16 @@ class CustomProfile(ProviderProfile):
                 # "none" / "default"; any graded level ("medium", "high") 400s (#75089).
                 top_level["reasoning_effort"] = "default"
             elif effort:
-                top_level["reasoning_effort"] = clamp_effort(effort, OPENAI_COMPAT_WIRE_EFFORTS)
+                # Ollama /v1 treats reasoning_effort="minimal" as thinking ON
+                # (same as omitting the field). Measured on gemma4-26b: the only
+                # off switch is "none". Map the least-thinking level to that so
+                # a configured `minimal` does not dump thousands of reasoning
+                # tokens into the live turn.
+                if effort == "minimal" and _looks_like_ollama_endpoint(ctx.get("base_url")):
+                    top_level["reasoning_effort"] = "none"
+                    extra_body["think"] = False
+                else:
+                    top_level["reasoning_effort"] = clamp_effort(effort, OPENAI_COMPAT_WIRE_EFFORTS)
         return extra_body, top_level
 
     def fetch_models(
