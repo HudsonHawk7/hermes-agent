@@ -802,10 +802,11 @@ _IMAGE_ERROR_RULES = (
 _VIDEO_ERROR_RULES = (
     (_BILLING_HINTS, _IMAGE_ERROR_RULES[0][1]),
     (("does not support", "not support video", "content_policy", "multimodal",
-      "unrecognized request argument", "video input", "video_url"),
+      "unrecognized request argument", "video input", "video_url", "invalid message format"),
      "The model does not support video analysis or the request was "
      "rejected. Ensure you're using a video-capable model "
-     "(e.g. google/gemini-2.5-flash). Error: {e}"),
+     "(e.g. google/gemini-2.5-flash), or extract a few frames with ffmpeg "
+     "and look at them with vision_analyze. Error: {e}"),
     (_SIZE_ERROR_HINTS,
      "The video is too large for the API. Try compressing or trimming "
      "the video (max ~50 MB). Error: {e}"),
@@ -1166,6 +1167,8 @@ async def _materialize_video(video_url: str, task_id: Optional[str], temp_paths:
         raise_if_read_blocked(str(local_path))
         logger.info("Using local video file: %s", video_url)
         return local_path
+    if path_like:
+        raise ValueError(f"video file not found: '{local_path}'. Check the path; search_files finds a file by name.")
     if await _validate_image_url_async(video_url):
         blocked = check_website_access(video_url)
         if blocked:
