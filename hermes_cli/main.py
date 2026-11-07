@@ -362,6 +362,7 @@ from hermes_cli.subcommands.pause import build_pause_parser
 from hermes_cli.subcommands.webhook import build_webhook_parser
 from hermes_cli.subcommands.hooks import build_hooks_parser
 from hermes_cli.subcommands.doctor import build_doctor_parser
+from hermes_cli.carry_merge import build_carry_parser
 from hermes_cli.subcommands.verify import build_verify_parser
 from hermes_cli.subcommands.security import build_security_parser
 from hermes_cli.subcommands.approvals import build_approvals_parser
@@ -1835,6 +1836,13 @@ cmd_kanban = _forward_command("cmd_kanban", "hermes_cli.kanban", "kanban_command
 cmd_project = _forward_command("cmd_project", "hermes_cli.projects_cmd", "projects_command", forward_return=True, doc='Manage projects (named, multi-folder workspaces).')
 cmd_hooks = _forward_command("cmd_hooks", "hermes_cli.hooks", "hooks_command", doc='Shell-hook inspection and management.')
 cmd_doctor = _forward_command("cmd_doctor", "hermes_cli.doctor", "run_doctor", forward_return=True, doc='Check configuration and dependencies.')
+cmd_carry_merge = _forward_command(
+    "cmd_carry_merge",
+    "hermes_cli.carry_merge",
+    "run_carry_merge",
+    forward_return=True,
+    doc="Merge the fork's force/carry into this install and rebuild.",
+)
 cmd_dump = _forward_command("cmd_dump", "hermes_cli.dump", "run_dump", doc='Dump setup summary for support/debugging.')
 cmd_debug = _forward_command("cmd_debug", "hermes_cli.debug", "run_debug", doc='Debug tools (share report, etc.).')
 cmd_skin = _forward_command("cmd_skin", "hermes_cli.skin_cmd", "skin_command", doc='Skin management (list / use / set).')
@@ -2437,7 +2445,7 @@ def _coalesce_session_name_args(argv: list) -> list:
     """
     _SUBCOMMANDS = {
         "chat", "model", "gateway", "setup", "whatsapp", "whatsapp-cloud", "login", "logout",
-        "auth", "status", "cron", "doctor", "config", "pairing", "skills", "tools", "mcp",
+        "auth", "status", "cron", "doctor", "carry", "config", "pairing", "skills", "tools", "mcp",
         "sessions", "insights", "update", "uninstall", "profile", "dashboard", "serve",
         "desktop", "gui", "honcho", "claw", "plugins", "security", "acp", "webhook", "peer",
         "memory", "dump", "debug", "backup", "import", "completion", "logs", "usage",
@@ -2760,7 +2768,7 @@ def cmd_console(args):
 # entry would let a plugin command silently fail to parse.
 _BUILTIN_SUBCOMMANDS = frozenset(
     {
-        "acp", "approvals", "auth", "backup", "bundles", "checkpoints", "codex-runtime", "completion",
+        "acp", "approvals", "auth", "backup", "bundles", "carry", "checkpoints", "codex-runtime", "completion",
         "computer-use", "connectors",
         "config", "console", "cron", "curator", "dashboard", "serve", "debug", "doctor",
         "dump", "egress", "fallback", "gateway", "hooks", "import", "insights",
@@ -3346,6 +3354,7 @@ def _build_cli_parser():
 
     build_hooks_parser(subparsers, cmd_hooks=cmd_hooks)
     build_doctor_parser(subparsers, cmd_doctor=cmd_doctor)
+    build_carry_parser(subparsers, cmd_carry_merge=cmd_carry_merge)
     build_verify_parser(subparsers, cmd_verify=cmd_verify)
     build_security_parser(subparsers, cmd_security=cmd_security)
     build_approvals_parser(subparsers, cmd_approvals=cmd_approvals)

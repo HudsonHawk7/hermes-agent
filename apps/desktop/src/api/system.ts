@@ -292,6 +292,31 @@ export function runSecurityAudit(): Promise<ActionResponse> {
   })
 }
 
+export interface CarryMergePlan {
+  repo: string
+  remote: string
+  branch: string
+  commands: string[]
+  checks_out_another_branch: boolean
+}
+
+export function getCarryMergePlan(): Promise<CarryMergePlan> {
+  return hermesApi<CarryMergePlan>({
+    ...profileScoped(),
+    path: '/api/ops/carry-merge/plan',
+    method: 'GET'
+  })
+}
+
+export function runCarryMerge(): Promise<ActionResponse> {
+  return hermesApi<ActionResponse>({
+    ...profileScoped(),
+    path: '/api/ops/carry-merge',
+    method: 'POST',
+    body: {}
+  })
+}
+
 export function runBackup(): Promise<ActionResponse & { archive?: string }> {
   return hermesApi<ActionResponse & { archive?: string }>({
     ...profileScoped(),
