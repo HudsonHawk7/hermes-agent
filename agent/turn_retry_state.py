@@ -16,6 +16,11 @@ class TurnRetryState:
 
     # Per-provider OAuth / credential refresh guards
     codex_auth_retry_attempted: bool = False
+    # OAuth 401, or 403 bad-credentials, on a client that loaded from the auth
+    # store: re-read the store once, then refresh once. A later iteration gets
+    # a fresh state, so a token that goes stale hours later can recover again.
+    oauth_stale_reread_attempted: bool = False
+    oauth_stale_refresh_attempted: bool = False
     anthropic_auth_retry_attempted: bool = False
     nous_auth_retry_attempted: bool = False
     nous_paid_entitlement_refresh_attempted: bool = False

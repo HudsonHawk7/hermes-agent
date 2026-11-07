@@ -597,6 +597,8 @@ def _run_agent(
             # commands via HERMES_YOLO_MODE=1, skill secret capture degrades gracefully.
             clarify_callback=_oneshot_clarify_callback,
         )
+        from agent.oauth_stale_recovery import note_oauth_auth_store
+        note_oauth_auth_store(agent, runtime)
         # Belt-and-braces: no streaming display callbacks may bypass our stdout capture.
         agent.suppress_status_output = True
         agent.stream_delta_callback = None

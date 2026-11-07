@@ -189,7 +189,16 @@ class ClientLifecycleMixin:
         from agent.process_bootstrap import build_keepalive_http_client
         return build_keepalive_http_client(base_url, verify=verify)
 
-    _create_openai_client = _forward("agent.agent_runtime_helpers", "create_openai_client")
+    _forwarded_create_openai_client = _forward("agent.agent_runtime_helpers", "create_openai_client")
+
+    def _create_openai_client(self, client_kwargs, *, reason: str, shared: bool):
+        client = self._forwarded_create_openai_client(client_kwargs, reason=reason, shared=shared)
+        # Constructors that never see runtime["source"] still track the auth
+        # store when the key they just loaded is the store's current token.
+        if reason == "agent_init":
+            from agent.oauth_stale_recovery import note_oauth_loaded_from_store
+            note_oauth_loaded_from_store(self)
+        return client
     _force_close_tcp_sockets = _forward_static("agent.agent_runtime_helpers", "force_close_tcp_sockets")
     _cleanup_dead_connections = _forward("agent.agent_runtime_helpers_dead_connections", "cleanup_dead_connections")
     _run_codex_stream = _forward("agent.codex_runtime", "run_codex_stream")
