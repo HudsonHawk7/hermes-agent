@@ -803,10 +803,8 @@ _VIDEO_ERROR_RULES = (
     (_BILLING_HINTS, _IMAGE_ERROR_RULES[0][1]),
     (("does not support", "not support video", "content_policy", "multimodal",
       "unrecognized request argument", "video input", "video_url", "invalid message format"),
-     "The model does not support video analysis or the request was "
-     "rejected. Ensure you're using a video-capable model "
-     "(e.g. google/gemini-2.5-flash), or extract a few frames with ffmpeg "
-     "and look at them with vision_analyze. Error: {e}"),
+     "The model cannot take this video, and sampling frames also failed. "
+     "Error: {e}"),
     (_SIZE_ERROR_HINTS,
      "The video is too large for the API. Try compressing or trimming "
      "the video (max ~50 MB). Error: {e}"),
@@ -875,6 +873,8 @@ async def _run_analysis(
             result["scale_note"] = scale_note
         debug_call_data.update(success=True, analysis_length=analysis_length)
         return finish(result)
+    except _NeedNativeFrames:
+        raise
     except Exception as e:
         error_msg = f"Error analyzing {kind}: {e!s}"
         logger.error("%s", error_msg, exc_info=True)
@@ -899,7 +899,12 @@ async def vision_analyze_tool(
     image_url: str, user_prompt: str, model: str | None = None,
     task_id: Optional[str] = None, region: Optional[list] = None, source_note: Optional[str] = None) -> str:
     """Describe an image (URL, local path, data: URL) with the auxiliary vision LLM. ``user_prompt``
-    is pre-formatted by the caller. Temp images live under $HERMES_HOME/cache/vision/."""
+    is pre-formatted by the caller. Temp images live under $HERMES_HOME/cache/vision/.
+
+    A video file takes the frame path instead of being rejected as a non-image.
+    """
+    if _is_video_source(image_url):
+        return await _aux_video_frames_json(image_url, user_prompt, model, task_id)
     async def stage(prompt: str, debug_call_data: dict, temp_paths: list) -> tuple:
         prepared = await _prepare_image(image_url, task_id, region, validate_decode=False)
         temp_paths.append(prepared.path)
@@ -976,7 +981,7 @@ VISION_ANALYZE_SCHEMA = {
         # doesn't need to predict plumbing.
         "Load an image into the conversation so you can see it. Call it "
         "any time the user references an image — then answer from what "
-        "you see."
+        "you see. A video file is sampled into frames and analyzed the same way."
     ),
     "parameters": {
         "type": "object",
@@ -1072,6 +1077,14 @@ def _newest_image_in_folder(source: Any) -> Optional[_FolderPick]:
 async def _handle_vision_analyze(args: dict[str, Any], **kw: Any) -> str:
     image_url, question, region = args.get("image_url", ""), args.get("question", ""), args.get("region")
     task_id = kw.get("task_id")
+    if _is_video_source(image_url):
+        if _should_use_native_vision_fast_path():
+            return await _native_video_frames(image_url, question, task_id)
+        full_prompt = (
+            "Fully describe and explain everything about this video, then answer the "
+            f"following question:\n\n{question}")
+        model = _configured_aux_model(("vision",), ("AUXILIARY_VISION_MODEL",))
+        return await vision_analyze_tool(image_url, full_prompt, model, task_id=task_id)
     try:
         pick = _newest_image_in_folder(image_url)
     except (OSError, ValueError) as exc:
@@ -1147,6 +1160,13 @@ async def _materialize_video(video_url: str, task_id: Optional[str], temp_paths:
     local_path = Path(os.path.expanduser(source))
     lowered = (video_url or "").strip().lower()
     path_like = bool(lowered) and not lowered.startswith(("http://", "https://", "data:"))
+    # NT-namespace and credential-read checks before any stat, resolve, or ffmpeg.
+    if path_like:
+        from agent.file_safety import get_nt_namespace_error, raise_if_read_blocked
+        nt_error = get_nt_namespace_error(source, verb="Read")
+        if nt_error:
+            raise ValueError(nt_error)
+        raise_if_read_blocked(str(local_path))
     if not _is_local_terminal_backend() and path_like:
         logger.info("Reading video source via terminal backend: %s", video_url)
         suffix = Path(source).suffix.lower()
@@ -1189,11 +1209,200 @@ async def _materialize_video(video_url: str, task_id: Optional[str], temp_paths:
     raise ValueError("Invalid video source. Provide an HTTP/HTTPS URL or a valid local file path.")
 
 
+class _NeedNativeFrames(Exception):
+    """The main model can see images, so attach frames instead of calling aux."""
+
+
+def _is_video_source(source: str) -> bool:
+    """True for a video file path, video URL, or data:video/ payload."""
+    if not isinstance(source, str):
+        return False
+    raw = source.strip()
+    if not raw:
+        return False
+    if raw.lower().startswith("data:video/"):
+        return True
+    path = urlparse(raw).path if "://" in raw else raw
+    return Path(path).suffix.lower() in _VIDEO_MIME_TYPES
+
+
+def _is_unsupported_video_error(exc: BaseException) -> bool:
+    """The ``_VIDEO_ERROR_RULES`` 'does not support video' class, including Ollama's 400."""
+    err = str(exc).lower()
+    hints = _VIDEO_ERROR_RULES[1][0]
+    return any(hint in err for hint in hints)
+
+
+def _main_model_route() -> tuple[str, str]:
+    """Main-model provider and base URL, or empty strings. Never raises."""
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        model = cfg.get("model") if isinstance(cfg, dict) else None
+        if not isinstance(model, dict):
+            return "", ""
+        provider = str(model.get("provider") or "").strip().lower()
+        base_url = str(model.get("base_url") or model.get("api_base") or "").strip()
+        return provider, base_url
+    except Exception:
+        return "", ""
+
+
+def _aux_route_rejects_video_parts() -> bool:
+    """True when the aux vision route is a local OpenAI-compatible endpoint.
+
+    Ollama, llama.cpp, and vLLM reject a video_url part. Gemini and other
+    video-capable routes still get the video part. An unknown route returns
+    False so we try the video and fall back on the error class.
+    """
+    provider = ""
+    url = ""
+    api_mode = ""
+    try:
+        from agent.auxiliary_client import _resolve_task_provider_model
+        provider, _model, base_url, _key, api_mode = _resolve_task_provider_model("vision")
+        url = str(base_url or "").strip()
+        provider = (provider or "").strip().lower()
+    except Exception:
+        return False
+    if provider in {"", "auto"} or not url:
+        main_provider, main_url = _main_model_route()
+        if provider in {"", "auto"}:
+            provider = main_provider
+        if not url:
+            url = main_url
+    if provider in {"gemini", "google", "vertex"}:
+        return False
+    if not url:
+        return False
+    try:
+        from agent.model_metadata import is_local_endpoint
+        if not is_local_endpoint(url):
+            return False
+    except Exception:
+        return False
+    if (api_mode or "").strip().lower() in {"anthropic_messages", "codex_responses"}:
+        return False
+    return True
+
+
+def _sample_encoded_frames(video_path: Path) -> tuple[list[tuple[float, str]], str]:
+    """Jpeg data-URLs plus the 'analyzed N frames at t=...' note. Temps are removed."""
+    from tools.vision_video_frames import extract_frames, frames_note, remove_tree
+    dest = _secure_cache_dir("cache/video", "temp_video_files") / f"frames-{uuid.uuid4().hex[:8]}"
+    dest.mkdir(parents=True, exist_ok=True)
+    try:
+        samples = extract_frames(video_path, dest)
+        encoded = [
+            (ts, _image_to_base64_data_url(path, "image/jpeg"))
+            for ts, path in samples
+        ]
+        return encoded, frames_note([ts for ts, _path in samples])
+    finally:
+        remove_tree(dest)
+
+
+def _frame_messages(user_prompt: str, encoded: list[tuple[float, str]], note: str) -> list:
+    prompt = user_prompt or "Describe what happens in this video."
+    content: list[dict] = [{
+        "type": "text",
+        "text": (
+            f"{prompt}\n\n"
+            "The video file could not be sent to the model. "
+            f"These are still frames sampled from it. {note}."
+        ),
+    }]
+    for ts, data_url in encoded:
+        content.append({"type": "text", "text": f"Frame at t={ts:.2f}s"})
+        content.append({"type": "image_url", "image_url": {"url": data_url}})
+    return [{"role": "user", "content": content}]
+
+
+async def _aux_frames_analysis(video_path: Path, user_prompt: str, model: Optional[str]) -> str:
+    encoded, note = _sample_encoded_frames(video_path)
+    messages = _frame_messages(user_prompt, encoded, note)
+    call_kwargs = _aux_call_kwargs(messages, model, 180.0, min_timeout=180.0)
+    analysis = await _call_vision_llm(call_kwargs, "Empty frame response, retrying once")
+    analysis = analysis or ""
+    if note not in analysis:
+        analysis = f"{analysis}\n\n{note}".strip()
+    return analysis
+
+
+def _video_error_json(exc: BaseException) -> str:
+    err = str(exc)
+    return json.dumps({
+        "success": False,
+        "error": f"Error analyzing video: {err}",
+        "analysis": err,
+    }, indent=2, ensure_ascii=False)
+
+
+async def _aux_video_frames_json(
+    video_url: str, user_prompt: str, model: Optional[str], task_id: Optional[str],
+) -> str:
+    temp_paths: list = []
+    try:
+        path = await _materialize_video(video_url, task_id, temp_paths)
+        analysis = await _aux_frames_analysis(path, user_prompt, model)
+        return json.dumps({"success": True, "analysis": analysis}, indent=2, ensure_ascii=False)
+    except Exception as exc:
+        return _video_error_json(exc)
+    finally:
+        for item in temp_paths:
+            if item and item.exists():
+                try:
+                    item.unlink()
+                except Exception:
+                    pass
+
+
+async def _native_video_frames(video_url: str, question: str, task_id: Optional[str]) -> Any:
+    """Attach sampled frames so a vision-capable main model sees them directly."""
+    temp_paths: list = []
+    try:
+        path = await _materialize_video(video_url, task_id, temp_paths)
+        encoded, note = _sample_encoded_frames(path)
+    except Exception as exc:
+        return _video_error_json(exc)
+    finally:
+        for item in temp_paths:
+            if item and item.exists():
+                try:
+                    item.unlink()
+                except Exception:
+                    pass
+    content: list[dict] = [{"type": "text", "text": f"{note}\n\nQuestion: {question}"}]
+    for ts, data_url in encoded:
+        content.append({"type": "text", "text": f"Frame at t={ts:.2f}s"})
+        content.append({"type": "image_url", "image_url": {"url": data_url}})
+    return {
+        "_multimodal": True,
+        "content": content,
+        "text_summary": note,
+        "meta": {
+            "video_url": (video_url or "")[:200],
+            "native_vision": True,
+            "frames": len(encoded),
+        },
+    }
+
+
 async def video_analyze_tool(
     video_url: str, user_prompt: str, model: str | None = None, task_id: Optional[str] = None) -> str:
-    """Analyze a video via multimodal LLM. Returns JSON {success, analysis}."""
+    """Analyze a video via multimodal LLM. Returns JSON {success, analysis}.
+
+    When the model cannot take a video part, sample frames and send those
+    instead. A native-vision main model gets the frames attached directly.
+    """
+    if _should_use_native_vision_fast_path() and _aux_route_rejects_video_parts():
+        return await _native_video_frames(video_url, user_prompt, task_id)
+
     async def stage(prompt: str, debug_call_data: dict, temp_paths: list) -> tuple:
         temp_video_path = await _materialize_video(video_url, task_id, temp_paths)
+        if _aux_route_rejects_video_parts():
+            analysis = await _aux_frames_analysis(temp_video_path, prompt, model)
+            return analysis, None
         video_size_bytes = temp_video_path.stat().st_size
         video_size_mb = video_size_bytes / (1024 * 1024)
         logger.info("Video ready (%.1f MB)", video_size_mb)
@@ -1211,9 +1420,21 @@ async def video_analyze_tool(
         debug_call_data["video_size_bytes"] = video_size_bytes
         messages = _media_messages(prompt, "video_url", video_data_url)
         call_kwargs = _aux_call_kwargs(messages, model, 180.0, min_timeout=180.0)
-        analysis = await _call_vision_llm(call_kwargs, "Empty video response, retrying once")
-        return analysis, None
-    return await _run_analysis("video", video_url, user_prompt, model, stage)
+        try:
+            analysis = await _call_vision_llm(call_kwargs, "Empty video response, retrying once")
+            return analysis, None
+        except Exception as exc:
+            if not _is_unsupported_video_error(exc):
+                raise
+            if _should_use_native_vision_fast_path():
+                raise _NeedNativeFrames()
+            analysis = await _aux_frames_analysis(temp_video_path, prompt, model)
+            return analysis, None
+
+    try:
+        return await _run_analysis("video", video_url, user_prompt, model, stage)
+    except _NeedNativeFrames:
+        return await _native_video_frames(video_url, user_prompt, task_id)
 
 
 VIDEO_ANALYZE_SCHEMA = {
@@ -1223,6 +1444,7 @@ VIDEO_ANALYZE_SCHEMA = {
         "Sends the video to a video-capable model (e.g. Gemini) for understanding. "
         "Use this for video files — for images, use vision_analyze instead. "
         "Supports mp4, webm, mov, avi, mkv, mpeg formats. "
+        "If the model cannot take video, this tool samples frames with ffmpeg and analyzes those. "
         "Note: large videos (>20 MB) may be slow; max ~50 MB."
     ),
     "parameters": {
