@@ -257,6 +257,31 @@ def _lexical_path(path: Path | str) -> Path:
     return Path(_path_key(os.path.abspath(path)))
 
 
+def _dotenv_workspaces_root() -> Optional[Path]:
+    """Scratch root named in the install-home ``.env``, not the worker pin.
+
+    Cleanup runs in the worker. ``HERMES_HOME`` is the profile, whose
+    ``.env`` does not set ``HERMES_KANBAN_WORKSPACES_ROOT``. The spawn pin
+    sets that name in the process env to a board workspaces dir.
+    ``get_env_value_prefer_dotenv`` reads the profile file, then that pin,
+    and never the install-home file the folder was created under.
+    """
+    try:
+        from agent.secret_scope import load_env_file
+        from hermes_constants import get_default_hermes_root
+
+        install = get_default_hermes_root()
+        raw = (
+            load_env_file(install / ".env").get("HERMES_KANBAN_WORKSPACES_ROOT")
+            or ""
+        ).strip()
+    except Exception:
+        return None
+    if not raw:
+        return None
+    return Path(raw).expanduser()
+
+
 def _managed_scratch_path_info(p: Path) -> tuple[bool, Optional[str]]:
     """Return whether *p* is managed scratch storage and the matching board.
 
@@ -302,6 +327,19 @@ def _managed_scratch_path_info(p: Path) -> tuple[bool, Optional[str]]:
                 (override_root.name,),
                 None,
             )
+    # The worker pin above can name a board dir. The folder may still live
+    # under the root named in the install-home .env, which is the root
+    # creation used. A profile .env does not carry that value.
+    configured = _dotenv_workspaces_root()
+    if configured is not None and _path_key(configured) != _path_key(override):
+        with contextlib.suppress(OSError):
+            configured_parent = configured.parent
+            _add_root(
+                configured_parent,
+                configured_parent.resolve(strict=False),
+                (configured.name,),
+                None,
+            )
     try:
         home = _kb.kanban_home()
         # Resolve the shared anchor once, not once per board root.
@@ -345,7 +383,9 @@ def _scratch_workspace(conn: sqlite3.Connection, task_id: str) -> Optional[Path]
 
 def _is_managed_scratch_path(p: Path) -> bool:
     """True iff *p* is a STRICT descendant of a kanban-managed ``workspaces/``
-    root (``HERMES_KANBAN_WORKSPACES_ROOT``, ``<kanban_home>/kanban/workspaces``,
+    root (``HERMES_KANBAN_WORKSPACES_ROOT`` in the process env, the same
+    variable in the install-home ``.env`` even when the worker pin names a
+    board dir or is unset, ``<kanban_home>/kanban/workspaces``,
     or ``<kanban_home>/kanban/boards/<slug>/workspaces``). A path equal to a
     root is not managed (deleting it would wipe every task's scratch dir);
     ``<kanban_home>/kanban``, ``.../logs`` and ``.../boards/<slug>`` hold

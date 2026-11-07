@@ -4473,13 +4473,32 @@ def _resolve_fallback_entry(entry: dict[str, Any]) -> tuple[Optional[Any], Optio
     return client, resolved_model
 
 
+def _provider_follows_main_chain(resolved_provider: Optional[str]) -> bool:
+    """True for the ``provider: main`` sentinel.
+
+    ``main`` means "whatever the main agent uses", including its
+    ``fallback_providers`` policy. It is not an explicit vendor pin, and it is
+    not ``auto``: do not discover other logged-in providers.
+    """
+    return (resolved_provider or "").strip().lower() == "main"
+
+
+# Quota (weekly cap, credit) is classified as "payment error". A dropped
+# connection stays on the explicit-provider path — only a cap walks the chain.
+_MAIN_CHAIN_CAPACITY_REASONS = frozenset({"payment error", "rate limit"})
+
+
 def _try_main_fallback_chain(
     task: Optional[str], failed_provider: str = "", reason: str = "error", *,
     failed_model: Optional[str] = None, failed_base_url: str = "", failure_scope: Any = None,
 ) -> tuple[Optional[Any], Optional[str], str]:
-    """Top-level main-agent fallback chain for a ``provider: auto`` auxiliary call: auto tasks honour the
-    user's main fallback policy before the built-in discovery chain; read via ``get_fallback_chain`` so
-    ``fallback_providers`` and legacy ``fallback_model`` keep the main agent's order."""
+    """Top-level main-agent fallback chain for ``provider: auto`` and ``provider: main``.
+
+    Both honour the user's main fallback policy. ``auto`` may still continue into
+    the built-in discovery chain; ``main`` stops at this chain. Read via
+    ``get_fallback_chain`` so ``fallback_providers`` and legacy ``fallback_model``
+    keep the main agent's order.
+    """
     try:
         from hermes_cli.config import load_config_readonly
         from hermes_cli.fallback_config import get_fallback_chain
@@ -7811,22 +7830,27 @@ def _ladder_credential_rungs(
 def _next_fallback_after_quarantine(
     task: Optional[str], resolved_provider: str, is_auto: bool, route: _LadderRoute,
     failed_model: Optional[str], failure_scope: Any, *, task_chain_only: bool = False,
+    walk_main_chain: bool = False,
 ) -> tuple[Optional[Any], Optional[str], str]:
     """Next candidate after a fallback entry was quarantined mid-request (dead credential or a
-    capacity error): remaining configured entries (task chain, then main chain on auto) before the
-    discovery chain. ``task_chain_only`` (explicit-provider auth error) stops at the task chain —
-    the user never opted that task into discovery or the main model."""
+    capacity error): remaining configured entries (task chain, then main chain on auto or
+    ``provider: main``) before the discovery chain. ``task_chain_only`` (explicit-provider auth
+    error) stops at the task chain — the user never opted that task into discovery or the main
+    model. ``walk_main_chain`` continues the main agent's ``fallback_providers`` and does not
+    guess another logged-in provider."""
     reason = "fallback candidate unavailable"
     fb = _try_configured_fallback_chain(
         task, resolved_provider or "auto", reason=reason, failed_model=failed_model,
         failed_base_url=route.base_info, failure_scope=failure_scope)
     if task_chain_only:
         return fb
-    if fb[0] is None and is_auto:
+    if fb[0] is None and (is_auto or walk_main_chain):
         fb = _try_main_fallback_chain(
             task, resolved_provider or "auto", reason=reason, failed_model=failed_model,
             failed_base_url=route.base_info, failure_scope=failure_scope)
-    if fb[0] is None:
+    # provider: main already applied the main fallback policy. Discovery guesses
+    # other logged-in providers, which that sentinel does not allow.
+    if fb[0] is None and not walk_main_chain:
         fb = _try_payment_fallback(
             resolved_provider, task, reason=reason, failed_base_url=route.base_info,
             failure_scope=failure_scope, main_runtime=route.main_runtime)
@@ -7849,6 +7873,12 @@ def _ladder_provider_fallback(first_err: Exception, route: _LadderRoute):
     # #52228. See #26803: daily token quota must fall back like a 402 credit error.
     is_auto = resolved_provider in {"auto", "", None}
     reason = next((label for predicate, label in _FALLBACK_REASONS if predicate(first_err)), None)
+    # provider: main follows the main agent's fallback_providers on a cap
+    # (payment, quota, rate-limit). It does not discover other providers.
+    walk_main_chain = (
+        _provider_follows_main_chain(resolved_provider)
+        and reason in _MAIN_CHAIN_CAPACITY_REASONS
+    )
     is_capacity_error = any(
         predicate(first_err) for predicate, label in _FALLBACK_REASONS if label != "auth error")
     task_chain = _get_auxiliary_task_config(task).get("fallback_chain") if task else None
@@ -7888,14 +7918,19 @@ def _ladder_provider_fallback(first_err: Exception, route: _LadderRoute):
     fb_client, fb_model, fb_label = _try_configured_fallback_chain(
         task, resolved_provider or "auto", reason=reason, failed_model=_chain_failed_model,
         failed_base_url=route.base_info, failure_scope=_chain_failure_scope)
-    if fb_client is None and is_auto:
+    if fb_client is None and (is_auto or walk_main_chain):
         fb_client, fb_model, fb_label = _try_main_fallback_chain(
             task, resolved_provider or "auto", reason=reason, failed_model=_chain_failed_model,
             failed_base_url=route.base_info, failure_scope=_chain_failure_scope)
-        if fb_client is None:
+        if fb_client is None and is_auto:
             fb_client, fb_model, fb_label = _try_payment_fallback(
                 resolved_provider, task, reason=reason, failed_base_url=route.base_info,
                 failure_scope=_chain_failure_scope, main_runtime=route.main_runtime)
+        elif fb_client is None and walk_main_chain and not explicit_auth_with_task_chain:
+            # Chain empty or exhausted: same last resort an explicit pin already had.
+            fb_client, fb_model, fb_label = _try_main_agent_model_fallback(
+                resolved_provider, task, reason=reason, failed_model=_chain_failed_model,
+                failed_base_url=route.base_info, failure_scope=_chain_failure_scope)
     elif fb_client is None and not explicit_auth_with_task_chain:
         fb_client, fb_model, fb_label = _try_main_agent_model_fallback(
             resolved_provider, task, reason=reason, failed_model=_chain_failed_model,
@@ -7918,7 +7953,7 @@ def _ladder_provider_fallback(first_err: Exception, route: _LadderRoute):
             return fb_resp
         fb_client, fb_model, fb_label = _next_fallback_after_quarantine(
             task, resolved_provider, is_auto, route, _chain_failed_model, _chain_failure_scope,
-            task_chain_only=explicit_auth_with_task_chain)
+            task_chain_only=explicit_auth_with_task_chain, walk_main_chain=walk_main_chain)
     # All fallback layers exhausted: one user-visible warning (#26882), then the caller re-raises.
     logger.warning("Auxiliary %s%s: %s on %s and all fallbacks exhausted "
                    "(fallback_chain + main agent model). Raising the primary error.",

@@ -267,6 +267,15 @@ def _reg(module: str, handler: str | None = None) -> _CliSurface:
 
 # root -> (surface, subcommand paths as a ``_paths`` spec). Registered in this order.
 _CLI_FAMILIES: dict[str, tuple[_CliSurface, str]] = {
+    "carry": (
+        _CliSurface(
+            "extracted",
+            "hermes_cli.carry_merge",
+            "build_carry_parser",
+            "cmd_carry_merge",
+        ),
+        "*merge",
+    ),
     "dump": (_sub("dump", "build_dump_parser", "cmd_dump"), "."),
     "debug": (_sub("debug", "build_debug_parser", "cmd_debug"), "*share, *delete"),
     "prompt-size": (_sub("prompt_size", "build_prompt_size_parser", "cmd_prompt_size"), "."),
