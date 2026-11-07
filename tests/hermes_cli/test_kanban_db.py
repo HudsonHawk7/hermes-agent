@@ -992,37 +992,53 @@ def test_is_managed_scratch_path_rejects_kanban_metadata_subtrees(kanban_home):
     assert kb._is_managed_scratch_path(task_dir)
 
 
-def test_scratch_cleanup_accepts_dotenv_root_when_worker_pin_is_a_board_dir(
+def test_scratch_cleanup_reads_install_dotenv_when_profile_lacks_the_key(
     kanban_home, tmp_path, monkeypatch
 ):
-    """A worker pin must not hide the root the folder was created under.
+    """A profile worker must accept the install-home ``.env`` root.
 
-    Live refusal: cleanup runs in the worker, whose
-    ``HERMES_KANBAN_WORKSPACES_ROOT`` is a board workspaces dir, while the
-    scratch folder lives under the root named in ``~/.hermes/.env``. The
-    check must accept that configured root, and still refuse a path that is
-    under neither root.
+    Cleanup runs in the worker. ``HERMES_HOME`` is the profile, and that
+    profile ``.env`` does not set ``HERMES_KANBAN_WORKSPACES_ROOT``. The
+    spawn pin, an emptied pin, and an unset pin must not hide the value in
+    the install-home ``.env``. A path under neither root is still refused.
+    The check calls the real reader. Do not mock it.
     """
-    board_root = kanban_home / "kanban" / "boards" / "chat-rescue" / "workspaces"
-    board_root.mkdir(parents=True)
+    import hermes_constants as hc
+
+    install = hc._get_platform_default_hermes_home()
+    assert install.resolve().is_relative_to(tmp_path.resolve()), (
+        f"install home escaped the sandbox: {install}"
+    )
+    profile = install / "profiles" / "worker"
+    profile.mkdir(parents=True)
     configured = tmp_path / "configured-workspaces"
     task_dir = configured / "t_example"
     task_dir.mkdir(parents=True)
     outsider = tmp_path / "user-data" / "project"
     outsider.mkdir(parents=True)
-    monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", str(board_root))
-
-    def _prefer_dotenv(key: str):
-        if key == "HERMES_KANBAN_WORKSPACES_ROOT":
-            return str(configured)
-        return None
-
-    monkeypatch.setattr(
-        "hermes_cli.config.get_env_value_prefer_dotenv", _prefer_dotenv
+    board_root = kanban_home / "kanban" / "boards" / "chat-rescue" / "workspaces"
+    board_root.mkdir(parents=True)
+    (install / ".env").write_text(
+        "HERMES_KANBAN_WORKSPACES_ROOT='" + configured.as_posix() + "'\n",
+        encoding="utf-8",
     )
-    assert kb._is_managed_scratch_path(task_dir)
-    assert not kb._is_managed_scratch_path(configured)
-    assert not kb._is_managed_scratch_path(outsider)
+    (profile / ".env").write_text("OTHER_KEY=present\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+
+    def _assert_roots() -> None:
+        found = kbw._dotenv_workspaces_root()
+        assert found is not None
+        assert found.resolve() == configured.resolve()
+        assert kb._is_managed_scratch_path(task_dir)
+        assert not kb._is_managed_scratch_path(configured)
+        assert not kb._is_managed_scratch_path(outsider)
+
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", str(board_root))
+    _assert_roots()
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", "")
+    _assert_roots()
+    monkeypatch.delenv("HERMES_KANBAN_WORKSPACES_ROOT", raising=False)
+    _assert_roots()
 
 
 @pytest.mark.require_symlinks
