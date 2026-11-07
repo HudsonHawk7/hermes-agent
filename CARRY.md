@@ -27,3 +27,51 @@ Cherry-picks of each original merge's first-parent diff:
 | leftover unique live commit `318d6935545` | `ea70ba44229` | bound version_info git probes (not in the six PRs; brought so nothing is lost) |
 
 After these land, `git diff force/live force/carry` is carry-ahead work only (the 78 commits live never received).
+
+## Ongoing Force plugin carries (scene_builder, image_gen, etc.)
+
+`force/carry` is the long-lived development branch for the local install.
+
+**Preferred update model (GM direction 2026-11-06):** stay on `force/carry` permanently. When upstream advances, merge latest `origin/main` into `force/carry` (exactly as a normal feature branch). Build and run from the merged branch.
+
+Set in the relevant `config.yaml` (profile or install):
+
+```yaml
+updates:
+  parked_branch_strategy: update_in_place
+  auto_switch_parked_branch: false
+```
+
+`hermes update` (when safe) will then automatically merge `origin/main` **into** `force/carry` instead of switching away or stashing. Your carry commits (including config preservation for Force plugins) travel forward automatically on every update. On divergence it creates a merge commit behind a safety tag. Conflicts stop cleanly for resolution — the "hard cherry-pick" work happens at merge time, once.
+
+After merge + update, full desktop/gateway restart to pick up source + plugin changes. Verify with:
+
+`HERMES_PROFILE=darkeyes python -c "
+from hermes_cli.config import load_config_readonly
+cfg = load_config_readonly()
+print('scene_builder present:', 'scene_builder' in cfg)
+print('recipes_root:', cfg.get('scene_builder', {}).get('recipes_root'))
+"`
+
+## Current carries on force/carry (in addition to historical live ports)
+
+| Commit | What | Notes |
+|--------|------|-------|
+| 8027813a14c | preserve unknown top-level config sections (scene_builder etc) in load_config_readonly() | Hermes core fix so Force plugins always see their sections after merge/canonicalize. Paired with Force_2.1 side patch in Tools/hermes-force-media. |
+
+Add new rows here before pushing a carry. Upstream the individual fix as a normal PR from a short-lived branch off origin/main when appropriate.
+
+## Automation
+
+Two helper scripts live in `scripts/`:
+
+- `carry-merge-upstream.ps1` (Windows, primary for this machine)
+- `carry-merge-upstream.sh` (bash)
+
+Run either when you want to bring upstream forward while keeping the branch + all carries.
+
+They do the merge (carries come along), then the pm install / rebuild step, and print the exact verify command + restart instructions.
+
+You can also just run `hermes update` (after the config setting above) — the `update_in_place` strategy makes Hermes itself perform the merge into `force/carry`.
+
+Either way, the result is the same fluent model: your branch is the source of truth for the local install, upstream is merged in on demand, carries persist without manual cherry-picks after every release.
