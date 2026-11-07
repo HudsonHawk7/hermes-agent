@@ -134,6 +134,29 @@ def _stray_route_target(authority, receipt, session_id):
     return True
 
 
+def install_local_gateway_handler(authority, adapter) -> None:
+    """Mount the inbound handler a connected platform would have gotten.
+
+    Local adapters are built here, not by platform connect, so nothing else
+    installs one. Without it, ``handle_message`` drops every inbound wake once
+    per process and the durable item retries at the next gateway start.
+    """
+    if getattr(adapter, '_message_handler', None) is not None:
+        return
+    runner = getattr(authority, 'runner', None)
+    if runner is None:
+        return
+    registry = getattr(runner, 'session_authorities', None)
+    name = registry.profile_name(authority) if registry is not None else None
+    configure = getattr(runner, '_configure_profile_adapter', None)
+    if name and callable(configure):
+        configure(adapter, name, Platform.LOCAL)
+        return
+    wire = getattr(runner, '_wire_adapter_handlers', None)
+    if callable(wire):
+        wire(adapter)
+
+
 def restore_local_session(authority, sid):
     from gateway.session_authority import LiveSession
     from gateway.session_local import LocalSessionAdapter
@@ -195,6 +218,7 @@ def restore_local_session(authority, sid):
                                    and not _stray_route_target(authority, receipt, current.session_id)):
                 raise RuntimeStoreError('admission_conflict')
             current.session_id = target
+    install_local_gateway_handler(authority, adapter)
     return SessionRef(authority.profile_id, sid)
 
 
