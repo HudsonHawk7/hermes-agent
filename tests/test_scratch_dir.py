@@ -16,7 +16,13 @@ from tests.waiting import wait_until
 import psutil
 import pytest
 
-from hermes_constants import apply_scratch_tmp_env, get_scratch_dir, prune_scratch_dir
+from hermes_constants import (
+    apply_scratch_tmp_env,
+    export_scratch_tmp_env,
+    get_scratch_dir,
+    prune_scratch_dir,
+    sync_scratch_tmp_after_profile_env,
+)
 
 
 def test_scratch_env_follows_home_and_respects_user_tmpdir(tmp_path):
@@ -41,7 +47,10 @@ def test_scratch_env_follows_home_and_respects_user_tmpdir(tmp_path):
 
 def test_bootstrap_import_exports_scratch_to_process_and_children(tmp_path):
     """``import hermes_bootstrap`` alone makes ``tempfile`` (this process AND a child) land in scratch."""
-    env = {k: v for k, v in os.environ.items() if k not in ("TMPDIR", "TMP", "TEMP", "HERMES_SCRATCH_DIR")}
+    # Drop the host write-safe root too: this case is the unset-root contract.
+    # A copied HERMES_WRITE_SAFE_ROOT would correctly relocate scratch.
+    env = {k: v for k, v in os.environ.items() if k not in (
+        "TMPDIR", "TMP", "TEMP", "HERMES_SCRATCH_DIR", "HERMES_WRITE_SAFE_ROOT")}
     env["HERMES_HOME"] = str(tmp_path)
     code = ("import tempfile, os, subprocess, sys; import hermes_bootstrap; "
             "print(tempfile.gettempdir()); "
@@ -692,4 +701,194 @@ def test_prune_owner_lookup_survives_symlinked_scratch_and_drops_orphaned_mcp_he
         if helper.poll() is None:
             helper.kill()
             helper.wait(timeout=10)
+
+
+def _pin_home(monkeypatch, home: Path) -> None:
+    """Make *home* the active Hermes home and clear a inherited scratch pin."""
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("HERMES_SCRATCH_DIR", raising=False)
+
+
+def test_safe_root_scratch_is_under_it_and_writable(tmp_path, monkeypatch):
+    """With a write-safe root and no scratch pin, scratch lives under that root
+    and write_file is allowed to put a file there."""
+    from agent.file_safety import is_write_denied
+
+    home = tmp_path / "home"
+    safe = tmp_path / "safe"
+    _pin_home(monkeypatch, home)
+    monkeypatch.delenv("HERMES_WRITE_SAFE_ROOT", raising=False)
+    monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(safe))
+    scratch = get_scratch_dir(prune=False)
+    assert scratch == safe / "scratch"
+    assert scratch.is_dir()
+    assert is_write_denied(str(scratch / "x")) is False
+
+
+def test_scratch_dir_override_wins_over_safe_root(tmp_path, monkeypatch):
+    """HERMES_SCRATCH_DIR is an explicit pin and beats the write-safe root."""
+    home = tmp_path / "home"
+    pinned = tmp_path / "pinned"
+    _pin_home(monkeypatch, home)
+    monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(tmp_path / "safe"))
+    monkeypatch.setenv("HERMES_SCRATCH_DIR", str(pinned))
+    scratch = get_scratch_dir(prune=False)
+    assert scratch == pinned
+    assert scratch.is_dir()
+
+
+def test_unset_safe_root_keeps_cache_scratch(tmp_path, monkeypatch):
+    """No override and no write-safe root: upstream ``<home>/cache/scratch``."""
+    home = tmp_path / "home"
+    _pin_home(monkeypatch, home)
+    monkeypatch.delenv("HERMES_WRITE_SAFE_ROOT", raising=False)
+    assert get_scratch_dir(prune=False) == home / "cache" / "scratch"
+
+
+def test_first_write_safe_root_is_the_scratch_parent(tmp_path, monkeypatch):
+    """A pathsep list uses the first root, not a later content share."""
+    home = tmp_path / "home"
+    first, second = tmp_path / "first", tmp_path / "second"
+    _pin_home(monkeypatch, home)
+    monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", os.pathsep.join((str(first), str(second))))
+    assert get_scratch_dir(prune=False) == first / "scratch"
+
+
+def test_foreign_home_ignores_process_safe_root(tmp_path, monkeypatch):
+    """An explicit other home stays ``<that>/cache/scratch`` so tests and a
+    routed profile do not inherit this process's write-safe root."""
+    other = tmp_path / "other-home"
+    monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(tmp_path / "safe"))
+    monkeypatch.setenv("HERMES_SCRATCH_DIR", str(tmp_path / "pinned"))
+    assert get_scratch_dir(other, prune=False) == other / "cache" / "scratch"
+
+
+def test_tmp_export_follows_safe_root_and_rederives_off_a_stale_pin(tmp_path):
+    """Boot export points TMPDIR at the safe-root scratch. A Hermes pin that
+    still names ``<home>/cache/scratch`` is re-derived, not kept."""
+    home, safe = tmp_path / "home", tmp_path / "safe"
+    classic = str(home / "cache" / "scratch")
+    env = {"HERMES_HOME": str(home), "HERMES_WRITE_SAFE_ROOT": str(safe)}
+    assert apply_scratch_tmp_env(env) is True
+    expected = str(safe / "scratch")
+    assert env["TMPDIR"] == env["TMP"] == env["TEMP"] == env["HERMES_SCRATCH_DIR"] == expected
+    assert os.path.isdir(expected)
+
+    stale = {
+        "HERMES_HOME": str(home),
+        "HERMES_WRITE_SAFE_ROOT": str(safe),
+        "TMPDIR": classic, "TMP": classic, "TEMP": classic,
+        "HERMES_SCRATCH_DIR": classic,
+    }
+    assert apply_scratch_tmp_env(stale) is True
+    assert stale["TMPDIR"] == expected
+
+
+def test_prune_never_touches_the_safe_root_or_anything_outside_scratch(tmp_path, monkeypatch):
+    """Prune deletes idle children of the scratch folder only. Pointing it at
+    the write-safe root itself deletes nothing."""
+    home, safe = tmp_path / "home", tmp_path / "safe"
+    safe.mkdir()
+    _pin_home(monkeypatch, home)
+    monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(safe))
+    scratch = get_scratch_dir(prune=False)
+    sibling = safe / "keep-me.txt"
+    sibling.write_text("keep", encoding="utf-8")
+    idle = scratch / "idle"
+    idle.mkdir()
+    (idle / "f").write_text("x", encoding="utf-8")
+    ancient = time.time() - 30 * 3600
+    for path in (idle, idle / "f", sibling, safe):
+        os.utime(path, (ancient, ancient))
+    assert prune_scratch_dir(scratch) == 1
+    assert not idle.exists()
+    assert sibling.is_file() and sibling.read_text(encoding="utf-8") == "keep"
+
+    doomed = safe / "doomed.txt"
+    doomed.write_text("no", encoding="utf-8")
+    os.utime(doomed, (ancient, ancient))
+    os.utime(safe, (ancient, ancient))
+    assert prune_scratch_dir(safe, max_idle_hours=0) == 0
+    assert doomed.is_file()
+    assert sibling.is_file()
+
+
+def test_relocated_prune_log_goes_to_hermes_home(tmp_path, monkeypatch):
+    """A scratch dir that is not ``<home>/cache/scratch`` must not walk up into
+    the safe root's parent. The log stays in the Hermes home."""
+    home, safe = tmp_path / "home", tmp_path / "safe"
+    _pin_home(monkeypatch, home)
+    scratch = safe / "scratch"
+    scratch.mkdir(parents=True)
+    idle = scratch / "idle"
+    idle.mkdir()
+    (idle / "f").write_text("x", encoding="utf-8")
+    ancient = time.time() - 30 * 3600
+    os.utime(idle, (ancient, ancient))
+    os.utime(idle / "f", (ancient, ancient))
+    assert prune_scratch_dir(scratch) == 1
+    log = home / "logs" / "scratch-prune.log"
+    assert log.is_file()
+    assert "idle" in log.read_text(encoding="utf-8-sig")
+    assert not (safe.parent / "logs" / "scratch-prune.log").exists()
+
+
+def _clear_temps(monkeypatch):
+    for key in ("TMPDIR", "TMP", "TEMP", "HERMES_SCRATCH_DIR"):
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_scratch_pin_survives_reexport(tmp_path):
+    """An explicit HERMES_SCRATCH_DIR is not wiped when temps are exported again."""
+    home = tmp_path / "home"
+    pinned = tmp_path / "pinned"
+    env = {"HERMES_HOME": str(home), "HERMES_SCRATCH_DIR": str(pinned)}
+    assert apply_scratch_tmp_env(env) is True
+    assert env["TMPDIR"] == env["TMP"] == env["TEMP"] == str(pinned)
+    assert env["HERMES_SCRATCH_DIR"] == str(pinned)
+    assert apply_scratch_tmp_env(env) is True
+    assert env["TMPDIR"] == str(pinned)
+    assert env["HERMES_SCRATCH_DIR"] == str(pinned)
+    proof = pinned / "proof.txt"
+    proof.write_text("ok", encoding="utf-8")
+    assert proof.read_text(encoding="utf-8") == "ok"
+
+
+def test_profile_pin_replaces_boot_tmpdir(tmp_path, monkeypatch):
+    """A pin that arrives after the boot export replaces the classic temp dir."""
+    home = tmp_path / "home"
+    pinned = tmp_path / "pinned"
+    _pin_home(monkeypatch, home)
+    monkeypatch.delenv("HERMES_WRITE_SAFE_ROOT", raising=False)
+    _clear_temps(monkeypatch)
+    assert export_scratch_tmp_env() is True
+    assert os.environ["TMPDIR"] == str(home / "cache" / "scratch")
+    monkeypatch.setenv("HERMES_SCRATCH_DIR", str(pinned))
+    assert sync_scratch_tmp_after_profile_env() is True
+    assert os.environ["TMPDIR"] == os.environ["TMP"] == os.environ["TEMP"] == str(pinned)
+    assert os.environ["HERMES_SCRATCH_DIR"] == str(pinned)
+
+
+def test_exported_tmpdir_and_prompt_follow_safe_root(tmp_path, monkeypatch):
+    """After the profile safe root is known, temps and the prompt name that scratch."""
+    home = tmp_path / "home"
+    safe = tmp_path / "safe"
+    _pin_home(monkeypatch, home)
+    monkeypatch.delenv("HERMES_WRITE_SAFE_ROOT", raising=False)
+    _clear_temps(monkeypatch)
+    assert export_scratch_tmp_env() is True
+    assert os.environ["TMPDIR"] == str(home / "cache" / "scratch")
+    monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(safe))
+    assert sync_scratch_tmp_after_profile_env() is True
+    expected = str(safe / "scratch")
+    assert os.environ["TMPDIR"] == os.environ["TMP"] == os.environ["TEMP"] == expected
+    from agent.prompt_builder import _local_host_hints
+    hints = "\n".join(_local_host_hints())
+    assert f"Scratch directory: {expected}" in hints
+    from agent.file_safety import is_write_denied
+    proof = Path(expected) / "proof.txt"
+    assert is_write_denied(str(proof)) is False
+    proof.write_text("ok", encoding="utf-8")
+    assert proof.read_text(encoding="utf-8") == "ok"
 

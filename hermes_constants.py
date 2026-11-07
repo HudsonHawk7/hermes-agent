@@ -813,9 +813,13 @@ def apply_subprocess_home_env(env: MutableMapping[str, str]) -> None:
 # --- Scratch dir: Hermes' own temp space, never the system /tmp ---
 # System temp is tmpfs on most Linux distros and containers, so browser profiles, PTY probes,
 # download spools and every ``tempfile.mkdtemp()`` a Hermes-launched script performs eat RAM
-# and vanish on reboot. ``HERMES_HOME/cache/scratch`` is real storage with an IDLE retention:
-# an entry lives while anything inside it is still being written and goes 24h after the last
-# write anywhere in its subtree. A fixed age was wrong both ways — a directory's own mtime only
+# and vanish on reboot. The scratch dir is real storage with an IDLE retention: an entry lives
+# while anything inside it is still being written and goes 24h after the last write anywhere
+# in its subtree. For the active home it is ``HERMES_SCRATCH_DIR`` if set, else
+# ``<first HERMES_WRITE_SAFE_ROOT>/scratch`` when that env is set, else
+# ``HERMES_HOME/cache/scratch``. A caller that names some other home keeps that home's
+# ``cache/scratch``. Existing ``cache/scratch`` content is left in place; the first boot just
+# starts using the new dir. A fixed age was wrong both ways — a directory's own mtime only
 # moves when a direct child is added or removed, so a lane writing deep inside a tree looked
 # untouched and lost its worktree at the deadline, while finished trees (a 7 GB clone with its
 # own venv per campaign lane) sat for three days and filled the disk.
@@ -969,8 +973,135 @@ def apply_secure_dir_policy(path, *, home: str | Path | None = None) -> None:
     _chown_to_hermes_uid(path)
 
 
-def get_scratch_dir(home: str | Path | None = None, *, prune: bool = True) -> Path:
-    """``<home>/cache/scratch`` (created, owner-only); *home* defaults to the active Hermes home.
+def _paths_same(left: Path, right: Path) -> bool:
+    """Case-insensitive absolute compare that does not require either path to exist."""
+    try:
+        return os.path.normcase(os.path.abspath(left)) == os.path.normcase(os.path.abspath(right))
+    except (OSError, ValueError):
+        return False
+
+
+def _expanded_path(raw: str) -> Path:
+    return Path(os.path.expanduser(os.path.expandvars(raw)))
+
+
+def _first_write_safe_root(source: Mapping[str, str]) -> Path | None:
+    """First non-empty entry of ``HERMES_WRITE_SAFE_ROOT``, or None."""
+    for part in source.get("HERMES_WRITE_SAFE_ROOT", "").split(os.pathsep):
+        part = part.strip()
+        if part:
+            return _expanded_path(part)
+    return None
+
+
+def _marker_is_prior_export(marker: str) -> bool:
+    """True when *marker* is a Hermes-exported ``<home>/cache/scratch``.
+
+    The boot export writes that shape before a write-safe root or a routed
+    home is known, so a later resolve re-derives it. Any other
+    ``HERMES_SCRATCH_DIR`` is an explicit pin and must survive.
+    """
+    if not marker or not str(marker).strip():
+        return False
+    try:
+        path = _expanded_path(str(marker).strip())
+    except (OSError, ValueError):
+        return False
+    return (
+        os.path.normcase(path.name) == "scratch"
+        and os.path.normcase(path.parent.name) == "cache"
+    )
+
+
+def _scratch_for_home(
+    home: Path,
+    source: Mapping[str, str] | None,
+    *,
+    honor_override: bool,
+) -> Path:
+    """Pick the scratch dir for *home*.
+
+    *source* is the env being configured (a child env, or this process). None
+    means this process, and the override / write-safe relocation apply only
+    when *home* is the active Hermes home — a caller that names some other
+    home keeps ``<home>/cache/scratch``. Nothing under an old ``cache/scratch``
+    is moved or deleted; the next boot just starts using the new dir.
+    """
+    classic = home / "cache" / "scratch"
+    if source is None:
+        try:
+            active = get_hermes_home()
+        except Exception:
+            return classic
+        if not _paths_same(home, active):
+            return classic
+        source = os.environ
+    if honor_override:
+        pinned = source.get(SCRATCH_DIR_MARKER_ENV, "").strip()
+        # A custom pin wins. The boot export's <home>/cache/scratch does not
+        # beat a write-safe root that arrived after that export.
+        if pinned and not (
+            _marker_is_prior_export(pinned) and _first_write_safe_root(source) is not None
+        ):
+            return _expanded_path(pinned)
+    safe = _first_write_safe_root(source)
+    if safe is not None:
+        return safe / "scratch"
+    return classic
+
+
+def _scratch_prune_log(root: Path) -> Path:
+    """Hermes-home log for a scratch prune.
+
+    ``<home>/cache/scratch`` still logs at ``<home>/logs``. A relocated scratch
+    must not walk two parents up into the safe root's parent (``S:\\ForceAgents\\logs``).
+    """
+    if root.name == "scratch" and root.parent.name == "cache":
+        return root.parent.parent / "logs" / "scratch-prune.log"
+    return get_hermes_home() / "logs" / "scratch-prune.log"
+
+
+def _scratch_may_prune(root: Path) -> bool:
+    """False when *root* is a filesystem root or a write-safe root itself.
+
+    The prune only deletes top-level children of the scratch folder. Pointing
+    it at the safe root (a bad pin, or a caller passing the wrong path) must
+    not wipe the agent folder.
+    """
+    try:
+        resolved = Path(os.path.abspath(root))
+    except (OSError, ValueError):
+        return False
+    if resolved == resolved.parent:
+        return False
+    for part in os.environ.get("HERMES_WRITE_SAFE_ROOT", "").split(os.pathsep):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            safe = Path(os.path.abspath(_expanded_path(part)))
+        except (OSError, ValueError):
+            continue
+        if os.path.normcase(str(resolved)) == os.path.normcase(str(safe)):
+            return False
+    return True
+
+
+def get_scratch_dir(
+    home: str | Path | None = None,
+    *,
+    prune: bool = True,
+    env: Mapping[str, str] | None = None,
+    honor_override: bool = True,
+) -> Path:
+    """Scratch dir for *home* (created, owner-only). *home* defaults to the active Hermes home.
+
+    Resolution, for the active home or for an *env* being configured: a custom
+    ``HERMES_SCRATCH_DIR`` if set, else ``<first HERMES_WRITE_SAFE_ROOT>/scratch``, else
+    ``<home>/cache/scratch``. A marker shaped like ``<home>/cache/scratch`` does not beat
+    a write-safe root: that shape is the boot export, written before the profile env loaded.
+    A caller that names some other home keeps that home's ``cache/scratch``, so a host-level
+    write-safe root does not redirect tests or a routed profile.
 
     Every Hermes process and child gets ``TMPDIR``/``TMP``/``TEMP`` pointed here at boot (see
     :func:`export_scratch_tmp_env`), so ``tempfile`` defaults land here without call sites
@@ -978,10 +1109,11 @@ def get_scratch_dir(home: str | Path | None = None, *, prune: bool = True) -> Pa
     and once per hour across processes (stamp file), so a fan-out of children stays cheap.
 
     Permissions follow :func:`apply_secure_dir_policy`, so an explicit ``HERMES_HOME_MODE`` or
-    a managed/shared home is honored instead of a blanket ``0700`` (#117347).
+    a managed/shared home is honored instead of a blanket ``0700`` (#117347). Existing
+    ``cache/scratch`` content is left where it is.
     """
     base = Path(home) if home is not None else get_hermes_home()
-    scratch = base / "cache" / "scratch"
+    scratch = _scratch_for_home(base, env, honor_override=honor_override)
     try:
         scratch.mkdir(parents=True, exist_ok=True)
         if sys.platform != "win32":
@@ -999,13 +1131,16 @@ def prune_scratch_dir(scratch: Path | None = None, max_idle_hours: float = SCRAT
     """Delete top-level scratch entries with no write anywhere in their subtree for
     *max_idle_hours*, reaping processes and git worktree registrations rooted in them
     first (``hermes_constants_scratch``); return the count removed. Each removal, each
-    kill and each entry rescued mid-prune is recorded in ``<home>/logs/scratch-prune.log``
-    (*scratch* is ``<home>/cache/scratch``)."""
+    kill and each entry rescued mid-prune is recorded in the Hermes home's
+    ``logs/scratch-prune.log``. Refuses to prune a write-safe root or a filesystem root.
+    """
     from hermes_constants_scratch import prune_idle_entries
 
     root = scratch if scratch is not None else get_scratch_dir(prune=False)
-    log_file = root.parent.parent / "logs" / "scratch-prune.log"
-    return prune_idle_entries(root, max_idle_hours, frozenset({_SCRATCH_PRUNE_STAMP}), log_file)
+    if not _scratch_may_prune(root):
+        return 0
+    return prune_idle_entries(
+        root, max_idle_hours, frozenset({_SCRATCH_PRUNE_STAMP}), _scratch_prune_log(root))
 
 
 def _prune_scratch_dir_once(scratch: Path) -> None:
@@ -1036,42 +1171,76 @@ def scratch_dir_usage_bytes(scratch: Path | None = None) -> int:
     return total
 
 
-def apply_scratch_tmp_env(env: MutableMapping[str, str]) -> bool:
+# Path the last process export wrote. A profile .env can replace
+# HERMES_SCRATCH_DIR after the boot export; temps still equal this path, and
+# that must not be treated as a user-chosen temp dir.
+_last_exported_tmp: str = ""
+
+
+def apply_scratch_tmp_env(env: MutableMapping[str, str], *, prune: bool = True) -> bool:
     """Point ``TMPDIR``/``TMP``/``TEMP`` in *env* at the scratch dir of ``env["HERMES_HOME"]``.
 
     A temp var the user (or the OS: macOS ``/var/folders``, Windows ``%TEMP%``) set is
-    respected and nothing changes. A value Hermes itself exported earlier — recognisable
-    because it equals ``HERMES_SCRATCH_DIR`` — is re-derived, so a child running under another
-    profile's home gets that home's scratch dir rather than its parent's. Returns True when
-    the vars were (re)written.
+    respected and nothing changes. A value this process exported earlier is recognised
+    when it equals ``HERMES_SCRATCH_DIR`` or the path the last process export wrote (a
+    profile ``.env`` can replace the marker after the boot export). A marker shaped like
+    ``<home>/cache/scratch`` is that boot export, so it is re-derived through
+    ``get_scratch_dir`` once the home or write-safe root is known. Any other
+    ``HERMES_SCRATCH_DIR`` is an explicit pin: temps follow it, and a second export does
+    not wipe it. Returns True when the vars were (re)written.
     """
+    global _last_exported_tmp
     ours = env.get(SCRATCH_DIR_MARKER_ENV, "")
+    recognized = {ours} if ours else set()
+    if env is os.environ and _last_exported_tmp:
+        recognized.add(_last_exported_tmp)
+    rederive = False
     for key in SCRATCH_TMP_ENV_VARS:
         value = env.get(key, "").strip()
-        if value and value != ours:
+        if value and value not in recognized:
             return False
+        if value and value == ours:
+            rederive = True
     home = env.get("HERMES_HOME", "").strip()
     try:
-        scratch = str(get_scratch_dir(_expand_hermes_home(home) if home else get_process_hermes_home()))
+        home_path = _expand_hermes_home(home) if home else get_process_hermes_home()
+        # A custom pin wins. A cache/scratch-shaped marker is the previous export,
+        # not a pin, so a routed home or a write-safe root can move it.
+        honor_pin = not (rederive and _marker_is_prior_export(ours))
+        scratch = str(get_scratch_dir(
+            home_path, env=env, honor_override=honor_pin, prune=prune))
     except (RuntimeError, OSError):
         # No HERMES_HOME and no resolvable user home (a child env built from nothing on
         # Windows): there is no scratch dir to point at; the child keeps the OS default.
         return False
+    before = os.environ.get("TMPDIR", "") if env is os.environ else ""
     for key in SCRATCH_TMP_ENV_VARS:
         env[key] = scratch
     env[SCRATCH_DIR_MARKER_ENV] = scratch
+    if env is os.environ:
+        _last_exported_tmp = scratch
+        if scratch != before:
+            import tempfile
+            tempfile.tempdir = None
     return True
 
 
-def export_scratch_tmp_env() -> bool:
+def export_scratch_tmp_env(*, prune: bool = True) -> bool:
     """Boot hook: apply :func:`apply_scratch_tmp_env` to this process and reset ``tempfile``'s
     cached default so ``tempfile.gettempdir()`` follows. Call again after anything that
-    re-homes the process (``--profile`` resolution); a user-set temp var is never overridden."""
-    changed = apply_scratch_tmp_env(os.environ)
-    if changed:
-        import tempfile
-        tempfile.tempdir = None
-    return changed
+    re-homes the process (``--profile`` resolution); a user-set temp var is never overridden.
+    """
+    return apply_scratch_tmp_env(os.environ, prune=prune)
+
+
+def sync_scratch_tmp_after_profile_env() -> bool:
+    """Re-point temps once the profile's safe root and scratch pin are loaded.
+
+    The boot export runs before ``load_hermes_dotenv``, so it can pin temps at
+    ``<home>/cache/scratch``. Call this after that load. Does not prune: a later
+    call must not delete scratch entries.
+    """
+    return export_scratch_tmp_env(prune=False)
 
 
 VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")

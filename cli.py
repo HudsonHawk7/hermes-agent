@@ -338,6 +338,13 @@ from agent.i18n import t as _t
 _hermes_home = get_hermes_home()
 _project_env = Path(__file__).parent / '.env'
 load_hermes_dotenv(hermes_home=_hermes_home, project_env=_project_env)
+# The boot export ran before this load. Re-point temps now that the profile's
+# write-safe root and scratch pin are in the environment.
+try:
+    from hermes_constants import sync_scratch_tmp_after_profile_env
+    sync_scratch_tmp_after_profile_env()
+except Exception:
+    pass
 
 
 CLI_CONFIG = load_cli_config()
