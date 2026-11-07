@@ -260,11 +260,17 @@ def _check_scratch_dir(hermes_home: Path, _DHH: str) -> None:
     from hermes_constants import (
         SCRATCH_DIR_MARKER_ENV, SCRATCH_MAX_IDLE_HOURS, get_scratch_dir, scratch_dir_usage_bytes)
     scratch = get_scratch_dir(hermes_home, prune=False)
+    classic = hermes_home / "cache" / "scratch"
+    try:
+        relocated = os.path.normcase(os.path.abspath(scratch)) != os.path.normcase(os.path.abspath(classic))
+    except OSError:
+        relocated = True
+    label = str(scratch).rstrip("\\/") if relocated else f"{_DHH}/cache/scratch"
     size = _human_bytes(scratch_dir_usage_bytes(scratch))
-    check_ok(f"{_DHH}/cache/scratch/ is the scratch dir (TMPDIR; {size}, entries pruned after {SCRATCH_MAX_IDLE_HOURS}h idle)")
+    check_ok(f"{label}/ is the scratch dir (TMPDIR; {size}, entries pruned after {SCRATCH_MAX_IDLE_HOURS}h idle)")
     from hermes_constants_scratch_stuck import removal_hint, stuck_entries
     for entry in stuck_entries(scratch):
-        check_warn(f"{_DHH}/cache/scratch/{entry.name}/ holds files you may not delete, so the prune skips it — {removal_hint(entry)}")
+        check_warn(f"{label}/{entry.name}/ holds files you may not delete, so the prune skips it — {removal_hint(entry)}")
     for name, nbytes in unpruned_cache_hogs(hermes_home):
         check_warn(
             f"{_DHH}/cache/{name}/ is {_human_bytes(nbytes)} and outside every pruner "
