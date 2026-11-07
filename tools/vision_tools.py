@@ -1030,7 +1030,9 @@ class _FolderPick(NamedTuple):
 def _newest_image_in_folder(source: Any) -> Optional[_FolderPick]:
     """A local folder source resolves to its newest image by modified time, so looking at a camera
     roll or screenshots folder costs one picture instead of a listing of every file in it.
-    ``None`` when ``source`` is not a local folder; ``FileNotFoundError`` when it holds no image."""
+    ``None`` when ``source`` is not a local folder; ``FileNotFoundError`` when it holds no image;
+    ``ValueError`` when the read guard refuses the path, checked before anything touches the disk
+    so a denied folder is never listed."""
     if not isinstance(source, str) or not source.strip():
         return None
     raw = source.strip()
@@ -1041,7 +1043,12 @@ def _newest_image_in_folder(source: Any) -> Optional[_FolderPick]:
     from tools.image_source import _is_local_terminal_backend
     if not _is_local_terminal_backend():
         return None
+    from agent.file_safety import get_nt_namespace_error, raise_if_read_blocked
+    nt_error = get_nt_namespace_error(raw, verb="Read")
+    if nt_error:
+        raise ValueError(nt_error)
     folder = Path(os.path.expanduser(raw))
+    raise_if_read_blocked(str(folder))
     if not folder.is_dir():
         return None
     from tools.file_operations import IMAGE_EXTENSIONS
@@ -1066,7 +1073,7 @@ async def _handle_vision_analyze(args: dict[str, Any], **kw: Any) -> str:
     task_id = kw.get("task_id")
     try:
         pick = _newest_image_in_folder(image_url)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         return tool_error(str(exc), success=False)
     source_note = None
     if pick is not None:

@@ -12,6 +12,7 @@ import base64
 import json
 import os
 from io import BytesIO
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -116,6 +117,39 @@ def test_non_local_backend_leaves_folder_sources_alone(camera_roll):
 
     with patch("tools.image_source._is_local_terminal_backend", return_value=False):
         assert _newest_image_in_folder(str(camera_roll)) is None
+
+
+@pytest.mark.parametrize("denied_dir", ["browser-profile", "mcp-tokens", "vault"])
+def test_read_denied_folder_is_refused_without_naming_its_files(denied_dir):
+    from hermes_constants import get_hermes_home
+
+    folder = get_hermes_home() / denied_dir
+    folder.mkdir(parents=True, exist_ok=True)
+    _write(folder / "secret_snapshot.png", _png_bytes((9, 9, 9)), 5_000)
+
+    with patch("tools.vision_tools._should_use_native_vision_fast_path", return_value=True):
+        result = _run(_handle_vision_analyze({"image_url": str(folder), "question": "?"}))
+
+    payload = json.loads(result)
+    assert payload["success"] is False
+    assert "Access denied" in payload["error"]
+    assert "secret_snapshot.png" not in result
+
+
+@pytest.mark.parametrize("raw", [r"\\?\UNC\fileserver\share\camera-roll", r"\\?\GLOBALROOT\Device\HarddiskVolume3\pics"])
+def test_nt_namespace_folder_is_refused_before_any_disk_access(raw):
+    def _no_disk(*args, **kwargs):
+        raise AssertionError("the folder was touched before the read guard refused it")
+
+    with patch("tools.vision_tools._should_use_native_vision_fast_path", return_value=True), \
+            patch("tools.vision_tools.os.scandir", side_effect=_no_disk), \
+            patch.object(Path, "is_dir", _no_disk), \
+            patch.object(Path, "resolve", _no_disk):
+        result = _run(_handle_vision_analyze({"image_url": raw, "question": "?"}))
+
+    payload = json.loads(result)
+    assert payload["success"] is False
+    assert "NT/device namespace" in payload["error"]
 
 
 def test_aux_result_json_carries_the_source_note():
