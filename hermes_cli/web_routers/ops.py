@@ -566,16 +566,6 @@ async def run_doctor(profile: Optional[str] = None):
                          prefix="Failed to run doctor", profile=profile)
 
 
-@router.post("/api/ops/carry-merge")
-async def run_carry_merge(profile: Optional[str] = None):
-    """Spawn the official carry merge (git + rebuild). This is the UI-exposed action
-    for Force plugin fluent builds. It reports active plugins so the UI updates with them.
-    """
-    return _spawn_action(["carry", "merge"], "carry-merge",
-                         log_msg="Failed to spawn carry merge",
-                         prefix="Failed to run carry merge", profile=profile)
-
-
 @router.post("/api/ops/security-audit")
 async def run_security_audit(profile: Optional[str] = None):
     return _spawn_action(

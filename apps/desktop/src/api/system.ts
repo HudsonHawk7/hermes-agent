@@ -292,17 +292,6 @@ export function runSecurityAudit(): Promise<ActionResponse> {
   })
 }
 
-export function runCarryMerge(): Promise<ActionResponse> {
-  // Official UI action for Force plugin carries. Replaces ad-hoc scripts.
-  // The backend reports active Force plugins so the component updates with them.
-  return hermesApi<ActionResponse>({
-    ...profileScoped(),
-    path: '/api/ops/carry-merge',
-    method: 'POST',
-    body: {}
-  })
-}
-
 export function runBackup(): Promise<ActionResponse & { archive?: string }> {
   return hermesApi<ActionResponse & { archive?: string }>({
     ...profileScoped(),

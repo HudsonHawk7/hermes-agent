@@ -33,8 +33,7 @@ vi.mock('@/hermes', async importOriginal => ({
   getCuratorStatus: vi.fn(() => new Promise(() => {})),
   getMemoryStatus: vi.fn(() => new Promise(() => {})),
   runDoctor: vi.fn(() => spawn('doctor')),
-  runSecurityAudit: vi.fn(() => spawn('security-audit')),
-  runCarryMerge: vi.fn(() => spawn('carry-merge'))
+  runSecurityAudit: vi.fn(() => spawn('security-audit'))
 }))
 
 beforeEach(() => {

@@ -13,7 +13,6 @@ import {
   type MemoryStatusResponse,
   resetMemory,
   runBackup,
-  runCarryMerge,
   runCurator,
   runDebugShare,
   runDoctor,
@@ -227,18 +226,6 @@ export function MaintenancePanel() {
           disabled={sharing}
           label={sharing ? mm.debugShareRunning : mm.debugShare}
           onRun={() => void shareDebug()}
-        />
-
-        {/* Force plugin carry UI component: official, not a tucked script.
-            Surfaces the automatic merge + rebuild.
-            "updates with our plugins" by reporting the enabled Force plugins in the action output
-            and label. The carry-merge backend reads plugins.enabled and prints the active ones
-            (scene-builder etc.) so the UI and logs stay in sync with the plugin roster. */}
-        <OpRow
-          description="Merge latest upstream into force/carry and rebuild. Keeps all Force plugin carries (scene-builder, image_gen etc.) automatically. Full restart required after."
-          disabled={actionStatus?.running === true}
-          label="Force carry merge (upstream + rebuild)"
-          onRun={() => void launch("Force carry merge", runCarryMerge)}
         />
 
         {share && Object.keys(share.urls).length > 0 && (
