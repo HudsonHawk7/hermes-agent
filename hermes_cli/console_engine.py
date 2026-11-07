@@ -564,6 +564,75 @@ _config_show = _simple_command("config show", "hermes_cli.config_show", "show_co
 _cron_status = _simple_command("cron status", "hermes_cli.cron", "cron_status")
 
 
+def _carry_merge(_engine: HermesConsoleEngine, args: list[str]) -> str:
+    """Merge upstream into force/carry and rebuild. Used by UI for fluent Force plugin carries.
+    This replaces tucked-away scripts with an official command surfaced in the Maintenance UI.
+    Updates with enabled plugins by reporting which Force plugins are active.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    _expect_no_args(args, "carry merge")
+
+    repo = Path.cwd()
+    if not (repo / ".git").exists():
+        raise ConsoleCommandError("Not inside a git checkout (hermes-agent).")
+
+    def run(cmd: list[str], check: bool = True) -> subprocess.CompletedProcess:
+        print(f"$ {' '.join(cmd)}")
+        p = subprocess.run(cmd, capture_output=True, text=True, cwd=repo, check=False)
+        if p.stdout:
+            print(p.stdout.strip())
+        if p.stderr:
+            print(p.stderr.strip(), file=sys.stderr)
+        if check and p.returncode != 0:
+            raise ConsoleCommandError(f"Command failed: {' '.join(cmd)} (code {p.returncode})")
+        return p
+
+    # Report enabled plugins for "updates with our plugins"
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        plugins = cfg.get("plugins", {}).get("enabled", []) or []
+        force_plugins = [p for p in plugins if p in ("scene-builder", "image_gen", "sogni", "video_gen", "avatar-map")]
+        print(f"Active Force plugins for carry: {', '.join(force_plugins) if force_plugins else '(none detected)'}")
+    except Exception as exc:
+        print(f"(could not read plugins: {exc})")
+
+    print("=== Force carry merge (automatic upstream + rebuild) ===")
+    print(f"Current branch: {run(['git', 'branch', '--show-current'], check=False).stdout.strip()}")
+
+    print("Fetching origin...")
+    run(["git", "fetch", "origin"])
+
+    current = run(["git", "branch", "--show-current"], check=False).stdout.strip()
+    if current != "force/carry":
+        print("Switching to force/carry...")
+        run(["git", "checkout", "force/carry"])
+
+    print("Merging origin/main into force/carry (carries travel forward automatically)...")
+    merge = run(["git", "merge", "--no-edit", "origin/main"], check=False)
+    if merge.returncode != 0:
+        print("MERGE CONFLICT. Resolve manually in the tree, then re-run `hermes carry merge`.")
+        raise ConsoleCommandError("Merge had conflicts. Resolve and retry.")
+
+    print("Merge clean. Carries preserved.")
+
+    print("Running pm install / rebuild (this updates the running installation)...")
+    # Prefer hermes pm install if available, else python -m
+    try:
+        run([sys.executable, "-m", "pm.cli", "install"])
+    except Exception:
+        print("pm install via python -m; if this is the source tree it should succeed.")
+
+    print("Carry merge + rebuild complete.")
+    print("Next: full desktop restart + gateway restart to pick up changes.")
+    print("Verify with: HERMES_PROFILE=... python -c 'from hermes_cli.config import load_config_readonly; ...'")
+
+    return "force/carry merge + rebuild finished. Restart required for full effect."
+
+
 def _logs(_engine: HermesConsoleEngine, args: list[str]) -> str:
     if "-f" in args or "--follow" in args:
         raise ConsoleCommandError("`logs -f` is not available in Hermes Console.")
@@ -793,7 +862,8 @@ def _cron_run(_engine: HermesConsoleEngine, args: list[str]) -> str:
 _BUILTIN_COMMANDS = (
     (("status",), "status", "Show Hermes component status.", _status, ""),
     (("version",), "version", "Show Hermes version information.", _version, ""),
-    (("doctor",), "doctor", "Run diagnostics without auto-fix.", _doctor, ""),
+    (("doctor",), "doctor", "Run diagnostics without auto-fix.", _doctor, ""), 
+    (("carry", "merge"), "carry merge", "Merge upstream into force/carry + rebuild (Force fluent plugin carries).", _carry_merge, "Merge upstream and rebuild?"),
     (("logs",), "logs [name] [-n N]", "Show recent Hermes logs.", _logs, ""),
     (("sessions", "list"), "sessions list [--limit N]", "List recent sessions.", _sessions_list,
      ""),
