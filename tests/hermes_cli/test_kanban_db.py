@@ -992,6 +992,55 @@ def test_is_managed_scratch_path_rejects_kanban_metadata_subtrees(kanban_home):
     assert kb._is_managed_scratch_path(task_dir)
 
 
+def test_scratch_cleanup_reads_install_dotenv_when_profile_lacks_the_key(
+    kanban_home, tmp_path, monkeypatch
+):
+    """A profile worker must accept the install-home ``.env`` root.
+
+    Cleanup runs in the worker. ``HERMES_HOME`` is the profile, and that
+    profile ``.env`` does not set ``HERMES_KANBAN_WORKSPACES_ROOT``. The
+    spawn pin, an emptied pin, and an unset pin must not hide the value in
+    the install-home ``.env``. A path under neither root is still refused.
+    The check calls the real reader. Do not mock it.
+    """
+    import hermes_constants as hc
+
+    install = hc._get_platform_default_hermes_home()
+    assert install.resolve().is_relative_to(tmp_path.resolve()), (
+        f"install home escaped the sandbox: {install}"
+    )
+    profile = install / "profiles" / "worker"
+    profile.mkdir(parents=True)
+    configured = tmp_path / "configured-workspaces"
+    task_dir = configured / "t_example"
+    task_dir.mkdir(parents=True)
+    outsider = tmp_path / "user-data" / "project"
+    outsider.mkdir(parents=True)
+    board_root = kanban_home / "kanban" / "boards" / "chat-rescue" / "workspaces"
+    board_root.mkdir(parents=True)
+    (install / ".env").write_text(
+        "HERMES_KANBAN_WORKSPACES_ROOT='" + configured.as_posix() + "'\n",
+        encoding="utf-8",
+    )
+    (profile / ".env").write_text("OTHER_KEY=present\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+
+    def _assert_roots() -> None:
+        found = kbw._dotenv_workspaces_root()
+        assert found is not None
+        assert found.resolve() == configured.resolve()
+        assert kb._is_managed_scratch_path(task_dir)
+        assert not kb._is_managed_scratch_path(configured)
+        assert not kb._is_managed_scratch_path(outsider)
+
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", str(board_root))
+    _assert_roots()
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", "")
+    _assert_roots()
+    monkeypatch.delenv("HERMES_KANBAN_WORKSPACES_ROOT", raising=False)
+    _assert_roots()
+
+
 @pytest.mark.require_symlinks
 def test_symlinked_workspaces_root_does_not_widen_scratch_cleanup(kanban_home, tmp_path):
     """A workspaces root that is a symlink to a broad directory must not make
