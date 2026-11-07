@@ -1999,7 +1999,25 @@ def _end_run(
         (status or outcome, outcome, summary, error, _json_or_null(metadata), now, run_id),
     )
     conn.execute("UPDATE tasks SET current_run_id = NULL WHERE id = ?", (task_id,))
+    _forget_stale_quota_stamp(conn, task_id, outcome)
     return run_id
+
+
+def _forget_stale_quota_stamp(conn: sqlite3.Connection, task_id: str, outcome: str) -> None:
+    """Drop quota/auth text when a run ends without failing.
+
+    ``consecutive_failures`` stays. A hand-back is not proof the breaker
+    pathology cleared; only ``complete_task`` resets that counter. The stamp
+    is different: it must not park the next spawn after the work moved on.
+    """
+    from hermes_cli.kanban_db_dispatch import _NON_FAILURE_RUN_OUTCOMES
+
+    if outcome not in _NON_FAILURE_RUN_OUTCOMES:
+        return
+    conn.execute(
+        "UPDATE tasks SET last_failure_error = NULL WHERE id = ?",
+        (task_id,),
+    )
 
 
 def _first_line(text: Optional[str], limit: int) -> str:
@@ -2047,6 +2065,7 @@ def _end_or_synthesize_run(
     run_id = _end_run(conn, task_id, outcome=outcome, status=status, summary=summary, metadata=metadata)
     if run_id is None and synthesize:
         run_id = _synthesize_ended_run(conn, task_id, outcome=outcome, summary=summary, metadata=metadata, profile=profile)
+        _forget_stale_quota_stamp(conn, task_id, outcome)
     return run_id
 
 

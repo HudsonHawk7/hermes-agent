@@ -99,3 +99,149 @@ def test_describe_suppression_names_task_ids_and_survives_redaction():
         "Last tick held back: blocker_auth=t_fb73530b.", force=True,
     )
     assert "t_fb73530b" not in eaten
+
+
+def _close_claimed_run(conn, task_id, run_id, outcome, ended_at, *, assignee="architect"):
+    """End a claimed run in SQL and hand the card back to ready.
+
+    Skips the lifecycle helpers on purpose: those helpers clear a quota stamp,
+    and the live bug is a stamp that survived an older review handoff.
+    """
+    conn.execute(
+        "UPDATE task_runs SET outcome = ?, status = ?, ended_at = ? WHERE id = ?",
+        (outcome, outcome, ended_at, run_id),
+    )
+    conn.execute(
+        """
+        UPDATE tasks
+           SET status = 'ready',
+               current_run_id = NULL,
+               claim_lock = NULL,
+               claim_expires = NULL,
+               worker_pid = NULL,
+               worker_started_at = NULL,
+               assignee = ?
+         WHERE id = ?
+        """,
+        (assignee, task_id),
+    )
+
+
+def test_changes_requested_after_rate_limit_respawns_implementer(
+    kanban_home, all_assignees_spawnable, monkeypatch,
+):
+    """rate_limited, then review_requested, then changes_requested; the next tick respawns.
+
+    Mirrors t_fb73530b: the quota stamp predates the clear-on-handoff, and
+    changes_requested is the latest run. That non-failure end must not park
+    the implementer.
+    """
+    monkeypatch.setenv("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", "300")
+    quota = "pid 1 exited rate-limited (quota wall) — requeued"
+    spawned: list[str] = []
+
+    def fake_spawn(task, workspace, board=None):
+        spawned.append(task.id)
+        return 4242
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="changes after quota", assignee="architect")
+        for outcome, ended_at in (
+            ("rate_limited", 5_000_000),
+            ("review_requested", 5_000_100),
+            ("changes_requested", 5_000_200),
+        ):
+            claimed = kb.claim_task(conn, tid)
+            assert claimed is not None and claimed.current_run_id
+            _close_claimed_run(conn, tid, claimed.current_run_id, outcome, ended_at)
+        conn.execute(
+            "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
+            (quota, tid),
+        )
+        conn.commit()
+
+        assert kbd.check_respawn_guard(conn, tid) is None
+        res = kbd.dispatch_once(conn, spawn_fn=fake_spawn)
+        assert tid in spawned
+        assert any(item[0] == tid for item in res.spawned)
+        assert tid not in [gid for gid, _reason in res.respawn_guarded]
+
+
+def test_request_changes_clears_stale_quota_stamp(kanban_home):
+    """A changes_requested end clears quota text the earlier handoff never saw."""
+    quota = "pid 1 exited rate-limited (quota wall) — requeued"
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="clear on changes", assignee="architect")
+        claimed = kb.claim_task(conn, tid)
+        assert claimed is not None and claimed.current_run_id
+        conn.execute(
+            "UPDATE task_runs SET outcome = 'rate_limited', status = 'rate_limited', "
+            "ended_at = 5000000 WHERE id = ?",
+            (claimed.current_run_id,),
+        )
+        conn.execute(
+            "UPDATE tasks SET status = 'ready', current_run_id = NULL, "
+            "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, "
+            "last_failure_error = ? WHERE id = ?",
+            (quota, tid),
+        )
+        conn.commit()
+        assert kb.request_review(conn, tid, reviewer="probe") is True
+        # The live stamp survived the handoff (it was written before that clear existed).
+        conn.execute(
+            "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
+            (quota, tid),
+        )
+        conn.commit()
+        review = kb.claim_review_task(conn, tid, claimer="probe")
+        assert review is not None
+        ok, implementer = kb.request_changes(conn, tid, reason="needs another pass")
+        assert ok is True
+        assert implementer == "architect"
+        row = conn.execute(
+            "SELECT last_failure_error, status, assignee FROM tasks WHERE id = ?",
+            (tid,),
+        ).fetchone()
+        assert row["last_failure_error"] is None
+        assert row["status"] == "ready"
+        assert row["assignee"] == "architect"
+
+
+def test_approved_run_also_supersedes_stale_quota_stamp(kanban_home):
+    """approved is a non-failure end, same as changes_requested."""
+    quota = "pid 1 exited rate-limited (quota wall) — requeued"
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="approved after quota", assignee="architect")
+        claimed = kb.claim_task(conn, tid)
+        assert claimed is not None and claimed.current_run_id
+        _close_claimed_run(conn, tid, claimed.current_run_id, "approved", 5_000_300)
+        conn.execute(
+            "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
+            (quota, tid),
+        )
+        conn.commit()
+        assert kbd.check_respawn_guard(conn, tid) is None
+
+
+def test_latest_auth_failure_still_holds_after_changes_requested(kanban_home):
+    """A real auth failure on the latest run still parks, even after an older hand-back."""
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="auth after changes", assignee="architect")
+        first = kb.claim_task(conn, tid)
+        assert first is not None and first.current_run_id
+        _close_claimed_run(conn, tid, first.current_run_id, "changes_requested", 5_000_100)
+        second = kb.claim_task(conn, tid)
+        assert second is not None and second.current_run_id
+        conn.execute(
+            "UPDATE task_runs SET outcome = 'gave_up', status = 'gave_up', ended_at = 5000200 "
+            "WHERE id = ?",
+            (second.current_run_id,),
+        )
+        conn.execute(
+            "UPDATE tasks SET status = 'ready', current_run_id = NULL, "
+            "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, "
+            "last_failure_error = ? WHERE id = ?",
+            ("401 unauthorized", tid),
+        )
+        conn.commit()
+        assert kbd.check_respawn_guard(conn, tid) == "blocker_auth"
