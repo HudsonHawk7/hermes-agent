@@ -795,7 +795,13 @@ def recover_after_classification(
             _vlines(agent, "🔕 OAuth subscription doesn't support the 1M-context beta — disabled for this session and retrying...")
             return True, recovered_with_pool
 
-    if _refresh_credentials_after_401(agent, api_error, _retry, status_code):
+    # A long-running OAuth client can hold a token the auth store has already
+    # rotated. Re-read once, then refresh once, before the 401 path or exit 78.
+    from agent.oauth_stale_recovery import recover_oauth_stale_credentials
+    stale = recover_oauth_stale_credentials(agent, api_error, status_code, _retry)
+    if stale == "retry":
+        return True, recovered_with_pool
+    if stale != "terminal" and _refresh_credentials_after_401(agent, api_error, _retry, status_code):
         return True, recovered_with_pool
 
     if _recover_format_errors(agent, api_error, classified, _retry, messages, api_messages):
