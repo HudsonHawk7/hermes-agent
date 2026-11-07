@@ -257,6 +257,24 @@ def _lexical_path(path: Path | str) -> Path:
     return Path(_path_key(os.path.abspath(path)))
 
 
+def _dotenv_workspaces_root() -> Optional[Path]:
+    """Operator-configured scratch root from ``~/.hermes/.env``.
+
+    Cleanup runs in the worker. The spawn pin can set
+    ``HERMES_KANBAN_WORKSPACES_ROOT`` to a board workspaces dir, which hides
+    the root the folder was created under. Prefer the .env value so a folder
+    created under that root is still managed.
+    """
+    try:
+        from hermes_cli.config import get_env_value_prefer_dotenv
+        raw = (get_env_value_prefer_dotenv("HERMES_KANBAN_WORKSPACES_ROOT") or "").strip()
+    except Exception:
+        return None
+    if not raw:
+        return None
+    return Path(raw).expanduser()
+
+
 def _managed_scratch_path_info(p: Path) -> tuple[bool, Optional[str]]:
     """Return whether *p* is managed scratch storage and the matching board.
 
@@ -302,6 +320,18 @@ def _managed_scratch_path_info(p: Path) -> tuple[bool, Optional[str]]:
                 (override_root.name,),
                 None,
             )
+    # The worker pin above can name a board dir. The folder may still live
+    # under the root in ~/.hermes/.env, which is the root creation used.
+    configured = _dotenv_workspaces_root()
+    if configured is not None and _path_key(configured) != _path_key(override):
+        with contextlib.suppress(OSError):
+            configured_parent = configured.parent
+            _add_root(
+                configured_parent,
+                configured_parent.resolve(strict=False),
+                (configured.name,),
+                None,
+            )
     try:
         home = _kb.kanban_home()
         # Resolve the shared anchor once, not once per board root.
@@ -345,7 +375,9 @@ def _scratch_workspace(conn: sqlite3.Connection, task_id: str) -> Optional[Path]
 
 def _is_managed_scratch_path(p: Path) -> bool:
     """True iff *p* is a STRICT descendant of a kanban-managed ``workspaces/``
-    root (``HERMES_KANBAN_WORKSPACES_ROOT``, ``<kanban_home>/kanban/workspaces``,
+    root (``HERMES_KANBAN_WORKSPACES_ROOT`` in the process env, the same
+    variable in ``~/.hermes/.env`` when the worker pin names a different
+    board dir, ``<kanban_home>/kanban/workspaces``,
     or ``<kanban_home>/kanban/boards/<slug>/workspaces``). A path equal to a
     root is not managed (deleting it would wipe every task's scratch dir);
     ``<kanban_home>/kanban``, ``.../logs`` and ``.../boards/<slug>`` hold

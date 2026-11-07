@@ -992,6 +992,39 @@ def test_is_managed_scratch_path_rejects_kanban_metadata_subtrees(kanban_home):
     assert kb._is_managed_scratch_path(task_dir)
 
 
+def test_scratch_cleanup_accepts_dotenv_root_when_worker_pin_is_a_board_dir(
+    kanban_home, tmp_path, monkeypatch
+):
+    """A worker pin must not hide the root the folder was created under.
+
+    Live refusal: cleanup runs in the worker, whose
+    ``HERMES_KANBAN_WORKSPACES_ROOT`` is a board workspaces dir, while the
+    scratch folder lives under the root named in ``~/.hermes/.env``. The
+    check must accept that configured root, and still refuse a path that is
+    under neither root.
+    """
+    board_root = kanban_home / "kanban" / "boards" / "chat-rescue" / "workspaces"
+    board_root.mkdir(parents=True)
+    configured = tmp_path / "configured-workspaces"
+    task_dir = configured / "t_example"
+    task_dir.mkdir(parents=True)
+    outsider = tmp_path / "user-data" / "project"
+    outsider.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", str(board_root))
+
+    def _prefer_dotenv(key: str):
+        if key == "HERMES_KANBAN_WORKSPACES_ROOT":
+            return str(configured)
+        return None
+
+    monkeypatch.setattr(
+        "hermes_cli.config.get_env_value_prefer_dotenv", _prefer_dotenv
+    )
+    assert kb._is_managed_scratch_path(task_dir)
+    assert not kb._is_managed_scratch_path(configured)
+    assert not kb._is_managed_scratch_path(outsider)
+
+
 @pytest.mark.require_symlinks
 def test_symlinked_workspaces_root_does_not_widen_scratch_cleanup(kanban_home, tmp_path):
     """A workspaces root that is a symlink to a broad directory must not make
