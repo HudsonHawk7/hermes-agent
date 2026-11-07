@@ -15,7 +15,9 @@ type TextLike = {
 // host path (gateway-deliverable); stripping must catch every variant so a
 // sandbox path the model restated doesn't slip through as a duplicate image.
 const DISPLAY_KEYS = ['host_image', 'image'] as const
-const ECHO_KEYS = ['host_image', 'image', 'agent_visible_image'] as const
+const ECHO_KEYS = ['host_image', 'image', 'agent_visible_image', 'video'] as const
+// Tools whose JSON result carries a generated media path (the gateway delivers it).
+const MEDIA_TOOL_NAMES = new Set<unknown>(['image_generate', 'video_generate'])
 
 function recordFromUnknown(value: unknown): Record<string, unknown> | null {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
@@ -48,7 +50,7 @@ function unique(values: string[]): string[] {
 }
 
 function imageResult(part: ToolLike): Record<string, unknown> | null {
-  if (part.type !== 'tool-call' || part.toolName !== 'image_generate') {
+  if (part.type !== 'tool-call' || !MEDIA_TOOL_NAMES.has(part.toolName)) {
     return null
   }
 

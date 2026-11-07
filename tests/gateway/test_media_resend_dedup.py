@@ -524,3 +524,16 @@ def test_auto_append_lane_still_dedups_stale_media():
         history, history_offset=0, history_media_paths=paths
     )
     assert tags == [], f"stale auto-append tags re-emitted: {tags}"
+
+
+def test_video_generate_json_path_auto_appends_media():
+    """video_generate returns {"video": <path>}; the gateway must deliver it as a MEDIA attachment."""
+    messages = [
+        {"role": "assistant",
+         "tool_calls": [{"id": "v", "function": {"name": "video_generate"}}]},
+        {"role": "tool", "tool_call_id": "v",
+         "content": '{"success": true, "video": "/tmp/gen/clip.mp4", "provider": "sogni"}'},
+    ]
+    tags, _voice = _collect_auto_append_media_tags(messages, history_offset=0)
+    assert tags == ["MEDIA:/tmp/gen/clip.mp4"]
+    assert "/tmp/gen/clip.mp4" in _collect_history_media_paths(messages)
