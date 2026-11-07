@@ -10,6 +10,7 @@ import base64
 import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from io import BytesIO
 import logging
 import os
@@ -593,25 +594,28 @@ def _should_use_native_vision_fast_path() -> bool:
 
 def _build_native_vision_tool_result(
     image_url: str, question: str, image_data_url: str, image_size_bytes: int,
-    scale_note: Optional[str] = None,
+    scale_note: Optional[str] = None, source_note: Optional[str] = None,
 ) -> dict[str, Any]:
     """Multimodal tool-result envelope. The text part is intentionally minimal (the model already
-    has the question); ``text_summary`` is the fallback for providers without multimodal tool results."""
+    has the question); ``text_summary`` is the fallback for providers without multimodal tool results.
+    ``source_note`` names the file a folder source resolved to."""
     text_part = (
         "Image loaded into your context — you can see it natively now. "
         "Use your built-in vision to answer the user.")
+    if source_note:
+        text_part = f"{source_note}\n\n{text_part}"
     if isinstance(question, str) and question.strip():
         text_part += f"\n\nQuestion: {question.strip()}"
     if scale_note:
         text_part += f"\n\nNote: {scale_note}"
+    summary = (f"Image attached natively for the main model ({image_size_bytes / 1024:.1f} KB). "
+               "Answer using built-in vision.")
     return {
         "_multimodal": True,
         "content": [
             {"type": "text", "text": text_part},
             {"type": "image_url", "image_url": {"url": image_data_url}}],
-        "text_summary": (
-            f"Image attached natively for the main model ({image_size_bytes / 1024:.1f} KB). "
-            "Answer using built-in vision."),
+        "text_summary": f"{source_note} {summary}" if source_note else summary,
         "meta": {"image_url": image_url[:200], "size_bytes": image_size_bytes, "native_vision": True}}
 
 
@@ -694,6 +698,7 @@ async def _resize_prepared(prepared: _PreparedImage, scale_info: dict, **kwargs)
 
 async def _vision_analyze_native(
     image_url: str, question: str, task_id: Optional[str] = None, region: Optional[list] = None,
+    source_note: Optional[str] = None,
 ) -> Any:
     """Fast path for vision-capable main models: a ``_multimodal`` envelope dict on success,
     or a JSON error string (the normal tool-result contract) on failure."""
@@ -741,7 +746,8 @@ async def _vision_analyze_native(
         return _build_native_vision_tool_result(
             image_url=image_url, question=question, image_data_url=image_data_url,
             image_size_bytes=prepared.size_bytes,
-            scale_note=_build_scale_note(_scale_info or None, prepared.crop_offset or None))
+            scale_note=_build_scale_note(_scale_info or None, prepared.crop_offset or None),
+            source_note=source_note)
     except Exception as exc:
         logger.warning("Native vision fast path failed: %s", exc)
         return tool_error(f"Native vision failed: {exc}", success=False)
@@ -832,12 +838,13 @@ async def _call_vision_llm(call_kwargs: dict, empty_log: str, response=None):
 
 async def _run_analysis(
     kind: str, source: str, user_prompt: str, model: Optional[str],
-    stage: Callable[[str, dict, list], Awaitable[tuple]]) -> str:
+    stage: Callable[[str, dict, list], Awaitable[tuple]], *, source_note: Optional[str] = None) -> str:
     """Aux-LLM analysis skeleton for image/video: interrupt check → ``stage`` → JSON result.
 
     ``stage(user_prompt, debug_call_data, temp_paths)`` returns ``(analysis, scale_note)``; temp
     files it appends to ``temp_paths`` are deleted in ``finally``. Returns JSON
-    ``{"success": bool, "analysis": str}`` (``analysis`` carries the error explanation on failure).
+    ``{"success": bool, "analysis": str}`` (``analysis`` carries the error explanation on failure),
+    plus ``"source"`` when ``source_note`` names the file a folder source resolved to.
     """
     tool_name, rules = _ANALYSIS_KINDS[kind]
     if not isinstance(user_prompt, str):
@@ -846,6 +853,8 @@ async def _run_analysis(
     temp_paths: list = []
 
     def finish(result: dict) -> str:
+        if source_note:
+            result["source"] = source_note
         _debug.log_call(tool_name, debug_call_data)
         _debug.save()
         return json.dumps(result, indent=2, ensure_ascii=False)
@@ -887,7 +896,7 @@ async def _run_analysis(
 
 async def vision_analyze_tool(
     image_url: str, user_prompt: str, model: str | None = None,
-    task_id: Optional[str] = None, region: Optional[list] = None) -> str:
+    task_id: Optional[str] = None, region: Optional[list] = None, source_note: Optional[str] = None) -> str:
     """Describe an image (URL, local path, data: URL) with the auxiliary vision LLM. ``user_prompt``
     is pre-formatted by the caller. Temp images live under $HERMES_HOME/cache/vision/."""
     async def stage(prompt: str, debug_call_data: dict, temp_paths: list) -> tuple:
@@ -923,7 +932,7 @@ async def vision_analyze_tool(
         analysis = await _call_vision_llm(
             call_kwargs, "Vision LLM returned empty content, retrying once", response)
         return analysis, _build_scale_note(_scale_info or None, prepared.crop_offset or None)
-    return await _run_analysis("image", image_url, user_prompt, model, stage)
+    return await _run_analysis("image", image_url, user_prompt, model, stage, source_note=source_note)
 
 
 def check_video_requirements() -> bool:
@@ -973,7 +982,10 @@ VISION_ANALYZE_SCHEMA = {
         "properties": {
             "image_url": {
                 "type": "string",
-                "description": "Image URL (http/https), local file path, or data: URL to load."
+                "description": (
+                    "Image URL (http/https), local file path, data: URL, or a local folder "
+                    "(loads its newest image, e.g. a camera roll; no need to list the folder first)."
+                )
             },
             "question": {
                 "type": "string",
@@ -1010,21 +1022,76 @@ def _configured_aux_model(sections: tuple, env_vars: tuple) -> Optional[str]:
     return next((v for v in (os.getenv(e, "").strip() for e in env_vars) if v), None)
 
 
+class _FolderPick(NamedTuple):
+    path: str
+    note: str
+
+
+def _newest_image_in_folder(source: Any) -> Optional[_FolderPick]:
+    """A local folder source resolves to its newest image by modified time, so looking at a camera
+    roll or screenshots folder costs one picture instead of a listing of every file in it.
+    ``None`` when ``source`` is not a local folder; ``FileNotFoundError`` when it holds no image;
+    ``ValueError`` when the read guard refuses the path, checked before anything touches the disk
+    so a denied folder is never listed."""
+    if not isinstance(source, str) or not source.strip():
+        return None
+    raw = source.strip()
+    if raw.lower().startswith("file://"):
+        raw = raw[len("file://"):]
+    elif raw.startswith("data:") or "://" in raw:
+        return None
+    from tools.image_source import _is_local_terminal_backend
+    if not _is_local_terminal_backend():
+        return None
+    from agent.file_safety import get_nt_namespace_error, raise_if_read_blocked
+    nt_error = get_nt_namespace_error(raw, verb="Read")
+    if nt_error:
+        raise ValueError(nt_error)
+    folder = Path(os.path.expanduser(raw))
+    raise_if_read_blocked(str(folder))
+    if not folder.is_dir():
+        return None
+    from tools.file_operations import IMAGE_EXTENSIONS
+    newest_path, newest_name, newest_mtime = "", "", -1.0
+    with os.scandir(folder) as entries:
+        for entry in entries:
+            if entry.name.startswith(".") or Path(entry.name).suffix.lower() not in IMAGE_EXTENSIONS:
+                continue
+            if not entry.is_file():
+                continue
+            mtime = entry.stat().st_mtime
+            if mtime > newest_mtime:
+                newest_path, newest_name, newest_mtime = entry.path, entry.name, mtime
+    if not newest_path:
+        raise FileNotFoundError(f"No images in folder '{folder}'.")
+    saved = datetime.fromtimestamp(newest_mtime).strftime("%Y-%m-%d %H:%M:%S")
+    return _FolderPick(newest_path, f"Newest image in {folder}: {newest_name} (saved {saved}).")
+
+
 async def _handle_vision_analyze(args: dict[str, Any], **kw: Any) -> str:
     image_url, question, region = args.get("image_url", ""), args.get("question", ""), args.get("region")
     task_id = kw.get("task_id")
+    try:
+        pick = _newest_image_in_folder(image_url)
+    except (OSError, ValueError) as exc:
+        return tool_error(str(exc), success=False)
+    source_note = None
+    if pick is not None:
+        image_url, source_note = pick
     # No concurrency gate around the whole analysis — the CPU burst is bounded inside the
     # encode/resize step, so multi-image fan-out keeps full request concurrency.
     if _should_use_native_vision_fast_path():
         logger.info("vision_analyze: native fast path")
-        return await _vision_analyze_native(image_url, question, task_id=task_id, region=region)
+        return await _vision_analyze_native(
+            image_url, question, task_id=task_id, region=region, source_note=source_note)
 
     # Legacy path: aux LLM describes the image and we return its text.
     full_prompt = (
         "Fully describe and explain everything about this image, then answer the "
         f"following question:\n\n{question}")
     model = _configured_aux_model(("vision",), ("AUXILIARY_VISION_MODEL",))
-    return await vision_analyze_tool(image_url, full_prompt, model, task_id=task_id, region=region)
+    return await vision_analyze_tool(
+        image_url, full_prompt, model, task_id=task_id, region=region, source_note=source_note)
 
 
 registry.register(
