@@ -4291,13 +4291,38 @@ def _failed_backend_skip(
     return _skip
 
 
+def _task_allows_main_fallback(task: str | None) -> bool:
+    """True unless ``auxiliary.<task>.allow_main_fallback`` is explicitly false.
+
+    Missing means true, so every existing profile keeps today's main-agent last
+    resort. A cloud-pinned task sets false so a timeout cannot land on the local
+    model that is serving the chat (HTS-030).
+    """
+    if not task:
+        return True
+    raw = _get_auxiliary_task_config(task).get("allow_main_fallback", True)
+    if isinstance(raw, str):
+        return raw.strip().lower() not in {"0", "false", "no", "off"}
+    if raw is None:
+        return True
+    return bool(raw)
+
+
 def _try_main_agent_model_fallback(
     failed_provider: str, task: str | None = None, reason: str = "error",
     failed_model: Optional[str] = None, failed_base_url: str = "", failure_scope: Any = None,
 ) -> tuple[Optional[Any], Optional[str], str]:
     """Last-resort fallback to the main agent provider + model after the configured chain is exhausted.
     ``failed_model`` scoping per ``_failed_backend_skip``; same-URL custom endpoints serve many models,
-    so a hung aux model says nothing about the main model's health. Returns (client, model, label) or (None, None, "")."""
+    so a hung aux model says nothing about the main model's health. Returns (client, model, label) or (None, None, "").
+    Skipped entirely when ``auxiliary.<task>.allow_main_fallback`` is false."""
+    if not _task_allows_main_fallback(task):
+        logger.info(
+            "Auxiliary %s: %s on %s — skipping main-agent fallback "
+            "(auxiliary.%s.allow_main_fallback=false)",
+            task or "call", reason, failed_provider or "unknown", task or "call",
+        )
+        return None, None, ""
     main_provider = (_read_main_provider() or "").strip()
     main_model = (_read_main_model() or "").strip()
     if main_provider.lower() == "moa":
