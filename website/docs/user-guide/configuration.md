@@ -1617,6 +1617,7 @@ auxiliary:
     base_url: ""
     api_key: ""
     timeout: 30
+    # allow_main_fallback: false  # skip the main-agent last resort (see below)
 
   # Context compression timeout (separate from compression.* config)
   compression:
@@ -1644,6 +1645,12 @@ auxiliary:
     api_key: ""
     timeout: 30
     language: ""
+    # allow_main_fallback: true  # false = do not fall back to the main agent model
+
+  # `allow_main_fallback` (default true, and missing means true) is per task.
+  # Set it false on a cloud-pinned task whose timeout must not land on the
+  # local model serving the chat. It does not change an `auto` or `main`
+  # primary route — only the last-resort hop after that route fails.
 
   # Skills hub — skill matching and search
   skills_hub:
