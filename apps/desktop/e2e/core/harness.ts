@@ -22,6 +22,8 @@ import { resolveElectronBinary } from '../electron-binary'
 import { isSandboxProcess, procfsCensus, type ProcInfo, readProc, sandboxProcessesOf, treeKill } from './process-census'
 import { pathUnder, windowsProcessHomes } from './process-environment'
 
+import { isDesktopE2eHidden } from '../../electron/e2e-hidden'
+
 export type { ProcInfo } from './process-census'
 
 export const DESKTOP_ROOT = path.resolve(import.meta.dirname, '..', '..')
@@ -610,7 +612,7 @@ export function composer(page: Page) {
   return page.locator('[data-slot="composer-root"] [contenteditable="true"]').filter({ visible: true }).first()
 }
 
-/** Composer mounted, no full-viewport overlay above it, window visible. */
+/** Composer mounted, no full-viewport overlay above it, window visible (or deliberately hidden under HERMES_DESKTOP_E2E_HIDDEN). */
 export async function waitForInteractive(app: ElectronApplication, page: Page, timeout = 180_000): Promise<void> {
   try {
     await expect(composer(page)).toBeVisible({ timeout })
@@ -668,13 +670,14 @@ export async function waitForInteractive(app: ElectronApplication, page: Page, t
     )
   }
 
+  const wantVisible = !isDesktopE2eHidden()
   await expect
     .poll(
       () =>
         app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.isVisible() ?? false).catch(() => false),
       { timeout, intervals: [250] }
     )
-    .toBe(true)
+    .toBe(wantVisible)
 }
 
 /**

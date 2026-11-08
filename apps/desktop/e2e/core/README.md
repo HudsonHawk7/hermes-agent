@@ -103,3 +103,21 @@ xvfb-run -a npx playwright test -c e2e/core/playwright.config.ts
 
 `HERMES_E2E_CORE_ROOT` picks the sandbox parent dir (default: OS tmpdir);
 `HERMES_E2E_CORE_KEEP=1` keeps sandboxes for post-mortem.
+
+**Sandbox root on S: (subst volume) is unsupported for Desktop e2e.**
+
+`HERMES_E2E_CORE_ROOT=S:\...` (or any subst/network root) triggers:
+- EPERM on rename during `publishDesktopTree` (desktop-plugins staging under HERMES_HOME)
+- fs.watch storms (1000+ events/ms) on plugin dirs, causing "polling instead"
+- Playwright trace/artifact copy ENOENTs (already noted in run-tmp.ts)
+
+Use a local-disk root instead (e.g. `%LOCALAPPDATA%\Temp\hermes-e2e` or `C:\tmp`).
+The run-tmp resolver and core harness already prefer local; explicit S: roots are for
+special cases only and will flake or fail on desktop-plugins publish and watch.
+
+**`hermes -p <profile> plugins doctor --ci` on a fresh sandbox HERMES_HOME**
+
+Triggers a full isolated-runtime prepare (minutes) inside the doctor temp home.
+This can hit spawnSync ETIMEDOUT (120 s default in some harnesses).
+Expected for fresh sandboxes; pre-warm the sandbox home with `hermes gateway ensure`
+(or use a pre-baked profile) before running doctor in CI. No `--no-prepare` flag yet.
