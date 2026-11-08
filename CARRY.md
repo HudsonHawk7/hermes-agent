@@ -59,6 +59,7 @@ print('recipes_root:', cfg.get('scene_builder', {}).get('recipes_root'))
 |--------|------|-------|
 | 8027813a14c | preserve unknown top-level config sections (scene_builder etc) in load_config_readonly() | Hermes core fix so Force plugins always see their sections after merge/canonicalize. Paired with Force_2.1 side patch in Tools/hermes-force-media. |
 | 7eb0c0cbf09 | sample video frames when the model cannot take a video part | video_analyze and vision_analyze fall back to ffmpeg frames on a local OpenAI-compatible route or a 400 invalid message format. Card t_56bef84c. |
+| bc4e228e3ec | t_b855b275 Hermes Desktop e2e hidden-mode harness and sandbox-home fixes | waitForInteractive under E2E_HIDDEN; ruamel unconditional; S: and doctor --ci documented. Card t_b855b275. |
 
 Add new rows here before pushing a carry. Upstream the individual fix as a normal PR from a short-lived branch off origin/main when appropriate.
 
