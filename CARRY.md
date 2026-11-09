@@ -64,6 +64,7 @@ print('recipes_root:', cfg.get('scene_builder', {}).get('recipes_root'))
 | f60589632df | record a desktop plugin fingerprint after a watch reload | A file-watch save and a linked-source resync now store the new mtime and size, so the next poll does not register the pane a second time. Card t_28520a5d. |
 | 9eff2de7d72 | pin worker temp from the root config when a profile has no kanban section | A profile-scoped spawn reads the root kanban.worker_temp_* values unless that profile set its own. Card t_b11af14f. Upstream not opened. |
 | ac2a1fcb19c | profile-scoped kanban gc self-resolves worker temp settings | `_cmd_gc` no longer passes a load_config snapshot into the sweep. Card t_2f029367. Upstream not opened. |
+| 560c5b7e361 | report code skew only when runtime files changed | A desktop-only or docs-only fast-forward no longer locks the model picker. Git errors still report skew. Card t_60621b61. Upstream not opened. |
 
 Add new rows here before pushing a carry. Upstream the individual fix as a normal PR from a short-lived branch off origin/main when appropriate.
 
