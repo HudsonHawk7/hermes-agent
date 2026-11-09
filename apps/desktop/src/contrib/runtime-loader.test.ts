@@ -1278,4 +1278,115 @@ describe('linked dev package: the source checkout drives the desktop half', () =
       delete (globalThis as unknown as { __devV2?: unknown }).__devV2
     }
   })
+
+  it('a swapped plugin folder loads the new module within one disk poll', async () => {
+    // The running build (11/06) arms this poll only when directory watches
+    // fail, then retires it once they succeed. A folder swap keeps the same
+    // path, so that watch never fires (#91503) and the stale module stays
+    // until "Reload desktop plugins". This must fail on that base.
+    vi.useRealTimers()
+
+    const createObjectURL = vi.spyOn(URL, 'createObjectURL').mockImplementation(
+      blob =>
+        `data:text/javascript;base64,${Buffer.from((blob as unknown as { parts: string[] }).parts.join('')).toString('base64')}`
+    )
+
+    const revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
+    const RealBlob = globalThis.Blob
+    vi.stubGlobal(
+      'Blob',
+      class {
+        parts: string[]
+        constructor(parts: string[]) {
+          this.parts = parts
+        }
+      }
+    )
+    const root = '/local/.hermes/desktop-plugins'
+    const folder = `${root}/swapped`
+    const file = `${folder}/plugin.js`
+    const g = globalThis as unknown as { __swappedV1?: ReturnType<typeof vi.fn>; __swappedV2?: ReturnType<typeof vi.fn> }
+    const registerV1 = vi.fn()
+    const registerV2 = vi.fn()
+    g.__swappedV1 = registerV1
+    g.__swappedV2 = registerV2
+
+    let source = 'export default { id: "swapped", register: globalThis.__swappedV1 }'
+    let mtimeMs = 1_000
+    let size = 40
+    const pollTicks: Array<() => void> = []
+    const realSetInterval = window.setInterval.bind(window)
+
+    const intervalSpy = vi.spyOn(window, 'setInterval').mockImplementation(((fn: TimerHandler, ms?: number, ...rest: unknown[]) => {
+      if (ms === 5_000) {
+        pollTicks.push(fn as () => void)
+
+        return 1 as unknown as ReturnType<typeof setInterval>
+      }
+
+      return realSetInterval(fn, ms as number, ...(rest as []))
+    }) as typeof window.setInterval)
+
+    const statPluginFile = vi.fn(async () => ({ mtimeMs, path: file, size }))
+
+    desktopPluginsRoot.mockResolvedValue(root)
+    readDir.mockImplementation(async (dir: string) => {
+      if (dir === root) {
+        return { entries: [{ name: 'swapped', path: folder, isDirectory: true }] }
+      }
+
+      if (dir === folder) {
+        return { entries: [{ name: 'plugin.js', path: file, isDirectory: false }] }
+      }
+
+      return { entries: [] }
+    })
+    readPluginSource.mockImplementation(async () => ({ text: source, truncated: false }))
+    watchDirectory.mockResolvedValue(true)
+    watchPreviewFile.mockResolvedValue({ id: 'w-swapped' })
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' })
+    const desktop = window.hermesDesktop as unknown as { readPluginSource: unknown; statPluginFile: unknown }
+    desktop.readPluginSource = readPluginSource
+    desktop.statPluginFile = statPluginFile
+
+    vi.resetModules()
+    const loader = await import('./runtime-loader')
+
+    try {
+      loader.watchRuntimePlugins()
+      await vi.waitFor(() => expect(registerV1).toHaveBeenCalledTimes(1))
+      await new Promise(resolve => setTimeout(resolve, 0))
+
+      // Directory watches are up. Base retires the poll here, so this fails.
+      expect(pollTicks).toHaveLength(1)
+
+      await vi.waitFor(() => expect(statPluginFile).toHaveBeenCalled())
+      await new Promise(resolve => setTimeout(resolve, 0))
+
+      const readsAfterLoad = readPluginSource.mock.calls.length
+      const rootsAfterLoad = desktopPluginsRoot.mock.calls.length
+      pollTicks[0]()
+      await vi.waitFor(() => expect(statPluginFile.mock.calls.length).toBeGreaterThan(1))
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(readPluginSource.mock.calls.length).toBe(readsAfterLoad)
+      expect(desktopPluginsRoot.mock.calls.length).toBeGreaterThan(rootsAfterLoad)
+
+      source = 'export default { id: "swapped", register: globalThis.__swappedV2 }'
+      mtimeMs = 2_000
+      size = 41
+      const readsBeforeSwap = readPluginSource.mock.calls.length
+      pollTicks[0]()
+      await vi.waitFor(() => expect(registerV2).toHaveBeenCalledTimes(1))
+      expect(readPluginSource.mock.calls.length).toBeGreaterThan(readsBeforeSwap)
+      expect(registerV1).toHaveBeenCalledTimes(1)
+    } finally {
+      intervalSpy.mockRestore()
+      createObjectURL.mockRestore()
+      revokeObjectURL.mockRestore()
+      vi.stubGlobal('Blob', RealBlob)
+      loader.unloadRuntimePlugin('swapped')
+      delete g.__swappedV1
+      delete g.__swappedV2
+    }
+  })
 })

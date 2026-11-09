@@ -349,6 +349,7 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
   },
   readFileText: filePath => ipcRenderer.invoke('hermes:readFileText', filePath),
   readPluginSource: (filePath: string) => ipcRenderer.invoke('hermes:readPluginSource', filePath),
+  statPluginFile: (filePath: string) => ipcRenderer.invoke('hermes:statPluginFile', filePath),
   selectPaths: options => ipcRenderer.invoke('hermes:selectPaths', options),
   selectSavePath: options => ipcRenderer.invoke('hermes:selectSavePath', options),
   saveTextFileAs: request => ipcRenderer.invoke('hermes:saveTextFileAs', request),
