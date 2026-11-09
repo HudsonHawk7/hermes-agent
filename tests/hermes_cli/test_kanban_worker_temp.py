@@ -387,3 +387,95 @@ def test_sweep_includes_legacy_agent_tmp(tmp_path):
     assert not aged_short.exists()
     assert young_keep.exists(), "young legacy dir must be kept"
     assert primary_litter.exists(), "primary _tmp still requires task-id run names"
+
+
+def test_stuck_remove_is_logged_once_then_cleared_when_it_can(tmp_path, caplog, monkeypatch):
+    """A path the janitor cannot remove is recorded once and not logged on the next pass.
+
+    The next pass still tries. When the path becomes removable, it is removed and the
+    record is dropped. Fails on a janitor that warns on every pass.
+    """
+    root = tmp_path / "_tmp"
+    run = root / "hera" / "t_eaf8020a_9"
+    run.mkdir(parents=True)
+    (run / "left.txt").write_text("stuck", encoding="utf-8")
+    old = time.time() - (49 * 3600)
+    os.utime(run / "left.txt", (old, old))
+    os.utime(run, (old, old))
+    original = kwt._rmtree_with_readonly_retry
+
+    def _denied(folder: Path) -> None:
+        raise PermissionError(13, "Access is denied", str(folder))
+
+    monkeypatch.setattr(kwt, "_rmtree_with_readonly_retry", _denied)
+    cfg = {"worker_temp_root": str(root), "worker_temp_max_age_hours": 48}
+    with caplog.at_level(logging.WARNING):
+        first = kwt.sweep_worker_temp(kanban_cfg=cfg)
+        second = kwt.sweep_worker_temp(kanban_cfg=cfg)
+    fails = [
+        r for r in caplog.records
+        if "failed to remove" in r.getMessage() and "t_eaf8020a_9" in r.getMessage()
+    ]
+    assert len(fails) == 1, [r.getMessage() for r in caplog.records]
+    assert first.refused == 1 and second.refused == 1
+    assert run.is_dir()
+    record = root / ".janitor-stuck.json"
+    saved = json.loads(record.read_text(encoding="utf-8"))
+    key = str(run.resolve())
+    assert key in saved
+    assert "Access is denied" in saved[key]
+
+    monkeypatch.setattr(kwt, "_rmtree_with_readonly_retry", original)
+    caplog.clear()
+    third = kwt.sweep_worker_temp(kanban_cfg=cfg)
+    assert not run.exists()
+    assert third.removed == 1
+    assert not record.exists()
+    assert not any("failed to remove" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Everyone deny is a Windows ACL")
+def test_janitor_removes_killed_acl_test_leftover(tmp_path):
+    """A killed ACL test leaves Everyone (WD) on a nested folder. The janitor removes the tree.
+
+    (WD) is the deny those tests keep: it blocks creating a lock file, the owner can lift it,
+    and it does not block deleting the folder. (F) on a Python 3.13 0o700 folder cannot be
+    lifted by this user, so the tests must not leave that shape.
+    """
+    import subprocess
+
+    base = tmp_path / "ForceAgents"
+    new_root = base / "_tmp"
+    new_root.mkdir(parents=True)
+    top = base / "hera" / "tmp" / "hermes-pytest"
+    leftover = top / "pytest-0" / "test_startup0" / "runtime" / "bot_live_delivery"
+    leftover.mkdir(parents=True)
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    denied = subprocess.run(
+        ["icacls", str(leftover), "/deny", "*S-1-1-0:(WD)"],
+        capture_output=True,
+        check=False,
+        creationflags=flags,
+    )
+    assert denied.returncode == 0, denied.stderr
+    old = time.time() - (49 * 3600)
+    os.utime(leftover, (old, old))
+    os.utime(top, (old, old))
+    try:
+        result = kwt.sweep_worker_temp(
+            kanban_cfg={
+                "worker_temp_root": str(new_root),
+                "worker_temp_max_age_hours": 48,
+            }
+        )
+        assert not top.exists(), "killed-test leftover must be removed"
+        assert result.removed >= 1
+        assert result.refused == 0
+    finally:
+        if leftover.exists():
+            subprocess.run(
+                ["icacls", str(leftover), "/remove:d", "*S-1-1-0", "/T", "/C"],
+                capture_output=True,
+                check=False,
+                creationflags=flags,
+            )

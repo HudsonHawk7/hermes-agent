@@ -10,7 +10,10 @@ is still alive.
 When the configured root's leaf is ``_tmp``, the same pass also sweeps sibling
 ``<parent>/<agent>/tmp`` trees (legacy agent temp outside ``_tmp``). Deletes
 clear the read-only bit on retry so Windows git object files do not strand
-folders; every failed path is logged with its size.
+folders. A path that still cannot be removed is logged once, with its size and
+reason, and recorded under the sweep root. Later passes stay quiet about that
+same path and reason, still try to remove it, and drop the record when it goes.
+ACLs are never changed.
 """
 
 from __future__ import annotations
@@ -484,6 +487,80 @@ def _candidate_is_safe_name(name: str) -> bool:
     return True
 
 
+_STUCK_RECORD = ".janitor-stuck.json"
+
+
+def _load_stuck(root: Path) -> dict[str, str]:
+    """Path -> reason for removes this tree could not finish. Missing or junk is empty."""
+    try:
+        raw = json.loads((root / _STUCK_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        key: value
+        for key, value in raw.items()
+        if isinstance(key, str) and isinstance(value, str)
+    }
+
+
+def _save_stuck(root: Path, records: dict[str, str]) -> None:
+    path = root / _STUCK_RECORD
+    try:
+        if not records:
+            path.unlink(missing_ok=True)
+            return
+        tmp = path.with_name(_STUCK_RECORD + ".tmp")
+        tmp.write_text(json.dumps(records, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        logger.debug(
+            "worker-temp janitor: could not record a stuck path under %s",
+            root,
+            exc_info=True,
+        )
+
+
+def _remember_stuck(
+    root: Path,
+    run_dir: Path,
+    reason: str,
+    warn: Callable[..., None],
+    message: str,
+    *args: Any,
+) -> None:
+    """Log a failed remove once per path and reason. A later pass with the same reason is quiet."""
+    if not _strictly_below(run_dir, root):
+        warn(message, *args)
+        return
+    try:
+        key = str(run_dir.resolve())
+    except OSError:
+        warn(message, *args)
+        return
+    records = _load_stuck(root)
+    if records.get(key) == reason:
+        return
+    warn(message, *args)
+    records[key] = reason
+    _save_stuck(root, records)
+
+
+def _forget_stuck(root: Path, run_dir: Path) -> None:
+    if not _strictly_below(run_dir, root):
+        return
+    try:
+        key = str(run_dir.resolve())
+    except OSError:
+        return
+    records = _load_stuck(root)
+    if key not in records:
+        return
+    del records[key]
+    _save_stuck(root, records)
+
+
 def _sweep_one_tree(
     resolved: Path,
     *,
@@ -592,7 +669,11 @@ def _sweep_one_tree(
             try:
                 _rmtree_with_readonly_retry(run_dir)
             except OSError as exc:
-                warn(
+                _remember_stuck(
+                    resolved,
+                    run_dir,
+                    str(exc),
+                    warn,
                     "worker-temp janitor: failed to remove %s (%s B) — %s",
                     run_dir,
                     size,
@@ -601,13 +682,18 @@ def _sweep_one_tree(
                 refused += 1
                 continue
             if run_dir.exists():
-                warn(
+                _remember_stuck(
+                    resolved,
+                    run_dir,
+                    "still present after rmtree",
+                    warn,
                     "worker-temp janitor: failed to remove %s (%s B) — still present after rmtree",
                     run_dir,
                     size,
                 )
                 refused += 1
                 continue
+            _forget_stuck(resolved, run_dir)
             removed += 1
             bytes_freed += size
 
