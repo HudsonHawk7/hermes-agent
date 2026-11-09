@@ -348,26 +348,22 @@ class GatewayKanbanWatchersMixin:
         while self._running:
             interval_minutes = 60
             try:
-                from hermes_cli.config import load_config as _load_config
                 from hermes_cli.kanban_worker_temp import (
                     format_sweep_counts,
                     load_worker_temp_settings,
                     sweep_worker_temp,
                 )
 
-                cfg = _load_config() or {}
-                kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
-                settings = load_worker_temp_settings(kanban_cfg if isinstance(kanban_cfg, dict) else {})
+                # No profile snapshot: boards are root-scoped, and a default-filled
+                # load_config() dict would hide the root's worker_temp_* values.
+                settings = load_worker_temp_settings()
                 interval_minutes = max(1, int(settings.janitor_minutes or 60))
                 if not settings.root:
                     logger.debug(
                         "kanban worker-temp janitor: kanban.worker_temp_root unset; pass skipped"
                     )
                 else:
-                    cfg_snapshot = dict(kanban_cfg) if isinstance(kanban_cfg, dict) else {}
-                    result = await _to_thread_process_service(
-                        lambda: sweep_worker_temp(kanban_cfg=cfg_snapshot)
-                    )
+                    result = await _to_thread_process_service(lambda: sweep_worker_temp())
                     logger.info("kanban %s", format_sweep_counts(result))
             except asyncio.CancelledError:
                 raise
