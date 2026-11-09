@@ -1390,3 +1390,233 @@ describe('linked dev package: the source checkout drives the desktop half', () =
     }
   })
 })
+
+describe('plugin fingerprint after a watch-driven reload', () => {
+  /** Blob-URL import() cannot be resolved by the test runner; data: URLs can. */
+  const rerouteBlobImports = () => {
+    const createObjectURL = vi.spyOn(URL, 'createObjectURL').mockImplementation(
+      blob =>
+        `data:text/javascript;base64,${Buffer.from((blob as unknown as { parts: string[] }).parts.join('')).toString('base64')}`
+    )
+
+    const revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
+    const RealBlob = globalThis.Blob
+
+    vi.stubGlobal(
+      'Blob',
+      class {
+        parts: string[]
+        constructor(parts: string[]) {
+          this.parts = parts
+        }
+      }
+    )
+
+    return () => {
+      createObjectURL.mockRestore()
+      revokeObjectURL.mockRestore()
+      vi.stubGlobal('Blob', RealBlob)
+    }
+  }
+
+  const capturePoll = () => {
+    const pollTicks: Array<() => void> = []
+    const realSetInterval = window.setInterval.bind(window)
+
+    const intervalSpy = vi.spyOn(window, 'setInterval').mockImplementation(((
+      fn: TimerHandler,
+      ms?: number,
+      ...rest: unknown[]
+    ) => {
+      if (ms === 5_000) {
+        pollTicks.push(fn as () => void)
+
+        return 1 as unknown as ReturnType<typeof setInterval>
+      }
+
+      return realSetInterval(fn, ms as number, ...(rest as []))
+    }) as typeof window.setInterval)
+
+    return { intervalSpy, pollTicks }
+  }
+
+  it('a file-watch reload does not register again on the next poll', async () => {
+    // An in-place save fires the file watch, which reloads once. If that path
+    // leaves loadedMtimeMs/loadedSize stale, the next 5s poll sees the new
+    // fingerprint and loadDiskPlugin runs again (activate unloads, then
+    // register). This must fail when the watch path forgets the fingerprint.
+    vi.useRealTimers()
+    const restoreBlob = rerouteBlobImports()
+    const { intervalSpy, pollTicks } = capturePoll()
+    const root = '/local/.hermes/desktop-plugins'
+    const folder = `${root}/inplace`
+    const file = `${folder}/plugin.js`
+    const g = globalThis as unknown as { __inplaceV1?: ReturnType<typeof vi.fn>; __inplaceV2?: ReturnType<typeof vi.fn> }
+    const registerV1 = vi.fn()
+    const registerV2 = vi.fn()
+    g.__inplaceV1 = registerV1
+    g.__inplaceV2 = registerV2
+
+    let source = 'export default { id: "inplace", register: globalThis.__inplaceV1 }'
+    let mtimeMs = 1_000
+    let size = 40
+    const statPluginFile = vi.fn(async () => ({ mtimeMs, path: file, size }))
+
+    desktopPluginsRoot.mockResolvedValue(root)
+    readDir.mockImplementation(async (dir: string) => {
+      if (dir === root) {
+        return { entries: [{ name: 'inplace', path: folder, isDirectory: true }] }
+      }
+
+      if (dir === folder) {
+        return { entries: [{ name: 'plugin.js', path: file, isDirectory: false }] }
+      }
+
+      return { entries: [] }
+    })
+    readPluginSource.mockImplementation(async () => ({ text: source, truncated: false }))
+    watchDirectory.mockResolvedValue({ id: 'dir-inplace' })
+    watchPreviewFile.mockResolvedValue({ id: 'w-inplace' })
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' })
+    const desktop = window.hermesDesktop as unknown as { readPluginSource: unknown; statPluginFile: unknown }
+    desktop.readPluginSource = readPluginSource
+    desktop.statPluginFile = statPluginFile
+
+    vi.resetModules()
+    const loader = await import('./runtime-loader')
+
+    try {
+      loader.watchRuntimePlugins()
+      await vi.waitFor(() => expect(registerV1).toHaveBeenCalledTimes(1))
+      await vi.waitFor(() => expect(statPluginFile).toHaveBeenCalled())
+      await vi.waitFor(() => expect(pollTicks).toHaveLength(1))
+
+      source = 'export default { id: "inplace", register: globalThis.__inplaceV2 }'
+      mtimeMs = 2_000
+      size = 41
+      const onChange = onPreviewFileChanged.mock.calls[0][0] as (event: { id: string }) => void
+      onChange({ id: 'w-inplace' })
+      await vi.waitFor(() => expect(registerV2).toHaveBeenCalledTimes(1))
+      await new Promise(resolve => setTimeout(resolve, 0))
+
+      const readsAfterWatch = readPluginSource.mock.calls.length
+      const statsAfterWatch = statPluginFile.mock.calls.length
+      pollTicks[0]()
+      await vi.waitFor(() => expect(statPluginFile.mock.calls.length).toBeGreaterThan(statsAfterWatch))
+      await new Promise(resolve => setTimeout(resolve, 0))
+
+      if (readPluginSource.mock.calls.length > readsAfterWatch) {
+        await vi.waitFor(() => expect(registerV2).toHaveBeenCalledTimes(2))
+      }
+
+      expect(registerV2).toHaveBeenCalledTimes(1)
+      expect(registerV1).toHaveBeenCalledTimes(1)
+    } finally {
+      intervalSpy.mockRestore()
+      restoreBlob()
+      loader.unloadRuntimePlugin('inplace')
+      delete g.__inplaceV1
+      delete g.__inplaceV2
+    }
+  })
+
+  it('a linked-source resync does not register again on the next poll', async () => {
+    // A linked checkout save runs resyncLinkedDiskPlugins, which reloads the
+    // copy. The copy's mtime moved with that write. If resync forgets the new
+    // fingerprint, the next poll registers a second time.
+    vi.useRealTimers()
+    const restoreBlob = rerouteBlobImports()
+    const { intervalSpy, pollTicks } = capturePoll()
+    const root = '/local/.hermes/desktop-plugins'
+    const folder = `${root}/devresync`
+    const file = `${folder}/plugin.js`
+    const sourceDir = '/local/.hermes/plugins/devresync/desktop'
+
+    const g = globalThis as unknown as {
+      __devresyncV1?: ReturnType<typeof vi.fn>
+      __devresyncV2?: ReturnType<typeof vi.fn>
+    }
+
+    const registerV1 = vi.fn()
+    const registerV2 = vi.fn()
+    g.__devresyncV1 = registerV1
+    g.__devresyncV2 = registerV2
+
+    let copy = 'export default { id: "devresync", register: globalThis.__devresyncV1 }'
+    let mtimeMs = 1_000
+    let size = 40
+    const statPluginFile = vi.fn(async () => ({ mtimeMs, path: file, size }))
+
+    const reconcileDesktopPlugins = vi.fn(async () => {
+      copy = 'export default { id: "devresync", register: globalThis.__devresyncV2 }'
+      mtimeMs = 2_000
+      size = 41
+
+      return [folder]
+    })
+
+    desktopPluginsRoot.mockResolvedValue(root)
+    readDir.mockImplementation(async (dir: string) => {
+      if (dir === root) {
+        return { entries: [{ name: 'devresync', path: folder, isDirectory: true }] }
+      }
+
+      if (dir === folder) {
+        return {
+          entries: [
+            { name: '.hermes-package.json', path: `${folder}/.hermes-package.json`, isDirectory: false },
+            { name: 'plugin.js', path: file, isDirectory: false }
+          ]
+        }
+      }
+
+      return { entries: [] }
+    })
+    readFileText.mockImplementation(async (path: string) =>
+      path.endsWith('.hermes-package.json')
+        ? { text: JSON.stringify({ linked: true, package: 'devresync', source: sourceDir, sourceMtimeMs: 1 }) }
+        : { text: copy }
+    )
+    watchDirectory.mockResolvedValue({ id: 'dir-devresync' })
+    watchPreviewFile.mockImplementation(async (watched: string) => ({ id: `w:${watched}` }))
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' })
+    Object.assign(window.hermesDesktop as object, { reconcileDesktopPlugins, statPluginFile })
+
+    vi.resetModules()
+    const loader = await import('./runtime-loader')
+    const store = await import('./plugins-store')
+
+    try {
+      loader.watchRuntimePlugins()
+      await vi.waitFor(() => expect(watchPreviewFile).toHaveBeenCalledWith(`${sourceDir}/plugin.js`))
+      await store.setPluginEnabled('devresync', true)
+      await vi.waitFor(() => expect(registerV1).toHaveBeenCalledTimes(1))
+      await vi.waitFor(() => expect(statPluginFile).toHaveBeenCalled())
+      await vi.waitFor(() => expect(pollTicks).toHaveLength(1))
+
+      const onChange = onPreviewFileChanged.mock.calls[0][0] as (event: { id: string }) => void
+      onChange({ id: `w:${sourceDir}/plugin.js` })
+      await vi.waitFor(() => expect(registerV2).toHaveBeenCalledTimes(1))
+      await new Promise(resolve => setTimeout(resolve, 0))
+
+      const readsAfterResync = readFileText.mock.calls.length
+      const statsAfterResync = statPluginFile.mock.calls.length
+      pollTicks[0]()
+      await vi.waitFor(() => expect(statPluginFile.mock.calls.length).toBeGreaterThan(statsAfterResync))
+      await new Promise(resolve => setTimeout(resolve, 0))
+
+      if (readFileText.mock.calls.length > readsAfterResync) {
+        await vi.waitFor(() => expect(registerV2).toHaveBeenCalledTimes(2))
+      }
+
+      expect(registerV2).toHaveBeenCalledTimes(1)
+      expect(registerV1).toHaveBeenCalledTimes(1)
+    } finally {
+      intervalSpy.mockRestore()
+      restoreBlob()
+      loader.unloadRuntimePlugin('devresync')
+      delete g.__devresyncV1
+      delete g.__devresyncV2
+    }
+  })
+})
