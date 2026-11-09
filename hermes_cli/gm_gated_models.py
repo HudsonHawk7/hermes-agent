@@ -503,13 +503,23 @@ def filter_moa_preset(preset: dict[str, Any], *, config: Any = None, log: bool =
     return preset
 
 
-def drop_gated_aux_model(task: str, config: dict[str, Any], *, log: bool = True) -> dict[str, Any]:
-    """Clear a gated auxiliary model so the next allowed route is used."""
+def drop_gated_aux_model(
+    task: str,
+    config: dict[str, Any],
+    *,
+    log: bool = True,
+    root: Any = None,
+) -> dict[str, Any]:
+    """Clear a gated auxiliary model so the next allowed route is used.
+
+    *config* is the task block. *root* is the loaded config when the caller
+    already has it, so a backup filter does not re-read a broken file.
+    """
     if not isinstance(config, dict):
         return config
-    require_readable_list(None)
+    require_readable_list(root)
     model, provider = _entry_model(config)
-    if not model or not model_is_gated(model, provider=provider):
+    if not model or not model_is_gated(model, provider=provider, config=root):
         return config
     if _profile_keeps(None, f"auxiliary.{task}", model):
         return config
@@ -564,6 +574,37 @@ def _fallback_entries(config: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         return []
     return [item for item in raw if isinstance(item, dict)]
+
+
+def filter_served_backup(config: dict[str, Any]) -> dict[str, Any]:
+    """Filter a raw-file backup before it is returned or cached.
+
+    The backup is written before the gate runs, so it still names gated models.
+    A backup that has the list is filtered with that list. A backup with no
+    list cannot prove a model is allowed, so the profile, fallback, moa, and
+    aux chains are not kept.
+    """
+    if not isinstance(config, dict):
+        return config
+    from hermes_cli.config import _drop_unproven_profile_models
+
+    if not patterns_from_config(config):
+        logger.warning(
+            "%s: last-known-good backup has no gate list; not keeping an unproven model. %s",
+            SETTING,
+            RULE,
+        )
+        return _drop_unproven_profile_models(config)
+    try:
+        return apply_profile_model_gate(config)
+    except Exception:
+        logger.warning(
+            "%s: could not filter a last-known-good backup; not keeping an unproven model. %s",
+            SETTING,
+            RULE,
+            exc_info=True,
+        )
+        return _drop_unproven_profile_models(config)
 
 
 def apply_profile_model_gate(config: dict[str, Any]) -> dict[str, Any]:
@@ -637,7 +678,9 @@ def _apply_profile_model_gate(config: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(block, dict):
                 continue
             model = str(block.get("model") or "").strip()
-            filtered = drop_gated_aux_model(str(task_name), block, log=False)
+            filtered = drop_gated_aux_model(
+                str(task_name), block, log=False, root=config,
+            )
             if model and not str(filtered.get("model") or "").strip():
                 skipped.append(model)
                 auxiliary[task_name] = filtered

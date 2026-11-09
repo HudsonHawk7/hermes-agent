@@ -2250,11 +2250,9 @@ def _last_known_good_fallback(config_path: Path, path_key: str, cache_sig, exc: 
     lkg = _LAST_EXPANDED_CONFIG_BY_PATH.get(path_key)
     fallback = "last-known-good"
     if lkg is None:
-        # Fresh process (CLI restart, `hermes config get`): nothing loaded yet in this process, so
-        # fall back to the newest byte-exact copy the last successful parse left in backups/config/.
-        # It holds the raw file (``${VAR}`` templates intact), so it goes through the same
-        # canonicalize -> expand -> managed-overlay pipeline as a normal load.
+        # Fresh process: the newest good backup is the raw file. Filter it before it is served.
         from hermes_cli.config_backups import load_newest_good_backup
+        from hermes_cli.gm_gated_models import filter_served_backup
         from hermes_cli.moa_config import apply_user_moa_presets
         raw_good = load_newest_good_backup(config_path)
         if raw_good is not None:
@@ -2262,7 +2260,7 @@ def _last_known_good_fallback(config_path: Path, path_key: str, cache_sig, exc: 
             apply_user_moa_presets(merged_good, raw_good)
             normalized = _canonicalize_config(merged_good)
             expanded_good: dict[str, Any] = _expand_env_vars(normalized)  # type: ignore[assignment]
-            lkg, _ = _merge_managed_overlay(expanded_good)
+            lkg = filter_served_backup(_merge_managed_overlay(expanded_good)[0])
             fallback = "last-known-good-backup"
     _warn_config_parse_failure(
         config_path, exc, fallback=fallback if lkg is not None else "defaults")

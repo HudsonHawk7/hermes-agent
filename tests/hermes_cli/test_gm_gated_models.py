@@ -593,3 +593,179 @@ def test_broken_config_file_is_not_an_empty_gate_list(
     )
     assert SETTING in caplog.text
     assert RULE in caplog.text
+
+
+_WITH_LIST = """\
+model:
+  default: claude-fable-5-1
+  provider: copilot
+fallback_providers:
+  - provider: copilot
+    model: claude-fable-5-1
+  - provider: xai
+    model: grok-4.7
+moa:
+  default_preset: gate-test
+  presets:
+    gate-test:
+      enabled: true
+      reference_models:
+        - provider: copilot
+          model: claude-fable-5-1
+          enabled: true
+      aggregator:
+        provider: copilot
+        model: claude-fable-5-1
+auxiliary:
+  title:
+    provider: copilot
+    model: claude-fable-5-1
+models:
+  gm_gated:
+    - claude-fable-*
+    - '*/claude-fable-*'
+"""
+
+_NO_LIST = """\
+model:
+  default: claude-fable-5-1
+  provider: copilot
+fallback_providers:
+  - provider: copilot
+    model: claude-fable-5-1
+moa:
+  default_preset: gate-test
+  presets:
+    gate-test:
+      enabled: true
+      reference_models:
+        - provider: copilot
+          model: claude-fable-5-1
+          enabled: true
+      aggregator:
+        provider: copilot
+        model: claude-fable-5-1
+auxiliary:
+  title:
+    provider: copilot
+    model: claude-fable-5-1
+"""
+
+
+def _served_gated(loaded) -> list[str]:
+    """Names of the gated model still sitting in a loaded config."""
+    found: list[str] = []
+    model = loaded.get("model") if isinstance(loaded, dict) else None
+    if isinstance(model, dict) and model.get("default") == GATED:
+        found.append("model.default")
+    for item in loaded.get("fallback_providers") or []:
+        if isinstance(item, dict) and item.get("model") == GATED:
+            found.append("fallback_providers")
+    presets = ((loaded.get("moa") or {}).get("presets") or {})
+    for preset in presets.values():
+        if not isinstance(preset, dict):
+            continue
+        for slot in preset.get("reference_models") or []:
+            if isinstance(slot, dict) and slot.get("model") == GATED:
+                found.append("moa.reference_models")
+        agg = preset.get("aggregator") or {}
+        if isinstance(agg, dict) and agg.get("model") == GATED:
+            found.append("moa.aggregator")
+    for block in (loaded.get("auxiliary") or {}).values():
+        if isinstance(block, dict) and block.get("model") == GATED:
+            found.append("auxiliary")
+    return found
+
+
+def _good_backup(config_path: Path):
+    from hermes_cli.config_backups import list_config_backups
+
+    copies = list_config_backups(config_path, "good")
+    assert copies, "the good backup must still be on disk"
+    return copies[0]
+
+
+def test_broken_file_with_good_backup_does_not_serve_gated_model(
+    kanban_home, monkeypatch,
+):
+    """A good backup is the raw file. The gate does not rewrite it.
+
+    On 7cf41a5aad5 a broken file returned that backup without filtering, and
+    the cache served the same copy. This test keeps the backup. It does not
+    delete it, and it does not make the loader raise.
+    """
+    from hermes_cli.config import get_config_path, load_config, load_config_readonly
+    from hermes_cli.config_read_errors import FailedConfigRead
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    config_path = get_config_path()
+    _clear_config_memory()
+    config_path.write_text(_WITH_LIST, encoding="utf-8")
+
+    readable = load_config_readonly()
+    assert readable.get("model", {}).get("default") != GATED
+    backup = _good_backup(config_path)
+    raw = backup.read_bytes()
+    assert GATED.encode() in raw
+
+    _clear_config_memory()
+    config_path.write_text("models: [\n", encoding="utf-8")
+    _clear_config_memory()
+
+    loaded = load_config_readonly()
+    assert type(loaded) is FailedConfigRead
+    assert backup.read_bytes() == raw
+    assert _served_gated(loaded) == [], (
+        "broken file served the gated model from the good backup"
+    )
+    cached = load_config_readonly()
+    copied = load_config()
+    assert _served_gated(cached) == []
+    assert _served_gated(copied) == []
+    assert model_is_gated(GATED) is True
+
+
+def test_backup_without_gate_list_does_not_keep_gated_chain(
+    kanban_home, monkeypatch, caplog,
+):
+    """A backup that has the model and no list cannot prove the model is allowed.
+
+    On 7cf41a5aad5 the real loader raised GateListUnreadable and still
+    returned claude-fable-5-1. This test keeps that backup.
+    """
+    from hermes_cli.config import get_config_path, load_config_readonly
+    from hermes_cli.config_read_errors import FailedConfigRead
+    from hermes_cli.gm_gated_models import GateListUnreadable
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.setattr(
+        "hermes_cli.gm_gated_models._unreadable_logged", False, raising=False,
+    )
+    config_path = get_config_path()
+    _clear_config_memory()
+    config_path.write_text(_NO_LIST, encoding="utf-8")
+
+    readable = load_config_readonly()
+    assert readable.get("model", {}).get("default") == GATED
+    backup = _good_backup(config_path)
+    raw = backup.read_bytes()
+    assert GATED.encode() in raw
+    assert b"gm_gated" not in raw
+
+    _clear_config_memory()
+    config_path.write_text("models: [\n", encoding="utf-8")
+    _clear_config_memory()
+
+    with caplog.at_level(logging.WARNING):
+        loaded = load_config_readonly()
+    assert type(loaded) is FailedConfigRead
+    assert backup.read_bytes() == raw
+    assert _served_gated(loaded) == [], (
+        "backup with no list still kept the gated model"
+    )
+    assert _served_gated(load_config_readonly()) == []
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.gm_gated_models"):
+        with pytest.raises(GateListUnreadable):
+            model_is_gated(GATED)
+    assert SETTING in caplog.text
+    assert RULE in caplog.text
