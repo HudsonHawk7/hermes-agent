@@ -12,6 +12,7 @@ The parent needs an elevated token (the hosted runner has one) to stand in for t
 install; ``make_user_dir`` only grants when the creating process is elevated.
 """
 import json
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -140,6 +141,9 @@ def _require_faithful_probe(reporters_parent: Path, reporters_dir: Path) -> None
     """
     denied = reporters_parent.parent / "everyone-denied"
     denied.mkdir()
+    # Drop the 0o700 OWNER RIGHTS ACE first so this finally can lift Everyone (F).
+    # /reset re-inherits that ACE from the parent and the lift still fails.
+    _drop_owner_rights_so_full_deny_can_lift(denied)
     subprocess.run(["icacls", str(denied), "/deny", "*S-1-1-0:(F)"], check=True, capture_output=True)
     try:
         probe = _child("""
@@ -148,7 +152,7 @@ def _require_faithful_probe(reporters_parent: Path, reporters_dir: Path) -> None
                               "identity": runner_identity(sys.argv[2]) if plain else ""}))
         """, str(denied), str(reporters_dir))
     finally:
-        subprocess.run(["icacls", str(denied), "/remove:d", "*S-1-1-0"], check=False, capture_output=True)
+        subprocess.run(["icacls", str(denied), "/remove:d", "*S-1-1-0"], check=True, capture_output=True)
     if probe["denied"]:
         pytest.skip("precondition failed: the filtered child still opens a dir an Everyone:(DENY)(F) ACE "
                     "refuses, so it bypasses ACLs on this runner and cannot judge the fix")
@@ -234,16 +238,56 @@ def test_elevated_update_step_makes_a_stranded_home_usable(reporters_parent, mon
 def test_token_lock_on_an_unusable_lock_dir_parks_with_one_named_warning(tmp_path):
     """W2: the gateway meets a ``gateway-locks`` it may not create in.
 
-    Same shape as ``tests/tools/test_bot_live_delivery_windows_acl.py`` (proven on the hosted
-    runner): an Everyone DENY ACE that no identity escapes, and a child with SeBackup/SeRestore
-    removed so ``os.open`` has no bypass. Needs no elevation."""
+    Same shape as ``tests/tools/test_bot_live_delivery_windows_acl.py``: an Everyone (WD)
+    deny that no identity escapes, and a child with SeBackup/SeRestore removed so
+    ``os.open`` has no bypass. (F) is not used: on a Python 3.13 0o700 folder the owner
+    cannot lift it, and a killed run then leaves a folder the janitor cannot delete.
+    Needs no elevation."""
     lock_dir = tmp_path / "gateway-locks"
     lock_dir.mkdir()
-    subprocess.run(["icacls", str(lock_dir), "/deny", "*S-1-1-0:(F)"], check=True, capture_output=True)
+    subprocess.run(["icacls", str(lock_dir), "/deny", "*S-1-1-0:(WD)"], check=True, capture_output=True)
     try:
         _w2(lock_dir)
     finally:
-        subprocess.run(["icacls", str(lock_dir), "/remove:d", "*S-1-1-0"], check=False, capture_output=True)
+        subprocess.run(["icacls", str(lock_dir), "/remove:d", "*S-1-1-0"], check=True, capture_output=True)
+
+
+def _drop_owner_rights_so_full_deny_can_lift(path: Path) -> None:
+    """Make *path* one whose Everyone (F) deny the owner can lift.
+
+    ``/inheritance:r`` drops the 0o700 OWNER RIGHTS ACE. An explicit Full Control grant
+    for this user keeps WRITE_DAC, which ``/remove:d`` needs. Measured: ``/reset`` on a
+    child of a 0o700 folder re-inherits OWNER RIGHTS and the lift still fails.
+    """
+    user = subprocess.run(["whoami"], capture_output=True, text=True, check=True).stdout.strip()
+    subprocess.run(
+        ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:(OI)(CI)F", "*S-1-5-18:(OI)(CI)F"],
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_full_deny_on_a_700_child_lifts_after_dropping_owner_rights(tmp_path):
+    """The probe's finally must be able to lift Everyone (F). Needs no elevation."""
+    parent = tmp_path / "py700"
+    parent.mkdir(mode=0o700)
+    child = parent / "denied"
+    child.mkdir()
+    _drop_owner_rights_so_full_deny_can_lift(child)
+    listed = subprocess.run(["icacls", str(child)], capture_output=True, text=True, check=True)
+    assert "OWNER RIGHTS" not in listed.stdout
+    subprocess.run(["icacls", str(child), "/deny", "*S-1-1-0:(F)"], check=True, capture_output=True)
+    try:
+        subprocess.run(["icacls", str(child), "/remove:d", "*S-1-1-0"], check=True, capture_output=True)
+    finally:
+        if child.exists():
+            subprocess.run(
+                ["icacls", str(child), "/remove:d", "*S-1-1-0"],
+                check=False,
+                capture_output=True,
+            )
+    shutil.rmtree(parent)
+    assert not parent.exists()
 
 
 def _w2(lock_dir):

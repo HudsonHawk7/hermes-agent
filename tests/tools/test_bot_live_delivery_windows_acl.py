@@ -90,7 +90,7 @@ def test_mailbox_lock_survives_a_dir_whose_acl_denies_write_attributes(tmp_path)
         assert Path(result["locked"]) == root.resolve()
         assert result["read"] == {"status": "queued"}
     finally:
-        subprocess.run(["icacls", str(root), "/remove:d", "*S-1-1-0"], check=False, capture_output=True)
+        subprocess.run(["icacls", str(root), "/remove:d", "*S-1-1-0"], check=True, capture_output=True)
 
 
 _UNUSABLE_CHILD = _DROP_PRIVILEGES + textwrap.dedent(r"""
@@ -140,13 +140,12 @@ _UNUSABLE_CHILD = _DROP_PRIVILEGES + textwrap.dedent(r"""
 def test_startup_skips_bot_recovery_on_the_reporters_mailbox_acl(tmp_path):
     root = tmp_path / "runtime" / "bot_live_delivery"
     root.mkdir(parents=True)
-    # The reporters' effect: this token can neither list nor create in the dir (#138872: no ACE for the
-    # user). Reassigning the owner to an identity outside the runner's token needs SeRestore inside icacls
-    # (exit 5 on the hosted runner), and an Administrators-owned, SYSTEM-only DACL still let the runner in.
-    # A deny ACE for Everyone is definitive for every identity the runner might hold; with SeBackup and
-    # SeRestore removed the child has no bypass, so os.open(.lock) fails as in the reports. The owner's
-    # implicit WRITE_DAC is untouched, which is what lets the finally block lift the deny again.
-    subprocess.run(["icacls", str(root), "/deny", "*S-1-1-0:(F)"], check=True, capture_output=True)
+    # Everyone (WD) denies creating .lock for every identity the runner might hold. With
+    # SeBackup and SeRestore removed the child has no bypass, so os.open(.lock) fails as in
+    # the reports. Do not use (F): on a Python 3.13 mkdir(0o700) folder the owner cannot lift
+    # an Everyone (F) deny, and a killed run then leaves a folder the janitor cannot delete.
+    # (WD) still fails the open, and the owner can lift it.
+    subprocess.run(["icacls", str(root), "/deny", "*S-1-1-0:(WD)"], check=True, capture_output=True)
     try:
         child = subprocess.run([sys.executable, "-c", _UNUSABLE_CHILD, str(tmp_path)], cwd=_REPO,
                                capture_output=True, text=True, check=False, timeout=180)
@@ -160,4 +159,4 @@ def test_startup_skips_bot_recovery_on_the_reporters_mailbox_acl(tmp_path):
         assert str(root.resolve()) in warnings[0] and "(owner " in warnings[0]
         assert "icacls" in warnings[0] and "/reset" in warnings[0]
     finally:
-        subprocess.run(["icacls", str(root), "/remove:d", "*S-1-1-0"], check=False, capture_output=True)
+        subprocess.run(["icacls", str(root), "/remove:d", "*S-1-1-0"], check=True, capture_output=True)
