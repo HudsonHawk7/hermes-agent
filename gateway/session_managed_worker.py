@@ -10,6 +10,7 @@ import queue
 import threading
 from types import SimpleNamespace
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import time
@@ -591,6 +592,78 @@ async def admit_managed(authority, ref, row, policy):
     return await execute_managed(authority, ref, row, policy)
 
 
+def _kanban_loss_fields(policy):
+    """Return (task_id, run_id, profile, db) for a kanban worker, or None."""
+    raw = getattr(policy, 'kanban_json', None)
+    if not raw:
+        return None
+    try:
+        ctx = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(ctx, dict):
+        return None
+    task_id = ctx.get('task_id')
+    run_id = ctx.get('run_id')
+    profile = ctx.get('profile')
+    db = ctx.get('db')
+    if not task_id or run_id is None or not profile:
+        return None
+    return task_id, run_id, profile, db
+
+
+def _kanban_run_state(db, task_id, run_id):
+    """Return (state, profile) from task_runs. Never raises."""
+    if not db:
+        return 'unknown', None
+    try:
+        uri = Path(db).resolve().as_uri() + '?mode=ro'
+        conn = sqlite3.connect(uri, uri=True, timeout=1)
+        try:
+            row = conn.execute(
+                'SELECT status, ended_at, profile FROM task_runs '
+                'WHERE id=? AND task_id=?',
+                (run_id, task_id),
+            ).fetchone()
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error, ValueError):
+        return 'unknown', None
+    if row is None:
+        return 'unknown', None
+    status, ended_at, row_profile = row
+    if ended_at is not None or status != 'running':
+        return 'ended', row_profile
+    return 'running', row_profile
+
+
+async def _log_managed_worker_lost(policy, exc):
+    """Name the kanban run. INFO only when that run had already ended."""
+    import logging
+    reason = (
+        exc.reason if isinstance(exc, RuntimeStoreError)
+        else type(exc).__name__)
+    logger = logging.getLogger(__name__)
+    fields = _kanban_loss_fields(policy)
+    if fields is None:
+        logger.warning('Managed worker lost: %s', reason)
+        return
+    task_id, run_id, profile, db = fields
+    try:
+        state, row_profile = await asyncio.to_thread(
+            _kanban_run_state, db, task_id, run_id)
+    except Exception:
+        # A log lookup must not replace the lost-worker failure.
+        state, row_profile = 'unknown', None
+    if row_profile:
+        profile = row_profile
+    level = logging.INFO if state == 'ended' else logging.WARNING
+    logger.log(
+        level,
+        'Managed worker lost: %s task_id=%s run_id=%s profile=%s state=%s',
+        reason, task_id, run_id, profile, state)
+
+
 async def execute_managed(authority, ref, row, policy):
     from gateway.run_turn_progress import publish_worker_tool_event
     # This route never passes the inbound prepare step, so the worker would read ``@`` tokens as typed.
@@ -673,9 +746,7 @@ async def execute_managed(authority, ref, row, policy):
                 return accepted['final_response']
             raise RuntimeStoreError('invalid_worker_frame')
     except (Exception, asyncio.CancelledError) as exc:
-        import logging
-        logging.getLogger(__name__).warning('Managed worker lost: %s',
-            exc.reason if isinstance(exc, RuntimeStoreError) else type(exc).__name__)
+        await _log_managed_worker_lost(policy, exc)
         if scope is None:
             if isinstance(exc, asyncio.CancelledError) or (
                     isinstance(exc, RuntimeStoreError) and exc.reason == 'managed_worker_stopped'):
