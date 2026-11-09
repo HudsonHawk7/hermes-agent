@@ -61,6 +61,7 @@ print('recipes_root:', cfg.get('scene_builder', {}).get('recipes_root'))
 | 7eb0c0cbf09 | sample video frames when the model cannot take a video part | video_analyze and vision_analyze fall back to ffmpeg frames on a local OpenAI-compatible route or a 400 invalid message format. Card t_56bef84c. |
 | 77d2ec30694 | reload a swapped desktop plugin on the next disk poll | The visible-tab poll stays up after folder watches succeed, and a known plugin.js whose mtime or size changed reloads without Reload desktop plugins. Card t_28520a5d. |
 | 4c7e2f8d05e | refuse a gated model unless the GM answered Yes | models.gm_gated is named and never defaulted. A matching card is not dispatched, and a matching profile model is skipped, unless the GM answered Yes on a hermes kanban ask. An agent cannot approve its own card. Card t_76f52a9c. |
+| fb3f882c14b | a later Yes and a thrown check do not unlock a gated model | The Yes must be on that ask and name that model. The profile Yes is filed and looked up on one key. A thrown check does not launch the model and does not keep the gated chain. Card t_76f52a9c. |
 
 Add new rows here before pushing a carry. Upstream the individual fix as a normal PR from a short-lived branch off origin/main when appropriate.
 
