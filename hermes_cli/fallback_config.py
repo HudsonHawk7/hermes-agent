@@ -149,8 +149,11 @@ def _drop_gated_fallback(chain, config):
 
         return drop_gated_fallback(chain, config=config)
     except Exception:
-        logger.warning("models.gm_gated: fallback skip failed", exc_info=True)
-        return chain
+        logger.warning(
+            "models.gm_gated: fallback skip failed; not keeping the chain",
+            exc_info=True,
+        )
+        return []
 
 
 def scoped_fallback_chain(

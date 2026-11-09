@@ -7,6 +7,7 @@ An agent cannot approve its own card.
 
 from __future__ import annotations
 
+import inspect
 import logging
 from pathlib import Path
 
@@ -208,3 +209,179 @@ def test_gated_fallback_entry_is_skipped(gated, caplog):
     assert SETTING in text
     assert "fallback_providers" in text
     assert RULE in text
+
+
+def _other_ask():
+    return {
+        "question": "Ship the other change?",
+        "context": "This is not the model gate.",
+        "options": [
+            {"key": "yes", "label": "Yes", "effect": "ships the other change"},
+            {"key": "no", "label": "No", "effect": "leaves it"},
+        ],
+        "pick": "no",
+    }
+
+
+def test_yes_on_a_different_ask_does_not_unlock_the_gated_model(
+    kanban_home, all_assignees_spawnable, gated,
+):
+    from hermes_cli.gm_gated_models import dispatch_refuses_gated
+
+    with kbc.connect() as conn:
+        task_id = kb.create_task(conn, title="probe card", assignee="probe")
+        _pin(conn, task_id)
+        kbd.dispatch_once(conn, spawn_fn=lambda _task, _ws: 1)
+        gate = gm.get_open_gm_ask(conn, task_id)
+        assert gate is not None
+        assert GATED in gate[1]["question"]
+        gm.answer_gm_ask(conn, task_id, key="no", by="gm", via="cli")
+        gm.record_gm_ask(
+            conn, task_id, _other_ask(), asked_by="probe", reason="other change",
+        )
+        answered = gm.answer_gm_ask(conn, task_id, key="yes", by="gm", via="cli")
+        assert answered["decision"]["model"] is None
+        assert card_has_gm_approval(conn, task_id, GATED) is False
+        assert dispatch_refuses_gated(conn, task_id, park=False) is True
+
+
+def test_yes_missing_the_model_does_not_unlock(
+    kanban_home, all_assignees_spawnable, gated,
+):
+    with kbc.connect() as conn:
+        task_id = kb.create_task(conn, title="probe card", assignee="probe")
+        _pin(conn, task_id)
+        kbd.dispatch_once(conn, spawn_fn=lambda _task, _ws: 1)
+        gate = gm.get_open_gm_ask(conn, task_id)
+        assert gate is not None
+        kb._append_event(conn, task_id, "gm_decision", {
+            "key": "yes",
+            "by": "gm",
+            "via": "cli",
+            "ask_event_id": gate[0],
+        })
+        assert card_has_gm_approval(conn, task_id, GATED) is False
+
+
+def test_profile_gm_yes_keeps_the_model(kanban_home, gated):
+    from hermes_cli.gm_gated_models import apply_profile_model_gate
+
+    def fresh():
+        return {
+            "model": {"default": GATED, "provider": "copilot"},
+            "fallback_providers": [
+                {"provider": "xai", "model": "grok-4.7"},
+            ],
+            "models": {"gm_gated": PATTERNS},
+        }
+
+    first = apply_profile_model_gate(fresh())
+    assert first["model"]["default"] == "grok-4.7"
+    with kbc.connect() as conn:
+        row = conn.execute(
+            "SELECT id FROM tasks WHERE idempotency_key = ?",
+            (f"gm-gate:profile:{GATED}",),
+        ).fetchone()
+        assert row is not None
+        answered = gm.answer_gm_ask(conn, row["id"], key="yes", by="gm", via="cli")
+        assert answered["decision"]["model"] == GATED
+    second = apply_profile_model_gate(fresh())
+    assert second["model"]["default"] == GATED
+
+
+def test_thrown_task_read_does_not_dispatch(
+    kanban_home, all_assignees_spawnable, gated, monkeypatch,
+):
+    from hermes_cli.gm_gated_models import dispatch_refuses_gated
+
+    with kbc.connect() as conn:
+        task_id = kb.create_task(conn, title="probe card", assignee="probe")
+        _pin(conn, task_id)
+        real = kb.get_task
+
+        def boom(conn, tid, *args, **kwargs):
+            for frame in inspect.stack():
+                if frame.function == "dispatch_refuses_gated":
+                    raise RuntimeError("board read failed")
+            return real(conn, tid)
+
+        monkeypatch.setattr(kb, "get_task", boom)
+        assert dispatch_refuses_gated(conn, task_id, park=False) is True
+        spawned = []
+        result = kbd.dispatch_once(
+            conn, spawn_fn=lambda task, _ws: spawned.append(task) or 1,
+        )
+    assert spawned == []
+    assert not any(item[0] == task_id for item in result.spawned)
+
+
+def test_fallback_skip_throw_does_not_keep_the_gated_chain(gated, monkeypatch):
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("gate down")
+
+    monkeypatch.setattr("hermes_cli.gm_gated_models.drop_gated_fallback", boom)
+    chain = get_fallback_chain({
+        "fallback_providers": [
+            {"provider": "copilot", "model": GATED},
+            {"provider": "xai", "model": "grok-4.7"},
+        ],
+    })
+    assert all(entry.get("model") != GATED for entry in chain)
+
+
+def test_moa_skip_throw_does_not_keep_the_gated_preset(gated, monkeypatch):
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("gate down")
+
+    monkeypatch.setattr("hermes_cli.gm_gated_models.filter_moa_preset", boom)
+    resolved = resolve_moa_preset({
+        "default_preset": "gate-test",
+        "presets": {
+            "gate-test": {
+                "enabled": True,
+                "reference_models": [
+                    {"provider": "copilot", "model": GATED, "enabled": True},
+                ],
+                "aggregator": {"provider": "copilot", "model": GATED},
+            },
+        },
+    })
+    models = [slot.get("model") for slot in resolved.get("reference_models") or []]
+    assert GATED not in models
+    assert (resolved.get("aggregator") or {}).get("model") != GATED
+
+
+def test_aux_skip_throw_does_not_keep_the_model(gated, monkeypatch):
+    from agent.auxiliary_task_config import (
+        _get_auxiliary_task_config,
+        session_auxiliary_scope,
+    )
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("gate down")
+
+    monkeypatch.setattr("hermes_cli.gm_gated_models.drop_gated_aux_model", boom)
+    with session_auxiliary_scope({"title": {"provider": "copilot", "model": GATED}}):
+        loaded = _get_auxiliary_task_config("title")
+    assert loaded.get("model") != GATED
+
+
+def test_profile_load_throw_does_not_keep_the_gated_default(gated, monkeypatch):
+    from hermes_cli.config import _apply_gm_gate
+
+    def boom(_config):
+        raise RuntimeError("gate down")
+
+    monkeypatch.setattr(
+        "hermes_cli.gm_gated_models.apply_profile_model_gate", boom,
+    )
+    loaded = _apply_gm_gate({
+        "model": {"default": GATED, "provider": "copilot"},
+        "fallback_providers": [{"provider": "copilot", "model": GATED}],
+        "models": {"gm_gated": PATTERNS},
+    })
+    assert loaded["model"]["default"] != GATED
+    assert all(
+        item.get("model") != GATED
+        for item in (loaded.get("fallback_providers") or [])
+    )

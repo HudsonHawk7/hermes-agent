@@ -2329,8 +2329,52 @@ def _apply_gm_gate(config: dict[str, Any]) -> dict[str, Any]:
 
         return apply_profile_model_gate(config)
     except Exception:
-        logger.warning("models.gm_gated: profile load skip failed", exc_info=True)
-        return config
+        logger.warning(
+            "models.gm_gated: profile load skip failed; not keeping an unproven model",
+            exc_info=True,
+        )
+        return _drop_unproven_profile_models(config)
+
+
+def _drop_unproven_profile_models(config: dict[str, Any]) -> dict[str, Any]:
+    """The gate threw, so no named model is proven allowed."""
+    cleared = dict(config)
+    model = cleared.get("model")
+    if isinstance(model, dict):
+        model = dict(model)
+        model["default"] = ""
+        cleared["model"] = model
+    cleared["fallback_providers"] = []
+    moa = cleared.get("moa")
+    if isinstance(moa, dict):
+        moa = dict(moa)
+        presets = moa.get("presets")
+        if isinstance(presets, dict):
+            presets = dict(presets)
+            for name, preset in list(presets.items()):
+                if not isinstance(preset, dict):
+                    continue
+                preset = dict(preset)
+                preset["reference_models"] = []
+                agg = preset.get("aggregator")
+                if isinstance(agg, dict):
+                    agg = dict(agg)
+                    agg["model"] = ""
+                    agg["provider"] = ""
+                    preset["aggregator"] = agg
+                presets[name] = preset
+            moa["presets"] = presets
+        cleared["moa"] = moa
+    auxiliary = cleared.get("auxiliary")
+    if isinstance(auxiliary, dict):
+        auxiliary = dict(auxiliary)
+        for task_name, block in list(auxiliary.items()):
+            if isinstance(block, dict):
+                block = dict(block)
+                block["model"] = ""
+                auxiliary[task_name] = block
+        cleared["auxiliary"] = auxiliary
+    return cleared
 
 
 def _load_config_impl(*, want_deepcopy: bool) -> dict[str, Any]:

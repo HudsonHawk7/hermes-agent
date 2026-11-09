@@ -93,8 +93,13 @@ def _drop_gated_aux(task: str, config: dict) -> dict:
 
         return drop_gated_aux_model(task, config)
     except Exception:
-        logger.warning("models.gm_gated: auxiliary skip failed", exc_info=True)
-        return config
+        logger.warning(
+            "models.gm_gated: auxiliary skip failed; not keeping the model",
+            exc_info=True,
+        )
+        cleared = dict(config) if isinstance(config, dict) else {}
+        cleared["model"] = ""
+        return cleared
 
 
 # The fields that together pick WHERE a call goes. They travel as one unit: a provider pinned on an

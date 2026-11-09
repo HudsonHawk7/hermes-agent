@@ -1,9 +1,11 @@
 """GM-gated models. ``models.gm_gated`` is named and never defaulted.
 
 A model that matches a pattern in that list is not dispatched, and is skipped
-when a profile loads it, unless the GM answered Yes on a ``hermes kanban ask``
-for that exact model. The answer is recorded with the answering identity.
-An agent setting a flag, or answering its own card, does not count.
+when a profile loads it, unless the GM answered Yes on that gate ask for that
+exact model. A later Yes on a different ask does not count. The answer is
+recorded with the answering identity. An agent setting a flag, or answering
+its own card, does not count. If the check cannot prove the model is allowed,
+it is not launched and the gated chain is not kept.
 
 The list is off when the key is missing, null, or not a list. This module
 never invents a pattern.
@@ -25,6 +27,17 @@ _apply_depth = 0
 
 SETTING = "models.gm_gated"
 GATE_PURPOSE = "gm_gated_model"
+
+
+def profile_gate_key(model: str) -> str:
+    """One idempotency key for a profile approval of *model*.
+
+    Filing and lookup must use this same key. A per-setting key never matches
+    the ask that was filed, so a GM Yes would not keep the model.
+    """
+    return f"gm-gate:profile:{model}"
+
+
 RULE = (
     "A gated model is not used unless the GM answered Yes on a hermes kanban "
     "ask for that model. An agent cannot approve its own card."
@@ -160,8 +173,10 @@ def card_has_gm_approval(
     model: str,
     assignee: Any = None,
 ) -> bool:
-    """True when the latest gate ask for *model* has a later GM Yes.
+    """True when the gate ask for *model* has a GM Yes on that same ask.
 
+    The decision must name this ask's event id and this exact model. A later
+    Yes on a different ask does not count. A missing model does not count.
     A metadata flag, a self-answer, or a Yes from the assignee does not count.
     An undone decision does not count.
     """
@@ -189,16 +204,19 @@ def card_has_gm_approval(
     decision = None
     decision_id = None
     for row in rows:
-        if row["id"] <= ask_id or row["kind"] != "gm_decision":
+        if row["kind"] != "gm_decision":
             continue
-        decision = _json_payload(row["payload"])
+        payload = _json_payload(row["payload"])
+        if str(payload.get("ask_event_id")) != str(ask_id):
+            continue
+        decision = payload
         decision_id = row["id"]
     if not decision or decision.get("undone") or decision.get("sent_back"):
         return False
     if str(decision.get("key") or "").strip().lower() != "yes":
         return False
-    decided = str(decision.get("model") or model)
-    if decided != model:
+    decided = decision.get("model")
+    if not isinstance(decided, str) or decided != model:
         return False
     for row in rows:
         if decision_id is not None and row["id"] > decision_id and row["kind"] == "gm_decision_undone":
@@ -297,8 +315,10 @@ def dispatch_refuses_gated(conn: sqlite3.Connection, task_id: str, *, park: bool
 
         task = kb.get_task(conn, task_id)
     except Exception:
-        logger.warning("%s: could not read %s at dispatch", SETTING, task_id)
-        return False
+        logger.warning(
+            "%s: could not read %s at dispatch; not spawning", SETTING, task_id,
+        )
+        return True
     if task is None:
         return False
     model = str(getattr(task, "model_override", None) or "").strip()
@@ -416,19 +436,20 @@ def drop_gated_aux_model(task: str, config: dict[str, Any], *, log: bool = True)
 
 
 def _profile_keeps(config: Any, setting: str, model: str) -> bool:
-    """True when a GM Yes is already on file for this profile setting.
+    """True when a GM Yes is already on file for this model.
 
-    Fail closed: a missing board, a flag, or a re-entrant load does not keep
-    the model. ``config`` is unused; approval lives on the kanban ask.
+    Filing and lookup share :func:`profile_gate_key`. A per-setting key never
+    matches the ask that was filed. Fail closed: a missing board, a flag, or
+    a re-entrant load does not keep the model.
     """
-    del config
+    del config, setting
     if os.environ.get("HERMES_KANBAN_TASK"):
         return False
     try:
         from hermes_cli import kanban_db as kb
         from hermes_cli import kanban_db_connect as kbc
 
-        key = f"gm-gate:{setting}:{model}"
+        key = profile_gate_key(model)
         with kbc.connect_closing() as conn:
             row = conn.execute(
                 "SELECT id, assignee FROM tasks WHERE idempotency_key = ? "
@@ -548,7 +569,7 @@ def _file_profile_asks(models: list[str]) -> None:
         kb.init_db()
         with kbc.connect_closing() as conn:
             for model in models:
-                key = f"gm-gate:profile:{model}"
+                key = profile_gate_key(model)
                 existing = conn.execute(
                     "SELECT id FROM tasks WHERE idempotency_key = ? "
                     "AND status NOT IN ('archived') LIMIT 1",

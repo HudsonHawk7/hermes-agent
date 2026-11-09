@@ -296,9 +296,20 @@ def resolve_moa_preset(config: Any, name: str | None = None) -> dict[str, Any]:
         return filter_moa_preset(resolved)
     except Exception:
         logging.getLogger(__name__).warning(
-            "models.gm_gated: moa skip failed", exc_info=True,
+            "models.gm_gated: moa skip failed; not keeping the preset models",
+            exc_info=True,
         )
-        return resolved
+        failed = deepcopy(resolved)
+        failed["reference_models"] = []
+        aggregator = failed.get("aggregator")
+        if isinstance(aggregator, dict):
+            aggregator = dict(aggregator)
+            aggregator["model"] = ""
+            aggregator["provider"] = ""
+            failed["aggregator"] = aggregator
+        else:
+            failed["aggregator"] = {}
+        return failed
 
 
 def skip_deep_merge(prefix: str, key: str) -> bool:
