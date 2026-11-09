@@ -54,6 +54,35 @@ export default {
       render: () => jsx(RuntimeChip, { prefs })
     })
 
+    // Proof action for the chat media slot. Scene Builder registers its own
+    // Refine. This one is the hello-runtime test button, and it stays off
+    // Solara and Aura even if the example plugin is copied into those homes.
+    ctx.register({
+      id: 'refine-test',
+      area: 'chat.mediaActions',
+      order: 10,
+      data: {
+        label: 'Refine test',
+        icon: 'sparkle',
+        when(media) {
+          const profile = String(media && media.profile ? media.profile : '')
+            .trim()
+            .toLowerCase()
+
+          return profile !== 'solara' && profile !== 'aura'
+        },
+        run(media) {
+          globalThis.__hermesMediaActionProof = {
+            path: media.path,
+            kind: media.kind,
+            sessionId: media.sessionId,
+            profile: media.profile,
+            label: 'Refine test'
+          }
+        }
+      }
+    })
+
     // Settings ▸ Plugins ▸ Hello Runtime (▸ Chip, ▸ About). Feature-detected
     // so the plugin still loads on hosts that predate the helper.
     ctx.registerSettingsPage?.({

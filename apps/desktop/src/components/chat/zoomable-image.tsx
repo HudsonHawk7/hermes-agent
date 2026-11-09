@@ -1,7 +1,7 @@
 'use client'
 
 import { useStore } from '@nanostores/react'
-import { type ComponentProps, useEffect } from 'react'
+import { type ComponentProps, type ReactNode, useEffect } from 'react'
 
 import { Dialog, DialogContent } from '@/components/ui/dialog'
 import { useZoomPan } from '@/components/ui/use-zoom-pan'
@@ -14,6 +14,8 @@ import { $transcriptLightbox, closeTranscriptLightbox, openTranscriptLightbox } 
 export interface ZoomableImageProps extends ComponentProps<'img'> {
   containerClassName?: string
   slot?: string
+  /** Plugin media actions. Rendered inside the hover group, left of Save. */
+  overlay?: ReactNode
   /** Full-resolution source for the lightbox and download. When set, the inline
    * `<img>` keeps its bounded `src` (avoiding heavy inline paints) while the
    * zoom view and Save action use the original — so a click-to-zoom shows real
@@ -36,6 +38,7 @@ export function ZoomableImage({
   zoomSrc,
   alt,
   slot,
+  overlay,
   ...props
 }: ZoomableImageProps) {
   const { t } = useI18n()
@@ -69,6 +72,7 @@ export function ZoomableImage({
         >
           <img alt={alt ?? ''} className={className} src={src} {...props} />
         </button>
+        {overlay}
         {src && (
           <ImageActionButton className="group-hover/image:opacity-100" copy={copy} onClick={download} saving={saving} />
         )}

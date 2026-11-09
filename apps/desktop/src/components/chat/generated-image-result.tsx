@@ -3,6 +3,7 @@
 import { type FC, useState } from 'react'
 
 import { DiffusionCanvas } from '@/components/chat/image-generation-placeholder'
+import { ChatMediaActionBar } from '@/components/chat/media-action-bar'
 import { ImageActionButton, ImageLightbox } from '@/components/chat/zoomable-image'
 import { useImageDownload } from '@/hooks/use-image-download'
 import { useMediaImage } from '@/hooks/use-media-image'
@@ -103,8 +104,11 @@ export const GeneratedImage: FC<{ aspectRatio?: string; result?: unknown }> = ({
             />
           </button>
         )}
-        {loaded && src && (
-          <ImageActionButton className="group-hover/image:opacity-100" copy={copy} onClick={download} saving={saving} />
+        {loaded && src && image && (
+          <>
+            <ChatMediaActionBar kind="image" path={image} />
+            <ImageActionButton className="group-hover/image:opacity-100" copy={copy} onClick={download} saving={saving} />
+          </>
         )}
       </span>
       {src && (
