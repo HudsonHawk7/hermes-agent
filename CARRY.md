@@ -64,6 +64,7 @@ print('recipes_root:', cfg.get('scene_builder', {}).get('recipes_root'))
 | 4c7e2f8d05e | refuse a gated model unless the GM answered Yes | models.gm_gated is named and never defaulted. A matching card is not dispatched, and a matching profile model is skipped, unless the GM answered Yes on a hermes kanban ask. An agent cannot approve its own card. Card t_76f52a9c. |
 | fb3f882c14b | a later Yes and a thrown check do not unlock a gated model | The Yes must be on that ask and name that model. The profile Yes is filed and looked up on one key. A thrown check does not launch the model and does not keep the gated chain. Card t_76f52a9c. |
 | 0c3b3953a6b | an unreadable gate list does not launch a gated model | A thrown config load is not an empty list. The dispatch is refused, and the gated fallback, moa, aux, and profile chain are not kept. Card t_76f52a9c. |
+| c5a50c47e85 | a broken settings file does not launch a gated model | A returned FailedConfigRead with no last-known-good list is not an empty list. The dispatch is refused, and the gated fallback, moa, aux, and profile chain are not kept. Card t_76f52a9c. |
 
 Add new rows here before pushing a carry. Upstream the individual fix as a normal PR from a short-lived branch off origin/main when appropriate.
 
