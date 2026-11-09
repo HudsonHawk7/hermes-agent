@@ -61,6 +61,7 @@ print('recipes_root:', cfg.get('scene_builder', {}).get('recipes_root'))
 | 7eb0c0cbf09 | sample video frames when the model cannot take a video part | video_analyze and vision_analyze fall back to ffmpeg frames on a local OpenAI-compatible route or a 400 invalid message format. Card t_56bef84c. |
 | 77d2ec30694 | reload a swapped desktop plugin on the next disk poll | The visible-tab poll stays up after folder watches succeed, and a known plugin.js whose mtime or size changed reloads without Reload desktop plugins. Card t_28520a5d. |
 | f5c6f1efcd3 | record a stuck worker-temp path once; ACL tests leave a liftable deny | A killed test no longer leaves Everyone (F) on a 0o700 folder. The janitor logs an unremovable path once. Card t_eaf8020a. Upstream not opened. |
+| f60589632df | record a desktop plugin fingerprint after a watch reload | A file-watch save and a linked-source resync now store the new mtime and size, so the next poll does not register the pane a second time. Card t_28520a5d. |
 | 9eff2de7d72 | pin worker temp from the root config when a profile has no kanban section | A profile-scoped spawn reads the root kanban.worker_temp_* values unless that profile set its own. Card t_b11af14f. Upstream not opened. |
 
 Add new rows here before pushing a carry. Upstream the individual fix as a normal PR from a short-lived branch off origin/main when appropriate.

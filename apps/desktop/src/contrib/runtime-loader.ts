@@ -856,6 +856,9 @@ async function resyncLinkedDiskPlugins(): Promise<void> {
 
     if (await loadDiskPlugin(record)) {
       await watchDiskPluginFile(desktop, record)
+      // The copy's mtime moved with this write. Leave it unrecorded and the
+      // next poll disposes and registers the plugin again.
+      await rememberPluginFingerprint(desktop, record)
     } else {
       void scanDiskPlugins()
     }
@@ -1090,7 +1093,7 @@ export async function uninstallDiskPlugin(pluginId: string): Promise<{ ok: boole
 }
 
 /** Manual rescan (the ⌘K "Reload desktop plugins" fallback) — re-reads
- *  known entries too, unlike the fs-watch/poll reconcile. */
+ *  every known entry, not only one whose plugin.js mtime or size changed. */
 export const discoverRuntimePlugins = (): Promise<void> => scanDiskPlugins(true)
 
 /** True while the disk door's FIRST scan is in flight. Boot code that must
@@ -1129,9 +1132,19 @@ export function watchRuntimePlugins(): void {
       }
 
       if (record.watchId === id) {
-        void loadDiskPlugin(record).then(readable => {
+        void loadDiskPlugin(record).then(async readable => {
           if (!readable) {
             void scanDiskPlugins()
+
+            return
+          }
+
+          // An in-place save does not re-bind the watch. Record the new
+          // mtime/size or the next poll loads this plugin a second time.
+          const shell = window.hermesDesktop
+
+          if (shell) {
+            await rememberPluginFingerprint(shell, record)
           }
         })
 
