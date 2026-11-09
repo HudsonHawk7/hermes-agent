@@ -68,6 +68,7 @@ print('recipes_root:', cfg.get('scene_builder', {}).get('recipes_root'))
 | fb3f882c14b | a later Yes and a thrown check do not unlock a gated model | The Yes must be on that ask and name that model. The profile Yes is filed and looked up on one key. A thrown check does not launch the model and does not keep the gated chain. Card t_76f52a9c. |
 | 0c3b3953a6b | an unreadable gate list does not launch a gated model | A thrown config load is not an empty list. The dispatch is refused, and the gated fallback, moa, aux, and profile chain are not kept. Card t_76f52a9c. |
 | c5a50c47e85 | a broken settings file does not launch a gated model | A returned FailedConfigRead with no last-known-good list is not an empty list. The dispatch is refused, and the gated fallback, moa, aux, and profile chain are not kept. Card t_76f52a9c. |
+| e2b5496fb58 | a good backup does not serve a gated model | A broken settings file is filtered before the backup is returned or cached. A backup with no list does not keep the profile, fallback, moa, or aux chain. Card t_76f52a9c. |
 
 Add new rows here before pushing a carry. Upstream the individual fix as a normal PR from a short-lived branch off origin/main when appropriate.
 
