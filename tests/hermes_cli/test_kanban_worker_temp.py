@@ -479,3 +479,118 @@ def test_janitor_removes_killed_acl_test_leftover(tmp_path):
                 check=False,
                 creationflags=flags,
             )
+
+
+def _yaml_string(value: str) -> str:
+    """A YAML double-quoted scalar. json.dumps escapes backslashes."""
+    return json.dumps(value)
+
+
+def _profile_scoped_layout(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Synthetic Hermes root plus a named profile that has no kanban section.
+
+    The profile sits outside the native Hermes home, under ``profiles/``, so
+    ``get_default_hermes_root()`` resolves to the synthetic root rather than
+    the machine's real config.
+    """
+    root = tmp_path / "hermes-root"
+    profile = root / "profiles" / "solara"
+    profile.mkdir(parents=True)
+    temp_root = tmp_path / "agent-tmp"
+    root.joinpath("config.yaml").write_text(
+        "kanban:\n"
+        f"  worker_temp_root: {_yaml_string(str(temp_root))}\n"
+        "  worker_temp_max_age_hours: 12\n"
+        "  worker_temp_janitor_minutes: 7\n",
+        encoding="utf-8",
+    )
+    profile.joinpath("config.yaml").write_text("model: test\n", encoding="utf-8")
+    return root, profile, temp_root
+
+
+def _isolate_profile_home(monkeypatch, profile: Path) -> None:
+    """Point this process at *profile* and drop the root-path memo."""
+    import hermes_constants
+
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    monkeypatch.setattr(hermes_constants, "_default_hermes_root_memo", None, raising=False)
+
+
+def test_profile_scoped_spawn_pins_temp_from_root_config(monkeypatch, tmp_path):
+    """A profile with no kanban section still pins TEMP from the root config.
+
+    Boards are root-scoped. ``_default_spawn`` calls ``apply_worker_temp_env``
+    with no kanban block, so a process whose HERMES_HOME is profiles/<name>
+    must not drop ``kanban.worker_temp_root``. Fails on base: that spawn leaves
+    the inherited temp path.
+    """
+    from hermes_constants import get_default_hermes_root, get_hermes_home
+
+    root, profile, temp_root = _profile_scoped_layout(tmp_path)
+    _isolate_profile_home(monkeypatch, profile)
+    inherited = str(tmp_path / "windows-temp")
+    monkeypatch.setenv("TEMP", inherited)
+    monkeypatch.setenv("TMP", inherited)
+    monkeypatch.setenv("TMPDIR", inherited)
+
+    assert get_hermes_home().resolve() == profile.resolve()
+    assert get_default_hermes_root().resolve() == root.resolve(), (
+        "test isolation failed: root resolved to the native Hermes home"
+    )
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    captured = _capture_spawn_unmocked(monkeypatch, tmp_path, workspace, assignee="solara")
+    env = captured["env"]
+    marker = env.get("HERMES_WORKER_TEMP_ROOT") or env.get("TEMP")
+    assert marker, "profile-scoped spawn did not pin TEMP from the root worker_temp_root"
+    assert Path(marker).resolve().is_relative_to(temp_root.resolve())
+    assert "windows-temp" not in (env.get("TEMP") or "")
+    assert env.get("TEMP") == env.get("TMP") == env.get("TMPDIR")
+
+    settings = kwt.load_worker_temp_settings()
+    assert settings.max_age_hours == 12
+    assert settings.janitor_minutes == 7
+
+
+def _capture_spawn_unmocked(monkeypatch, tmp_path, workspace: Path, *, assignee: str) -> dict:
+    """Real ``_default_spawn`` with Popen stubbed and load_config left live."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_dispatch as kbd
+
+    captured: dict = {}
+
+    class FakeProc:
+        pid = 4242
+
+    def fake_popen(cmd, *args, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["env"] = dict(kwargs.get("env") or {})
+        captured["cwd"] = kwargs.get("cwd")
+        return FakeProc()
+
+    monkeypatch.setattr(kbd.subprocess, "Popen", fake_popen)
+    kbd._default_spawn(_make_task(kb, assignee=assignee), str(workspace))
+    return captured
+
+
+def test_set_profile_worker_temp_overrides_root(monkeypatch, tmp_path):
+    """A profile value that is actually set wins over the root config."""
+    _root, profile, root_temp = _profile_scoped_layout(tmp_path)
+    profile_temp = tmp_path / "profile-temp"
+    profile.joinpath("config.yaml").write_text(
+        "kanban:\n"
+        f"  worker_temp_root: {_yaml_string(str(profile_temp))}\n"
+        "  worker_temp_max_age_hours: 6\n",
+        encoding="utf-8",
+    )
+    _isolate_profile_home(monkeypatch, profile)
+    env: dict = {}
+    pinned = kwt.apply_worker_temp_env(env, task_id=_TID, run_id=4, assignee="solara")
+    assert pinned is not None
+    assert Path(pinned).resolve().is_relative_to(profile_temp.resolve())
+    assert not Path(pinned).resolve().is_relative_to(root_temp.resolve())
+    settings = kwt.load_worker_temp_settings()
+    assert settings.max_age_hours == 6
+    # Janitor minutes were not set on the profile, so the root value stands.
+    assert settings.janitor_minutes == 7
