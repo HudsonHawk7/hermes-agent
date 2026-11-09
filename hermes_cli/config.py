@@ -2336,6 +2336,17 @@ def _apply_gm_gate(config: dict[str, Any]) -> dict[str, Any]:
         return _drop_unproven_profile_models(config)
 
 
+def _apply_gm_gate_during_load(config: dict[str, Any]) -> dict[str, Any]:
+    """Apply the profile gate without re-reading the file this load is building."""
+    from hermes_cli import gm_gated_models as gate
+
+    gate._inside_config_load += 1
+    try:
+        return _apply_gm_gate(config)
+    finally:
+        gate._inside_config_load -= 1
+
+
 def _drop_unproven_profile_models(config: dict[str, Any]) -> dict[str, Any]:
     """The gate threw, so no named model is proven allowed."""
     cleared = dict(config)
@@ -2380,7 +2391,7 @@ def _drop_unproven_profile_models(config: dict[str, Any]) -> dict[str, Any]:
 def _load_config_impl(*, want_deepcopy: bool) -> dict[str, Any]:
     snapshot = _worker_config_snapshot()
     if snapshot is not None:
-        return _apply_gm_gate(_deep_merge(copy.deepcopy(DEFAULT_CONFIG), snapshot))
+        return _apply_gm_gate_during_load(_deep_merge(copy.deepcopy(DEFAULT_CONFIG), snapshot))
 
     # Lock-free fast path for cache hits — same publication contract as `_read_raw_config_impl`
     # above (whole-tuple replace, `_CONFIG_LOCK` only serializes rebuilds and writers). A hit costs
@@ -2453,7 +2464,7 @@ def _load_config_impl(*, want_deepcopy: bool) -> dict[str, Any]:
 
         normalized = _canonicalize_config(config)
         expanded, managed_config = _merge_managed_overlay(_expand_env_vars(normalized))
-        expanded = _apply_gm_gate(expanded)
+        expanded = _apply_gm_gate_during_load(expanded)
         _LAST_EXPANDED_CONFIG_BY_PATH[path_key] = copy.deepcopy(expanded)
         if cache_sig is not None:
             # The cache stores its own deepcopy so load_config() callers can mutate freely while

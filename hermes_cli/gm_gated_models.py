@@ -8,7 +8,8 @@ its own card, does not count. If the check cannot prove the model is allowed,
 it is not launched and the gated chain is not kept.
 
 The list is off when the key is missing, null, or not a list. This module
-never invents a pattern.
+never invents a pattern. An unreadable list is not off: the model is not
+launched, and a gated chain is not kept.
 """
 
 from __future__ import annotations
@@ -62,17 +63,59 @@ def patterns_from_config(config: Any) -> list[str]:
     return [str(item).strip() for item in raw if str(item).strip()]
 
 
+class GateListUnreadable(Exception):
+    """The gate list could not be read. That is not an empty list."""
+
+
+_inside_config_load = 0
+_unreadable_logged = False
+
+
+def _config_names_gate(config: Any) -> bool:
+    return (
+        isinstance(config, dict)
+        and isinstance(config.get("models"), dict)
+        and "gm_gated" in config["models"]
+    )
+
+
 def current_patterns(config: Any = None) -> list[str]:
-    """Patterns from *config*, or from the loaded config when *config* is omitted."""
+    """Patterns from *config*, or from the loaded config when *config* is omitted.
+
+    A thrown root read raises :class:`GateListUnreadable`. That is not an
+    empty list, and callers must not treat it as "not gated".
+    """
     if config is None:
         try:
             from hermes_cli.config import load_config_readonly
 
             config = load_config_readonly()
-        except Exception:
-            logger.debug("gm_gated: could not load config for patterns", exc_info=True)
-            return []
+        except GateListUnreadable:
+            raise
+        except Exception as exc:
+            global _unreadable_logged
+            if not _unreadable_logged:
+                _unreadable_logged = True
+                logger.warning(
+                    "%s: could not read the gate list; not treating it as unset. %s",
+                    SETTING,
+                    RULE,
+                    exc_info=True,
+                )
+            raise GateListUnreadable("could not read models.gm_gated") from exc
     return patterns_from_config(config)
+
+
+def require_readable_list(config: Any = None) -> None:
+    """Raise when the gate list cannot be read.
+
+    A dict that names ``models.gm_gated`` is the list. A missing key is unset
+    only when a root read succeeds, or when this call is already inside a
+    config load (that dict is the load result; do not re-enter).
+    """
+    if _config_names_gate(config) or _apply_depth or _inside_config_load:
+        return
+    current_patterns(None)
 
 
 def model_is_gated(
@@ -272,7 +315,13 @@ def park_if_gated(
     is left alone; the next dispatch refuses the pin.
     """
     name = str(model or "").strip()
-    if not name or not model_is_gated(name, provider=provider):
+    if not name:
+        return False
+    try:
+        gated = model_is_gated(name, provider=provider)
+    except GateListUnreadable:
+        gated = True
+    if not gated:
         return False
     if card_has_gm_approval(conn, task_id, name, assignee):
         return False
@@ -325,7 +374,11 @@ def dispatch_refuses_gated(conn: sqlite3.Connection, task_id: str, *, park: bool
     if not model:
         return False
     provider = getattr(task, "provider_override", None)
-    if not model_is_gated(model, provider=provider):
+    try:
+        gated = model_is_gated(model, provider=provider)
+    except GateListUnreadable:
+        gated = True
+    if not gated:
         return False
     assignee = getattr(task, "assignee", None)
     if card_has_gm_approval(conn, task_id, model, assignee):
@@ -366,6 +419,7 @@ def drop_gated_fallback(
     log: bool = True,
 ) -> list[dict[str, Any]]:
     """Drop gated fallback entries. The next allowed entry stays in order."""
+    require_readable_list(config)
     kept: list[dict[str, Any]] = []
     skipped: list[str] = []
     for entry in chain:
@@ -384,6 +438,7 @@ def filter_moa_preset(preset: dict[str, Any], *, config: Any = None, log: bool =
     """Drop gated reference slots and a gated aggregator. Other slots stay."""
     if not isinstance(preset, dict):
         return preset
+    require_readable_list(config)
     skipped: list[str] = []
     refs = preset.get("reference_models")
     if isinstance(refs, list):
@@ -423,6 +478,7 @@ def drop_gated_aux_model(task: str, config: dict[str, Any], *, log: bool = True)
     """Clear a gated auxiliary model so the next allowed route is used."""
     if not isinstance(config, dict):
         return config
+    require_readable_list(None)
     model, provider = _entry_model(config)
     if not model or not model_is_gated(model, provider=provider):
         return config
@@ -485,11 +541,15 @@ def apply_profile_model_gate(config: dict[str, Any]) -> dict[str, Any]:
     """Skip gated profile models in a loaded config. The file on disk is not rewritten.
 
     One warning names every setting skipped in this load. The next allowed
-    model in the fallback chain replaces a gated ``model.default``. Missing
-    patterns are a no-op, so an unset key never changes behavior.
+    model in the fallback chain replaces a gated ``model.default``. A missing
+    key is a no-op only when the list can be read. An unreadable list raises
+    so the caller does not keep the gated model.
     """
     global _apply_depth
-    if _apply_depth or not isinstance(config, dict) or not patterns_from_config(config):
+    if _apply_depth or not isinstance(config, dict):
+        return config
+    if not patterns_from_config(config):
+        require_readable_list(config)
         return config
     _apply_depth += 1
     try:

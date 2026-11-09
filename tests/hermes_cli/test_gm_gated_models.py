@@ -23,6 +23,8 @@ from hermes_cli.gm_gated_models import (
     SETTING,
     card_has_gm_approval,
     current_patterns,
+    dispatch_refuses_gated,
+    model_is_gated,
 )
 from hermes_cli.moa_config import resolve_moa_preset
 
@@ -385,3 +387,82 @@ def test_profile_load_throw_does_not_keep_the_gated_default(gated, monkeypatch):
         item.get("model") != GATED
         for item in (loaded.get("fallback_providers") or [])
     )
+
+
+def test_unreadable_gate_list_does_not_launch_or_keep_the_chain(
+    kanban_home, all_assignees_spawnable, monkeypatch, caplog,
+):
+    """A thrown config load is not an empty gate list.
+
+    On e012f81b6dd, load_config_readonly raising made model_is_gated return
+    False, so dispatch launched the pin and the skip wrappers kept the chain.
+    """
+    def boom():
+        raise OSError("config unreadable")
+
+    monkeypatch.setattr("hermes_cli.config.load_config_readonly", boom)
+
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.gm_gated_models"):
+        try:
+            reported = model_is_gated(GATED)
+        except Exception:
+            reported = True
+        assert reported is True
+
+    with kbc.connect() as conn:
+        task_id = kb.create_task(conn, title="probe card", assignee="probe")
+        _pin(conn, task_id)
+        assert dispatch_refuses_gated(conn, task_id, park=False) is True
+        spawned = []
+        result = kbd.dispatch_once(
+            conn, spawn_fn=lambda task, _ws: spawned.append(task) or 1,
+        )
+    assert spawned == []
+    assert not any(item[0] == task_id for item in result.spawned)
+
+    chain = get_fallback_chain({
+        "fallback_providers": [
+            {"provider": "copilot", "model": GATED},
+            {"provider": "xai", "model": "grok-4.7"},
+        ],
+    })
+    assert all(entry.get("model") != GATED for entry in chain)
+
+    resolved = resolve_moa_preset({
+        "default_preset": "gate-test",
+        "presets": {
+            "gate-test": {
+                "enabled": True,
+                "reference_models": [
+                    {"provider": "copilot", "model": GATED, "enabled": True},
+                ],
+                "aggregator": {"provider": "copilot", "model": GATED},
+            },
+        },
+    })
+    models = [slot.get("model") for slot in resolved.get("reference_models") or []]
+    assert GATED not in models
+    assert (resolved.get("aggregator") or {}).get("model") != GATED
+
+    from agent.auxiliary_task_config import (
+        _get_auxiliary_task_config,
+        session_auxiliary_scope,
+    )
+
+    with session_auxiliary_scope({"title": {"provider": "copilot", "model": GATED}}):
+        loaded = _get_auxiliary_task_config("title")
+    assert loaded.get("model") != GATED
+
+    from hermes_cli.config import _apply_gm_gate
+
+    profile = _apply_gm_gate({
+        "model": {"default": GATED, "provider": "copilot"},
+        "fallback_providers": [{"provider": "copilot", "model": GATED}],
+    })
+    assert profile["model"]["default"] != GATED
+    assert all(
+        item.get("model") != GATED
+        for item in (profile.get("fallback_providers") or [])
+    )
+    assert SETTING in caplog.text
+    assert RULE in caplog.text
