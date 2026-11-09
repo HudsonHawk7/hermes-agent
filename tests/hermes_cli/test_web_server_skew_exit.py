@@ -90,7 +90,11 @@ def test_default_probe_retires_once_the_checkout_moves_past_the_boot_revision(tm
                              poll_s=0.01, max_polls=4).join(timeout=5)
     assert unchanged.should_exit is False
 
-    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "two"], check=True)
+    # An empty commit is not runtime skew. The watchdog still retires when a
+    # Python file the process imports actually changed.
+    (repo / "stale_mod.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run([*git, "add", "stale_mod.py"], check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "two"], check=True)
     moved = _Server()
     start_code_skew_watchdog(moved, update_probe=lambda: False, fence=fence,
                              poll_s=0.01, max_polls=4).join(timeout=5)
