@@ -10,6 +10,7 @@ stale-module ImportError after ``hermes update``.
 
 import asyncio
 import contextlib
+import subprocess
 
 import pytest
 
@@ -41,6 +42,89 @@ class TestDetectCodeSkew:
         assert skew == ("abc1234567", "def4567890")
 
 
+def _git(repo, *args):
+    subprocess.run(
+        [
+            "git", "-C", str(repo),
+            "-c", "user.name=t",
+            "-c", "user.email=t@t",
+            "-c", "commit.gpgsign=false",
+            *args,
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+def _init_repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    (repo / "README.md").write_text("docs\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-q", "-m", "base")
+    return repo
+
+
+def _boot_at(repo, monkeypatch):
+    monkeypatch.setattr(code_skew, "_PROJECT_ROOT", repo)
+    monkeypatch.setattr(code_skew, "_boot_fingerprint", None)
+    code_skew.record_boot_fingerprint()
+    assert code_skew._boot_fingerprint, "temp repo fingerprint unread"
+
+
+class TestRuntimeFileSkew:
+    """A SHA move is skew only when the running process's files changed.
+
+    Desktop and docs fast-forwards must not lock the model picker. A git
+    failure still reports skew, same as a bare revision mismatch.
+    """
+
+    def test_desktop_or_docs_only_commit_is_not_skew(self, tmp_path, monkeypatch):
+        repo = _init_repo(tmp_path)
+        _boot_at(repo, monkeypatch)
+        desktop = repo / "apps" / "desktop"
+        desktop.mkdir(parents=True)
+        (desktop / "plugin.js").write_text("changed\n", encoding="utf-8")
+        (repo / "CARRY.md").write_text("a docs row\n", encoding="utf-8")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-q", "-m", "desktop and docs only")
+
+        skew = code_skew.detect_code_skew()
+        assert skew is None, f"desktop/docs-only fast-forward locked the picker: {skew}"
+
+    def test_python_change_is_skew(self, tmp_path, monkeypatch):
+        repo = _init_repo(tmp_path)
+        _boot_at(repo, monkeypatch)
+        (repo / "gateway_mod.py").write_text("x = 1\n", encoding="utf-8")
+        _git(repo, "add", "gateway_mod.py")
+        _git(repo, "commit", "-q", "-m", "python")
+
+        skew = code_skew.detect_code_skew()
+        assert skew is not None
+        assert skew[0] != skew[1]
+
+    def test_packaged_asset_change_is_skew(self, tmp_path, monkeypatch):
+        repo = _init_repo(tmp_path)
+        _boot_at(repo, monkeypatch)
+        asset = repo / "gateway" / "assets"
+        asset.mkdir(parents=True)
+        (asset / "status_phrases.yaml").write_text("phrases: []\n", encoding="utf-8")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-q", "-m", "asset")
+
+        assert code_skew.detect_code_skew() is not None
+
+    def test_git_error_falls_back_to_skew(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(code_skew, "_PROJECT_ROOT", tmp_path / "not-a-repo")
+        monkeypatch.setattr(
+            code_skew, "_boot_fingerprint", "git:refs/heads/main:abc1234567890",
+        )
+        monkeypatch.setattr(
+            code_skew, "_fingerprint", lambda: "git:refs/heads/main:def4567890123",
+        )
+
+        assert code_skew.detect_code_skew() == ("abc1234567", "def4567890")
 
 
 class TestShort:
