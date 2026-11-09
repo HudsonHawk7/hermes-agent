@@ -1,5 +1,9 @@
 // Host-owned contribution areas with no feature module of their own; the SDK
 // barrel re-exports them.
+//
+// A button on a chat picture or clip is not one of these mounts. Plugins
+// register into `chat.mediaActions` (MEDIA_ACTION_AREA in app/chat/media-actions.ts).
+// The host shows it on hover/tap and passes the media path, session id and profile.
 
 export const PANES_AREA = 'panes'
 export const STATUSBAR_AREAS = { left: 'statusBar.left', right: 'statusBar.right' } as const

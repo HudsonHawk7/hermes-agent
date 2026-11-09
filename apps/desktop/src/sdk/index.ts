@@ -1637,6 +1637,15 @@ export {
  *  canonical component for 1:1 chat header and group-chat header; plugins must
  *  import it from here (never `@/app/chat/listening-light`). */
 export { ListeningLight } from '@/app/chat/listening-light'
+/** Hover/tap actions on a picture or clip in a chat message. A plugin registers
+ *  data (`label`, optional `icon`, `when`, `run`); the host paints the button
+ *  and passes `{ path, kind, sessionId, profile }`. Not a pane — see areas.ts. */
+export {
+  type ChatMediaAction,
+  type ChatMediaActionContext,
+  type ChatMediaKind,
+  MEDIA_ACTION_AREA
+} from '@/app/chat/media-actions'
 /** THE session status dot — the one primitive the sidebar row, the pane tabs
  *  and the session switcher render, so a session's status can never disagree
  *  between surfaces. Pass the STORED session id and it resolves the rest

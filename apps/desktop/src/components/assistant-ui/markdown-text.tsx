@@ -12,6 +12,7 @@ import { type ComponentProps, isValidElement, memo, type ReactNode, useEffect, u
 import { defaultRemarkPlugins } from 'streamdown'
 
 import { ExpandableBlock } from '@/components/chat/expandable-block'
+import { ChatMediaActionBar } from '@/components/chat/media-action-bar'
 import { PreviewAttachment } from '@/components/chat/preview-attachment'
 import { chunkByLines, SyntaxHighlighter } from '@/components/chat/shiki-highlighter'
 import { TranscriptVideo } from '@/components/chat/transcript-video'
@@ -222,12 +223,15 @@ function MediaPlaybackAttachment({ path }: { path: string }) {
     return (
       <span className="my-3 block max-w-2xl rounded-xl border border-(--ui-stroke-tertiary) bg-muted/35 p-3">
         <span className="mb-2 block truncate text-xs font-medium text-muted-foreground">{name}</span>
-        <TranscriptVideo
-          className="block max-h-112 w-full rounded-lg bg-black"
-          controls
-          onError={() => setFailed(true)}
-          src={src}
-        />
+        <span className="group/image relative block">
+          <TranscriptVideo
+            className="block max-h-112 w-full rounded-lg bg-black"
+            controls
+            onError={() => setFailed(true)}
+            src={src}
+          />
+          <ChatMediaActionBar kind="video" path={path} />
+        </span>
         {failed && <OpenMediaButton kind="video" path={path} />}
       </span>
     )
@@ -469,6 +473,8 @@ function MarkdownImageContent({
             image.onLoad(event.currentTarget)
             onLoad?.(event)
           }}
+          overlay={rawSrc ? <ChatMediaActionBar kind="image" path={rawSrc} /> : undefined}
+          slot="aui_markdown-image"
           src={image.src}
           style={style}
         />
