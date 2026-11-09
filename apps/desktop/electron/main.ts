@@ -16538,6 +16538,30 @@ ipcMain.handle('hermes:readPluginSource', async (_event: unknown, filePath: unkn
   }
 })
 
+// The renderer poll compares this to the mtime and size it recorded at load.
+// A same-path folder swap does not fire the file watch (#91503); this stat is
+// how the next poll knows to reload. No maxBytes — a too-large file must still
+// report its size so the load path can refuse it.
+ipcMain.handle('hermes:statPluginFile', async (_event: unknown, filePath: unknown) => {
+  try {
+    const { resolvedPath, stat } = await resolveReadableFileForIpc(filePath, {
+      purpose: 'Plugin source'
+    })
+
+    return {
+      mtimeMs: stat.mtimeMs,
+      path: resolvedPath,
+      size: stat.size
+    }
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      return missingFileResult(filePath, error)
+    }
+
+    throw error
+  }
+})
+
 ipcMain.handle('hermes:selectPaths', async (_event, options: any = {}) => {
   const properties = selectPathsDialogProperties(options || {})
 
