@@ -1285,10 +1285,12 @@ describe('linked dev package: the source checkout drives the desktop half', () =
     // path, so that watch never fires (#91503) and the stale module stays
     // until "Reload desktop plugins". This must fail on that base.
     vi.useRealTimers()
+
     const createObjectURL = vi.spyOn(URL, 'createObjectURL').mockImplementation(
       blob =>
         `data:text/javascript;base64,${Buffer.from((blob as unknown as { parts: string[] }).parts.join('')).toString('base64')}`
     )
+
     const revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
     const RealBlob = globalThis.Blob
     vi.stubGlobal(
@@ -1314,13 +1316,17 @@ describe('linked dev package: the source checkout drives the desktop half', () =
     let size = 40
     const pollTicks: Array<() => void> = []
     const realSetInterval = window.setInterval.bind(window)
+
     const intervalSpy = vi.spyOn(window, 'setInterval').mockImplementation(((fn: TimerHandler, ms?: number, ...rest: unknown[]) => {
       if (ms === 5_000) {
         pollTicks.push(fn as () => void)
+
         return 1 as unknown as ReturnType<typeof setInterval>
       }
+
       return realSetInterval(fn, ms as number, ...(rest as []))
     }) as typeof window.setInterval)
+
     const statPluginFile = vi.fn(async () => ({ mtimeMs, path: file, size }))
 
     desktopPluginsRoot.mockResolvedValue(root)
@@ -1328,9 +1334,11 @@ describe('linked dev package: the source checkout drives the desktop half', () =
       if (dir === root) {
         return { entries: [{ name: 'swapped', path: folder, isDirectory: true }] }
       }
+
       if (dir === folder) {
         return { entries: [{ name: 'plugin.js', path: file, isDirectory: false }] }
       }
+
       return { entries: [] }
     })
     readPluginSource.mockImplementation(async () => ({ text: source, truncated: false }))
