@@ -2322,10 +2322,21 @@ def _load_config_cache_hit(path_key: str, cache_sig: Any) -> Optional[dict[str, 
     return None
 
 
+def _apply_gm_gate(config: dict[str, Any]) -> dict[str, Any]:
+    """Skip gated profile models. The key is never defaulted; a missing key is a no-op."""
+    try:
+        from hermes_cli.gm_gated_models import apply_profile_model_gate
+
+        return apply_profile_model_gate(config)
+    except Exception:
+        logger.warning("models.gm_gated: profile load skip failed", exc_info=True)
+        return config
+
+
 def _load_config_impl(*, want_deepcopy: bool) -> dict[str, Any]:
     snapshot = _worker_config_snapshot()
     if snapshot is not None:
-        return _deep_merge(copy.deepcopy(DEFAULT_CONFIG), snapshot)
+        return _apply_gm_gate(_deep_merge(copy.deepcopy(DEFAULT_CONFIG), snapshot))
 
     # Lock-free fast path for cache hits — same publication contract as `_read_raw_config_impl`
     # above (whole-tuple replace, `_CONFIG_LOCK` only serializes rebuilds and writers). A hit costs
@@ -2398,6 +2409,7 @@ def _load_config_impl(*, want_deepcopy: bool) -> dict[str, Any]:
 
         normalized = _canonicalize_config(config)
         expanded, managed_config = _merge_managed_overlay(_expand_env_vars(normalized))
+        expanded = _apply_gm_gate(expanded)
         _LAST_EXPANDED_CONFIG_BY_PATH[path_key] = copy.deepcopy(expanded)
         if cache_sig is not None:
             # The cache stores its own deepcopy so load_config() callers can mutate freely while
@@ -2467,6 +2479,17 @@ def _strip_managed_keys_for_save(config: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
+_GM_GATED_COMMENT = """
+# models.gm_gated — named, never defaulted. Architect sets the list.
+# A matching model is not dispatched, and is skipped at profile load, unless
+# the GM answered Yes on `hermes kanban ask`. An agent cannot approve its own card.
+#models:
+#  gm_gated:
+#    - claude-fable-*
+#    - "*/claude-fable-*"
+"""
+
+
 def _commented_sections_for_save(normalized: dict[str, Any]) -> Optional[str]:
     """Commented-out example blocks for features that are off/unconfigured."""
     parts = []
@@ -2476,6 +2499,9 @@ def _commented_sections_for_save(normalized: dict[str, Any]) -> Optional[str]:
     fb_entries = fb if isinstance(fb, list) else [fb]
     if not any(isinstance(e, dict) and e.get("provider") and e.get("model") for e in fb_entries):
         parts.append(_FALLBACK_COMMENT)
+    models = normalized.get("models")
+    if not isinstance(models, dict) or "gm_gated" not in models:
+        parts.append(_GM_GATED_COMMENT)
     return "".join(parts) or None
 
 

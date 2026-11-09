@@ -51,8 +51,8 @@ def _get_auxiliary_task_config(task: str, _seen: frozenset = frozenset()) -> dic
         return {}
     config = _task_config(str(task), _seen)
     if getattr(task, "route_authoritative", False):
-        return {key: value for key, value in config.items() if key not in _AUX_ROUTE_KEYS}
-    return config
+        config = {key: value for key, value in config.items() if key not in _AUX_ROUTE_KEYS}
+    return _drop_gated_aux(str(task), config)
 
 
 def _task_config(task: str, _seen: frozenset) -> dict[str, Any]:
@@ -85,6 +85,16 @@ def _task_config(task: str, _seen: frozenset) -> dict[str, Any]:
     except Exception:  # health: allow BLE001 -- plugin discovery must never break aux config reads
         logger.debug("plugin auxiliary task lookup failed for %r", task, exc_info=True)
     return task_config
+
+
+def _drop_gated_aux(task: str, config: dict) -> dict:
+    try:
+        from hermes_cli.gm_gated_models import drop_gated_aux_model
+
+        return drop_gated_aux_model(task, config)
+    except Exception:
+        logger.warning("models.gm_gated: auxiliary skip failed", exc_info=True)
+        return config
 
 
 # The fields that together pick WHERE a call goes. They travel as one unit: a provider pinned on an

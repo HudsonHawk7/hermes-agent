@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import math
 from copy import deepcopy
 from typing import Any
@@ -288,7 +289,16 @@ def resolve_moa_preset(config: Any, name: str | None = None) -> dict[str, Any]:
         raise MoAPresetNotFoundError(
             f"MoA preset '{preset_name}' was not found. Available presets: "
             f"{available}. Run `hermes moa list`.")
-    return deepcopy(preset)
+    resolved = deepcopy(preset)
+    try:
+        from hermes_cli.gm_gated_models import filter_moa_preset
+
+        return filter_moa_preset(resolved)
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "models.gm_gated: moa skip failed", exc_info=True,
+        )
+        return resolved
 
 
 def skip_deep_merge(prefix: str, key: str) -> bool:
