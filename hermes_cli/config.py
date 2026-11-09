@@ -2262,6 +2262,18 @@ def _last_known_good_fallback(config_path: Path, path_key: str, cache_sig, exc: 
             expanded_good: dict[str, Any] = _expand_env_vars(normalized)  # type: ignore[assignment]
             lkg = filter_served_backup(_merge_managed_overlay(expanded_good)[0])
             fallback = "last-known-good-backup"
+    if isinstance(lkg, dict):
+        # save_config stores this copy before the gate. Filter it when it
+        # names the list, before it is returned or cached. A copy with no
+        # list is list-off and stays as loaded.
+        from hermes_cli.gm_gated_models import (
+            filter_cached_last_known_good,
+            patterns_from_config,
+        )
+        expanded_lkg = _expand_env_vars(copy.deepcopy(lkg))
+        if isinstance(expanded_lkg, dict) and patterns_from_config(expanded_lkg):
+            lkg = filter_cached_last_known_good(expanded_lkg)
+            _LAST_EXPANDED_CONFIG_BY_PATH[path_key] = copy.deepcopy(lkg)
     _warn_config_parse_failure(
         config_path, exc, fallback=fallback if lkg is not None else "defaults")
     if lkg is None:
@@ -2600,7 +2612,10 @@ def save_config(
         atomic_config_replace(config_path, normalized, extra_content_on_create=_commented_sections_for_save(normalized))
         _secure_file(config_path)
         _RAW_CONFIG_CACHE.pop(str(config_path), None)
-        _LAST_EXPANDED_CONFIG_BY_PATH[str(config_path)] = copy.deepcopy(current_normalized)
+        from hermes_cli.gm_gated_models import filter_cached_last_known_good
+        _LAST_EXPANDED_CONFIG_BY_PATH[str(config_path)] = filter_cached_last_known_good(
+            copy.deepcopy(current_normalized)
+        )
     from hermes_cli.observability.shared_metrics_disabled import record_config_saved
     record_config_saved(_raw_for_paths, current_normalized)
 

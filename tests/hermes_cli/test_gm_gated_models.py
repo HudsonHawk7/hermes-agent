@@ -769,3 +769,51 @@ def test_backup_without_gate_list_does_not_keep_gated_chain(
             model_is_gated(GATED)
     assert SETTING in caplog.text
     assert RULE in caplog.text
+
+
+def test_plugin_save_then_broken_file_does_not_serve_gated_model(
+    kanban_home, monkeypatch,
+):
+    """A plugin settings save must not put the raw gated model back in memory.
+
+    save_config stores the merged dict before the gate runs. On a2b1e1ab500
+    the fallback used that copy whenever it was already in memory, and a
+    broken file served claude-fable-5-1. This test uses the real loader and
+    save_plugin_setting. It does not clear the in-memory cache, and it does
+    not delete the good backup.
+    """
+    from hermes_cli import config as cfg
+    from hermes_cli.config import get_config_path, load_config, load_config_readonly
+    from hermes_cli.config_read_errors import FailedConfigRead
+    from hermes_cli.plugins_state import save_plugin_setting
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    config_path = get_config_path()
+    _clear_config_memory()
+    config_path.write_text(_WITH_LIST, encoding="utf-8")
+
+    readable = load_config_readonly()
+    assert readable.get("model", {}).get("default") != GATED
+    backup = _good_backup(config_path)
+    raw = backup.read_bytes()
+    assert GATED.encode() in raw
+
+    save_plugin_setting("probe-plugin", ("note",), "x")
+    path_key = str(config_path)
+    assert path_key in cfg._LAST_EXPANDED_CONFIG_BY_PATH, (
+        "the in-memory last-known-good must still be set"
+    )
+
+    config_path.write_text("models: [\n", encoding="utf-8")
+    assert path_key in cfg._LAST_EXPANDED_CONFIG_BY_PATH, (
+        "breaking the file must not clear the in-memory cache"
+    )
+    assert backup.read_bytes() == raw
+
+    loaded = load_config_readonly()
+    assert type(loaded) is FailedConfigRead
+    assert _served_gated(loaded) == [], (
+        "plugin save then a broken file served the gated model from memory"
+    )
+    assert _served_gated(load_config_readonly()) == []
+    assert _served_gated(load_config()) == []

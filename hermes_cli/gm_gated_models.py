@@ -607,6 +607,19 @@ def filter_served_backup(config: dict[str, Any]) -> dict[str, Any]:
         return _drop_unproven_profile_models(config)
 
 
+def filter_cached_last_known_good(config: dict[str, Any]) -> dict[str, Any]:
+    """Filter an in-memory last-known-good that names the gate list.
+
+    ``save_config`` stores the canonicalized dict before the gate runs, so
+    that copy can still name a gated model. Filter it before it is stored,
+    returned, or cached again. A copy with no list is list-off and is left
+    unchanged, so a YAML typo still serves the last loaded model.
+    """
+    if not isinstance(config, dict) or not patterns_from_config(config):
+        return config
+    return filter_served_backup(config)
+
+
 def apply_profile_model_gate(config: dict[str, Any]) -> dict[str, Any]:
     """Skip gated profile models in a loaded config. The file on disk is not rewritten.
 
