@@ -3,6 +3,7 @@ import path from 'node:path'
 
 import { buildDesktopBackendEnv } from './backend-env'
 import { execProbe, PROBE_TIMEOUT_MS } from './backend-probes'
+import { enterRuntimeProbe, noteProbeFailure, probeWithBackoff } from './startup-resilience'
 import { resolveInstallationLauncher } from './updater-process'
 
 export interface SourceBackend {
@@ -20,13 +21,17 @@ export interface SourceBackend {
 interface SourceOptions {
   isWindows?: boolean
   env?: NodeJS.ProcessEnv
+  hermesHome?: string
+  log?: (line: string) => void
+  sleep?: (ms: number) => Promise<void>
+  probe?: () => Promise<void>
 }
 
 /** Keep the validated command. PM owns interpreter and generation selection. */
 export async function resolveSourceInstallationBackend(
   root: string,
   args: string[],
-  options: SourceOptions & { hermesHome?: string } = {}
+  options: SourceOptions = {}
 ): Promise<SourceBackend | null> {
   if (!existsSync(path.join(root, 'hermes_cli', 'main.py'))) {
     return null
@@ -43,17 +48,38 @@ export async function resolveSourceInstallationBackend(
   const command: string = shell ? `"${launcher}"` : launcher
   const env: NodeJS.ProcessEnv = buildDesktopBackendEnv({ currentEnv: options.env ?? process.env })
 
+  const leaveProbe = enterRuntimeProbe()
+
   try {
-    await execProbe(command, ['--version'], {
-      cwd: root,
-      env: { ...process.env, ...options.env, ...env },
-      shell,
-      stdio: 'ignore',
-      timeout: PROBE_TIMEOUT_MS,
-      windowsHide: true
-    })
-  } catch {
-    return null
+    const probe =
+      options.probe ??
+      (() =>
+        execProbe(
+          command,
+          ['--version'],
+          {
+            cwd: root,
+            env: { ...process.env, ...options.env, ...env },
+            shell,
+            stdio: 'ignore',
+            timeout: PROBE_TIMEOUT_MS,
+            windowsHide: true
+          },
+          false
+        ))
+
+    const probed = await probeWithBackoff(probe, { sleep: options.sleep })
+
+    if (!probed.ok) {
+      noteProbeFailure(probed.failure)
+      options.log?.(
+        `[bootstrap] hermes --version probe ${probed.failure.reason} (exit ${probed.failure.exitCode ?? 'n/a'}) after ${probed.failure.elapsedMs}ms, ${probed.failure.attempts} tries, at ${root}`
+      )
+
+      return null
+    }
+  } finally {
+    leaveProbe()
   }
 
   return {

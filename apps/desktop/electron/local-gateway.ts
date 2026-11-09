@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 
 import { profileCollectionRoute, profileRouteSuffix } from './profile-routes'
+import { quietStaleGatewayLog, runtimeProbeInFlight } from './startup-resilience'
 import { hiddenWindowsChildOptions, windowsShellCommand } from './windows-child-options'
 
 // `hermes gateway ensure` answers with a protocol verdict (ready, or `starting: deadline`) within
@@ -28,6 +29,7 @@ export function runGatewayEnsure(
   { timeoutMs, label = 'hermes gateway ensure' }: { timeoutMs?: number; label?: string } = {}
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   timeoutMs = timeoutMs ?? defaultEnsureTimeoutMs(parentEnv)
+
   return new Promise((resolve, reject) => {
     // shell: true hands cmd.exe one command line it cuts at the first unquoted space,
     // so an install under `C:\Users\John Doe\...` must arrive quoted (#74064).
@@ -133,6 +135,12 @@ export function createStaleGatewayRestarter(
 
     if (pending) {
       log(`[gateway] owner still runs ${stale.gateway} (this Hermes is ${stale.client}) after a restart; attaching as-is`)
+
+      return null
+    }
+
+    if (runtimeProbeInFlight()) {
+      log(quietStaleGatewayLog(stale))
 
       return null
     }

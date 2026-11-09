@@ -111,6 +111,22 @@ export function userLauncherInstallRoot(
   return null
 }
 
+/** Startup lookup. Uses the async launcher probe so the Electron main thread is not blocked. */
+export async function userLauncherInstallRootAsync(
+  isWindows: boolean = process.platform === 'win32',
+  hermesHome: string = process.env.HERMES_HOME ?? ''
+): Promise<{ launcher: string; root: string } | null> {
+  for (const launcher of userBinLaunchers(isWindows, hermesHome)) {
+    const root: string | null = await launcherInstallDirectoryAsync(launcher)
+
+    if (root && existsSync(path.join(root, 'hermes_cli', 'main.py'))) {
+      return { launcher, root }
+    }
+  }
+
+  return null
+}
+
 export function launcherTargetsInstallation(launcher: string, root: string): boolean {
   try {
     const reported: string | null = launcherInstallDirectory(launcher, root)
@@ -145,6 +161,7 @@ export function launcherInstallRoot(launcher: string): Promise<string | undefine
   const cached = launcherInstallRoots.get(launcher)
 
   if (cached) {return cached}
+
   const flight = launcherInstallDirectoryAsync(launcher).then(root => {
     if (root === null) {
       launcherInstallRoots.delete(launcher)
