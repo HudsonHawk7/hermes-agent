@@ -594,3 +594,62 @@ def test_set_profile_worker_temp_overrides_root(monkeypatch, tmp_path):
     assert settings.max_age_hours == 6
     # Janitor minutes were not set on the profile, so the root value stands.
     assert settings.janitor_minutes == 7
+
+
+def test_profile_scoped_gc_sweeps_root_worker_temp(monkeypatch, tmp_path, capsys):
+    """``hermes -p solara kanban gc`` must sweep the root-configured temp tree.
+
+    Same bug class as HTS-051's janitor path: ``_cmd_gc`` used to pass
+    ``kanban_cfg=_kanban_config()``. That snapshot is default-filled (or empty
+    for a profile with no kanban section), so ``load_worker_temp_settings``
+    skips disk resolution and the sweep silently no-ops. The watcher already
+    calls ``sweep_worker_temp()`` with no args; gc must do the same.
+    """
+    import argparse
+
+    from hermes_cli import kanban_ops
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_constants import get_default_hermes_root, get_hermes_home
+
+    _root, profile, temp_root = _profile_scoped_layout(tmp_path)
+    # Layout writes max_age_hours: 12 on the root; plant a run older than that.
+    run = temp_root / "solara" / f"{_TID_GC}_9"
+    run.mkdir(parents=True)
+    blob = run / "old.bin"
+    blob.write_bytes(b"g" * 1024)
+    old = time.time() - (20 * 3600)
+    os.utime(blob, (old, old))
+    os.utime(run, (old, old))
+
+    _isolate_profile_home(monkeypatch, profile)
+    assert get_hermes_home().resolve() == profile.resolve()
+    assert get_default_hermes_root().resolve() == _root.resolve(), (
+        "test isolation failed: root resolved to the native Hermes home"
+    )
+
+    class _Conn:
+        def execute(self, *a, **k):
+            return SimpleNamespace(fetchall=list)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(kbc, "connect_closing", lambda: _Conn())
+    monkeypatch.setattr(kb, "gc_events", lambda *a, **k: 0)
+    monkeypatch.setattr(kb, "gc_worker_logs", lambda *a, **k: 0)
+    monkeypatch.setattr(kb, "workspaces_root", lambda: tmp_path / "ws_root")
+
+    args = argparse.Namespace(event_retention_days=0, log_retention_days=0)
+    rc = kanban_ops._cmd_gc(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "worker-temp" in out
+    assert "removed 1" in out, (
+        f"profile-scoped gc did not sweep the root worker_temp_root; out={out!r} "
+        f"run_exists={run.exists()}"
+    )
+    assert not run.exists()
