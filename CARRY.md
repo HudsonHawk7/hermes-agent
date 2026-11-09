@@ -69,6 +69,7 @@ print('recipes_root:', cfg.get('scene_builder', {}).get('recipes_root'))
 | 0c3b3953a6b | an unreadable gate list does not launch a gated model | A thrown config load is not an empty list. The dispatch is refused, and the gated fallback, moa, aux, and profile chain are not kept. Card t_76f52a9c. |
 | c5a50c47e85 | a broken settings file does not launch a gated model | A returned FailedConfigRead with no last-known-good list is not an empty list. The dispatch is refused, and the gated fallback, moa, aux, and profile chain are not kept. Card t_76f52a9c. |
 | e2b5496fb58 | a good backup does not serve a gated model | A broken settings file is filtered before the backup is returned or cached. A backup with no list does not keep the profile, fallback, moa, or aux chain. Card t_76f52a9c. |
+| 560c5b7e361 | report code skew only when runtime files changed | A desktop-only or docs-only fast-forward no longer locks the model picker. Git errors still report skew. Card t_60621b61. Upstream not opened. |
 
 Add new rows here before pushing a carry. Upstream the individual fix as a normal PR from a short-lived branch off origin/main when appropriate.
 
