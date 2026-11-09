@@ -1255,7 +1255,10 @@ def test_store_rejects_client_resources_outside_the_contract(tmp_path):
 
     assert store.counter_snapshot() == []
 
-def test_package_builder_rejects_tampered_dimensions(tmp_path):
+def test_package_builder_rejects_tampered_dimensions(tmp_path, caplog):
+    """A sole tampered row is still never exported. It is quarantined, not a period-wide abort."""
+    import logging
+
     database_path = tmp_path / "metrics.sqlite3"
     outbox_directory = tmp_path / "outbox"
     store = SharedMetricsStore(database_path, outbox_directory)
@@ -1266,10 +1269,78 @@ def test_package_builder_rejects_tampered_dimensions(tmp_path):
             (json.dumps({"prompt": "must-not-be-exported"}),),
         )
 
-    with pytest.raises(ValueError, match="Unsupported dimensions"):
-        store.create_and_export_package()
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.observability.shared_metrics"):
+        assert store.create_and_export_package() == []
 
     assert list(outbox_directory.glob("*.json")) == []
+    assert "must-not-be-exported" not in " ".join(record.getMessage() for record in caplog.records)
+    [row] = store.counter_snapshot()
+    assert row["value"] == row["packaged_value"]
+
+
+def test_unknown_shape_row_is_quarantined_and_the_rest_of_the_period_packages(tmp_path, caplog):
+    """A stale row whose field set the contract does not know stays out of the export.
+
+    It must not abort the period: good rows still package, the unknown row is settled
+    so a later pass does not export it or log it again, and the log names only the metric.
+    """
+    import logging
+
+    from hermes_cli.observability.shared_metrics_contract import INSTALL_SNAPSHOT_METRIC
+
+    database_path = tmp_path / "metrics.sqlite3"
+    outbox_directory = tmp_path / "outbox"
+    store = SharedMetricsStore(database_path, outbox_directory)
+    store.record_model_call(_dimensions(), _resource())
+    store.record_client_active(_resource())
+    secret = "compression-prepare-ahead-secret-value"
+    unknown = {
+        "compression_prepare_ahead": secret,
+        "cron_job_count_bucket": "0",
+    }
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO counter_aggregates (
+                period_start, metric_name, hermes_version, os_family, architecture,
+                install_method, dimensions_json, value, packaged_value
+            )
+            SELECT period_start, ?, hermes_version, os_family, architecture,
+                   install_method, ?, 1, 0
+            FROM counter_aggregates
+            WHERE metric_name = ?
+            """,
+            (
+                INSTALL_SNAPSHOT_METRIC,
+                json.dumps(unknown, sort_keys=True, separators=(",", ":")),
+                MODEL_ROUTE_METRIC,
+            ),
+        )
+
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.observability.shared_metrics"):
+        [package_path] = store.create_and_export_package()
+
+    text = package_path.read_text(encoding="utf-8")
+    assert secret not in text
+    assert "compression_prepare_ahead" not in text
+    assert INSTALL_SNAPSHOT_METRIC not in text
+    names = {metric["name"] for metric in json.loads(text)["metrics"]}
+    assert MODEL_ROUTE_METRIC in names
+    assert CLIENT_ACTIVE_METRIC in names
+    _schema_validator().validate(json.loads(text))
+    [quarantined] = [
+        row for row in store.counter_snapshot() if row["metric_name"] == INSTALL_SNAPSHOT_METRIC
+    ]
+    assert quarantined["value"] == quarantined["packaged_value"]
+    notes = [record.getMessage() for record in caplog.records if "quarantined" in record.getMessage()]
+    assert notes == [
+        f"Shared-metric {INSTALL_SNAPSHOT_METRIC} row has an unknown dimension shape; "
+        "quarantined and not exported"
+    ]
+    assert secret not in notes[0]
+    caplog.clear()
+    assert store.create_and_export_package() == []
+    assert [record.getMessage() for record in caplog.records if "quarantined" in record.getMessage()] == []
 
 
 @pytest.mark.parametrize(("metric_name", "dimensions"), [
