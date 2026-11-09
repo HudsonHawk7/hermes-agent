@@ -79,11 +79,43 @@ def _config_names_gate(config: Any) -> bool:
     )
 
 
+def _warn_unreadable() -> None:
+    """One loud line. An unreadable list is not unset."""
+    global _unreadable_logged
+    if _unreadable_logged:
+        return
+    _unreadable_logged = True
+    logger.warning(
+        "%s: could not read the gate list; not treating it as unset. %s",
+        SETTING,
+        RULE,
+        exc_info=True,
+    )
+
+
+def _failed_read_without_list(config: Any) -> bool:
+    """A failed read with no last-known-good list is not an empty list.
+
+    A missing file is a normal dict. A file that is there and cannot be read
+    comes back as FailedConfigRead of the defaults. That object has no
+    models.gm_gated. A last-known-good that actually contains the list is
+    usable and is not this case.
+    """
+    try:
+        from hermes_cli.config_read_errors import FailedConfigRead
+    except Exception:
+        return False
+    if not isinstance(config, FailedConfigRead):
+        return False
+    return not patterns_from_config(config)
+
+
 def current_patterns(config: Any = None) -> list[str]:
     """Patterns from *config*, or from the loaded config when *config* is omitted.
 
-    A thrown root read raises :class:`GateListUnreadable`. That is not an
-    empty list, and callers must not treat it as "not gated".
+    A thrown root read, or a returned FailedConfigRead with no last-known-good
+    list, raises :class:`GateListUnreadable`. That is not an empty list, and
+    callers must not treat it as "not gated". A missing file stays list-off.
     """
     if config is None:
         try:
@@ -93,16 +125,13 @@ def current_patterns(config: Any = None) -> list[str]:
         except GateListUnreadable:
             raise
         except Exception as exc:
-            global _unreadable_logged
-            if not _unreadable_logged:
-                _unreadable_logged = True
-                logger.warning(
-                    "%s: could not read the gate list; not treating it as unset. %s",
-                    SETTING,
-                    RULE,
-                    exc_info=True,
-                )
+            _warn_unreadable()
             raise GateListUnreadable("could not read models.gm_gated") from exc
+    if _failed_read_without_list(config):
+        _warn_unreadable()
+        raise GateListUnreadable(
+            "could not read models.gm_gated; no last-known-good list"
+        )
     return patterns_from_config(config)
 
 

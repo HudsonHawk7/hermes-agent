@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import shutil
 from pathlib import Path
 
 import pytest
@@ -452,6 +453,132 @@ def test_unreadable_gate_list_does_not_launch_or_keep_the_chain(
     with session_auxiliary_scope({"title": {"provider": "copilot", "model": GATED}}):
         loaded = _get_auxiliary_task_config("title")
     assert loaded.get("model") != GATED
+
+    from hermes_cli.config import _apply_gm_gate
+
+    profile = _apply_gm_gate({
+        "model": {"default": GATED, "provider": "copilot"},
+        "fallback_providers": [{"provider": "copilot", "model": GATED}],
+    })
+    assert profile["model"]["default"] != GATED
+    assert all(
+        item.get("model") != GATED
+        for item in (profile.get("fallback_providers") or [])
+    )
+    assert SETTING in caplog.text
+    assert RULE in caplog.text
+
+
+def _clear_config_memory() -> None:
+    from hermes_cli import config as cfg
+
+    cfg._LOAD_CONFIG_CACHE.clear()
+    cfg._LAST_EXPANDED_CONFIG_BY_PATH.clear()
+    raw = getattr(cfg, "_RAW_CONFIG_CACHE", None)
+    if isinstance(raw, dict):
+        raw.clear()
+
+
+def _drop_good_backups(config_path: Path) -> None:
+    backups = config_path.parent / "backups"
+    if backups.exists():
+        shutil.rmtree(backups)
+    for leftover in config_path.parent.glob("config.yaml.good.*"):
+        leftover.unlink(missing_ok=True)
+    for leftover in config_path.parent.glob("config.yaml.bak*"):
+        leftover.unlink(missing_ok=True)
+
+
+def test_broken_config_file_is_not_an_empty_gate_list(
+    kanban_home, all_assignees_spawnable, monkeypatch, caplog,
+):
+    """A settings file that cannot be read is not an empty gate list.
+
+    load_config_readonly does not raise. It returns FailedConfigRead of the
+    defaults when there is no last-known-good list. On 2413d2b6dc6 that
+    object has no models.gm_gated, so model_is_gated returned False and
+    dispatch would spawn the pin. A missing file stays list-off.
+    """
+    from hermes_cli.config import get_config_path, load_config_readonly
+    from hermes_cli.config_read_errors import FailedConfigRead
+    from hermes_cli.gm_gated_models import GateListUnreadable, patterns_from_config
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.setattr(
+        "hermes_cli.gm_gated_models._unreadable_logged", False, raising=False,
+    )
+    config_path = get_config_path()
+    _clear_config_memory()
+
+    assert not config_path.exists()
+    assert model_is_gated(GATED) is False
+
+    config_path.write_text(
+        "models:\n  gm_gated:\n    - claude-fable-*\n    - '*/claude-fable-*'\n",
+        encoding="utf-8",
+    )
+    _clear_config_memory()
+    assert model_is_gated(GATED) is True
+
+    _clear_config_memory()
+    _drop_good_backups(config_path)
+    config_path.write_text("models: [\n", encoding="utf-8")
+    _clear_config_memory()
+
+    loaded = load_config_readonly()
+    assert type(loaded) is FailedConfigRead
+    assert patterns_from_config(loaded) == []
+
+    with caplog.at_level(logging.WARNING, logger="hermes_cli.gm_gated_models"):
+        try:
+            reported = model_is_gated(GATED)
+        except GateListUnreadable:
+            reported = True
+        assert reported is True
+
+    with kbc.connect() as conn:
+        task_id = kb.create_task(conn, title="probe card", assignee="probe")
+        _pin(conn, task_id)
+        assert dispatch_refuses_gated(conn, task_id, park=False) is True
+        spawned = []
+        result = kbd.dispatch_once(
+            conn, spawn_fn=lambda task, _ws: spawned.append(task) or 1,
+        )
+    assert spawned == []
+    assert not any(item[0] == task_id for item in result.spawned)
+
+    chain = get_fallback_chain({
+        "fallback_providers": [
+            {"provider": "copilot", "model": GATED},
+            {"provider": "xai", "model": "grok-4.7"},
+        ],
+    })
+    assert all(entry.get("model") != GATED for entry in chain)
+
+    resolved = resolve_moa_preset({
+        "default_preset": "gate-test",
+        "presets": {
+            "gate-test": {
+                "enabled": True,
+                "reference_models": [
+                    {"provider": "copilot", "model": GATED, "enabled": True},
+                ],
+                "aggregator": {"provider": "copilot", "model": GATED},
+            },
+        },
+    })
+    models = [slot.get("model") for slot in resolved.get("reference_models") or []]
+    assert GATED not in models
+    assert (resolved.get("aggregator") or {}).get("model") != GATED
+
+    from agent.auxiliary_task_config import (
+        _get_auxiliary_task_config,
+        session_auxiliary_scope,
+    )
+
+    with session_auxiliary_scope({"title": {"provider": "copilot", "model": GATED}}):
+        loaded_aux = _get_auxiliary_task_config("title")
+    assert loaded_aux.get("model") != GATED
 
     from hermes_cli.config import _apply_gm_gate
 
