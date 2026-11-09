@@ -354,10 +354,12 @@ def _cmd_gc(args: argparse.Namespace) -> int:
           f"{removed_events} event row(s), {removed_logs} log file(s) removed")
 
     # Same worker-temp sweep the gateway janitor runs (counts match that log line).
+    # No load_config() snapshot: an explicit block skips the root/profile resolver
+    # (HTS-051 sibling). sweep_worker_temp() self-resolves like the watcher.
     try:
         from hermes_cli.kanban_worker_temp import format_sweep_counts, sweep_worker_temp
 
-        result = sweep_worker_temp(kanban_cfg=_kanban_config())
+        result = sweep_worker_temp()
         print(f"GC {format_sweep_counts(result)}")
     except Exception as exc:
         _err(f"gc: worker-temp sweep failed: {exc}")
