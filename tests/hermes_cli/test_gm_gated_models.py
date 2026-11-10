@@ -817,3 +817,137 @@ def test_plugin_save_then_broken_file_does_not_serve_gated_model(
     )
     assert _served_gated(load_config_readonly()) == []
     assert _served_gated(load_config()) == []
+
+
+def _clear_effective_memory() -> None:
+    from hermes_cli import config_effective
+
+    config_effective._EFFECTIVE_CACHE.clear()
+    config_effective._LAST_GOOD_USER_RAW.clear()
+
+
+def test_gateway_loader_does_not_serve_gated_model(kanban_home, caplog, monkeypatch):
+    """The load that starts a profile must skip a gated model.default.
+
+    load_config already skipped it. This uses the real gateway loader, not
+    load_config.
+    """
+    from gateway.run import _load_gateway_config, _resolve_gateway_model
+    from hermes_cli.config import get_config_path
+    from hermes_cli.config_effective import load_user_config_effective
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    config_path = get_config_path()
+    _clear_config_memory()
+    _clear_effective_memory()
+    config_path.write_text(_WITH_LIST, encoding="utf-8")
+
+    with caplog.at_level("WARNING"):
+        effective = load_user_config_effective(config_path)
+        gateway = _load_gateway_config(config_path)
+    assert effective["model"]["default"] == "grok-4.7", (
+        "load_user_config_effective served the gated model"
+    )
+    assert _served_gated(effective) == []
+    assert _served_gated(gateway) == []
+    assert _resolve_gateway_model(gateway) == "grok-4.7"
+    raw = {
+        "model": {"default": GATED, "provider": "copilot"},
+        "fallback_providers": [{"provider": "xai", "model": "grok-4.7"}],
+        "models": {"gm_gated": list(PATTERNS)},
+    }
+    assert _resolve_gateway_model(raw) == "grok-4.7", (
+        "_resolve_gateway_model returned the gated profile model"
+    )
+    assert SETTING in caplog.text
+    assert RULE in caplog.text
+    assert GATED in caplog.text
+
+
+def test_gateway_loader_broken_file_does_not_serve_gated_model(kanban_home, monkeypatch):
+    """A backup or in-memory last-known-good on the gateway loader must not put the gated model back."""
+    from hermes_cli import config as cfg
+    from hermes_cli import config_effective
+    from hermes_cli.config import get_config_path
+    from hermes_cli.config_effective import load_user_config_effective
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    config_path = get_config_path()
+    _clear_config_memory()
+    _clear_effective_memory()
+    config_path.write_text(_WITH_LIST, encoding="utf-8")
+
+    first = load_user_config_effective(config_path)
+    assert first["model"]["default"] == "grok-4.7"
+    backup = _good_backup(config_path)
+    raw = backup.read_bytes()
+    assert GATED.encode() in raw
+    path_key = str(config_path)
+    assert path_key in config_effective._LAST_GOOD_USER_RAW
+
+    config_path.write_text("models: [\n", encoding="utf-8")
+    assert path_key in config_effective._LAST_GOOD_USER_RAW
+    assert backup.read_bytes() == raw
+
+    broken = load_user_config_effective(config_path)
+    assert _served_gated(broken) == [], (
+        "gateway loader served the gated model from in-memory last-known-good"
+    )
+
+    config_effective._LAST_GOOD_USER_RAW.clear()
+    config_effective._EFFECTIVE_CACHE.clear()
+    cfg._RAW_CONFIG_CACHE.clear()
+    cfg._LAST_EXPANDED_CONFIG_BY_PATH.clear()
+    fresh = load_user_config_effective(config_path)
+    assert _served_gated(fresh) == [], (
+        "gateway loader served the gated model from the disk backup"
+    )
+
+
+def test_gateway_loader_gm_yes_keeps_the_model(kanban_home, monkeypatch):
+    """A GM Yes on the profile ask keeps the model on the gateway loader."""
+    from hermes_cli.config import get_config_path
+    from hermes_cli.config_effective import load_user_config_effective
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_PROFILE", raising=False)
+    config_path = get_config_path()
+    _clear_config_memory()
+    _clear_effective_memory()
+    config_path.write_text(_WITH_LIST, encoding="utf-8")
+
+    first = load_user_config_effective(config_path)
+    assert first["model"]["default"] == "grok-4.7"
+    with kbc.connect() as conn:
+        row = conn.execute(
+            "SELECT id FROM tasks WHERE idempotency_key = ?",
+            (f"gm-gate:profile:{GATED}",),
+        ).fetchone()
+        assert row is not None
+        answered = gm.answer_gm_ask(conn, row["id"], key="yes", by="gm", via="cli")
+        assert answered["decision"]["model"] == GATED
+    second = load_user_config_effective(config_path)
+    assert second["model"]["default"] == GATED
+
+
+def test_cli_start_load_does_not_serve_gated_model(kanban_home, caplog, monkeypatch):
+    """The CLI start load must skip a gated model.default unless the GM answered Yes."""
+    import cli
+    from hermes_cli.cli_config_load import load_cli_config
+    from hermes_cli.config import get_config_path
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.setattr(cli, "_hermes_home", kanban_home)
+    config_path = get_config_path()
+    _clear_config_memory()
+    _clear_effective_memory()
+    config_path.write_text(_WITH_LIST, encoding="utf-8")
+
+    with caplog.at_level("WARNING"):
+        loaded = load_cli_config()
+    assert loaded["model"]["default"] == "grok-4.7", (
+        "CLI start load served the gated model"
+    )
+    assert _served_gated(loaded) == []
+    assert SETTING in caplog.text
+    assert RULE in caplog.text

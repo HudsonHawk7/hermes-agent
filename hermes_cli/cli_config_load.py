@@ -293,6 +293,10 @@ def load_cli_config() -> dict[str, Any]:
 
     defaults = managed_scope.apply_managed_overlay(defaults)
 
+    # Same skip as profile load. A gated model.default is not mirrored into env.
+    from hermes_cli.config import _apply_gm_gate
+    defaults = _apply_gm_gate(defaults)
+
     _mirror_config_to_env(defaults, _file_has_terminal_config)
 
     return defaults
