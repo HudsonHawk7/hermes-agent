@@ -364,6 +364,7 @@ from hermes_cli.subcommands.hooks import build_hooks_parser
 from hermes_cli.subcommands.doctor import build_doctor_parser
 from hermes_cli.carry_merge import build_carry_parser
 from hermes_cli.subcommands.verify import build_verify_parser
+from hermes_cli.subcommands.force_live_update import build_force_live_update_parser
 from hermes_cli.subcommands.security import build_security_parser
 from hermes_cli.subcommands.approvals import build_approvals_parser
 from hermes_cli.subcommands.dump import build_dump_parser
@@ -2161,6 +2162,13 @@ def cmd_verify(args):
     sys.exit(run_verify_command(args))
 
 
+def cmd_force_live_update(args):
+    """Run the HermesForce live-update protocol. Builders do not run this on the live install."""
+    from hermes_cli.force_live_update import main as run
+
+    sys.exit(run(args))
+
+
 def cmd_security(args):
     """Dispatch `hermes security <subcmd>`."""
     sub = getattr(args, "security_command", None)
@@ -2778,7 +2786,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "acp", "approvals", "auth", "backup", "bundles", "carry", "checkpoints", "codex-runtime", "completion",
         "computer-use", "connectors",
         "config", "console", "cron", "curator", "dashboard", "serve", "debug", "doctor",
-        "dump", "egress", "fallback", "gateway", "hooks", "import", "insights",
+        "dump", "egress", "fallback", "force-live-update", "gateway", "hooks", "import", "insights",
         "gui", "desktop", "kanban", "login", "logout", "logs", "lsp", "mcp", "memory", "migrate", "moa",
         "journey", "memory-graph", "learning",
         "model", "monitoring", "pairing", "pause", "peer", "pets", "plugins", "portal", "profile",
@@ -3363,6 +3371,7 @@ def _build_cli_parser():
     build_doctor_parser(subparsers, cmd_doctor=cmd_doctor)
     build_carry_parser(subparsers, cmd_carry_merge=cmd_carry_merge)
     build_verify_parser(subparsers, cmd_verify=cmd_verify)
+    build_force_live_update_parser(subparsers, cmd_force_live_update=cmd_force_live_update)
     build_security_parser(subparsers, cmd_security=cmd_security)
     build_approvals_parser(subparsers, cmd_approvals=cmd_approvals)
     build_dump_parser(subparsers, cmd_dump=cmd_dump)
