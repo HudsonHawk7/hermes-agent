@@ -577,6 +577,11 @@ import { collectSshConfigHosts, parseSshGOutput } from './ssh-config'
 import { createSshProbeConnection, pickLocalPort, redactSecrets, SshConnection } from './ssh-connection'
 import { createSshIsolatedKeepaliveRegistry } from './ssh-isolated-keepalive'
 import { createSshTeardownTracker } from './ssh-teardown'
+import {
+  enterRuntimeProbe,
+  refuseFirstRunWhenCheckoutPresent,
+  takeLastProbeFailure
+} from './startup-resilience'
 import { createStreamThrottle } from './stream-throttle'
 import { installSystemCaTrust } from './system-ca'
 import { registerTerminalIpc } from './terminal-ipc'
@@ -633,7 +638,7 @@ import {
   resolveVenvDir,
   spawnUpdaterProcess,
   stagedUpdaterSupportsPrewrittenMarker,
-  userLauncherInstallRoot
+  userLauncherInstallRootAsync
 } from './updater-process'
 import { AppInstallerStrategy } from './updater/app-installer'
 import { createChannelAppInstallerStrategy } from './updater/app-installer'
@@ -5073,7 +5078,7 @@ async function resolveHermesBackend(backendArgs: string[]): Promise<ResolvedHerm
     //    fixed user-bin location: a Finder/Dock launch inherits a PATH without
     //    ~/.local/bin. The reported root is then resolved and probed like any
     //    installed runtime; HERMES_DESKTOP_IGNORE_EXISTING=1 skips it too.
-    const userInstall: ReturnType<typeof userLauncherInstallRoot> = userLauncherInstallRoot(IS_WINDOWS, HERMES_HOME)
+    const userInstall = await userLauncherInstallRootAsync(IS_WINDOWS, HERMES_HOME)
 
     if (userInstall) {
       const userBackend: SourceBackend | null = await installedRuntimeGate.resolve(userInstall.root, () =>
@@ -5090,6 +5095,42 @@ async function resolveHermesBackend(backendArgs: string[]): Promise<ResolvedHerm
     } else {
       rememberLog(`[bootstrap] no usable Hermes install at ${ACTIVE_HERMES_ROOT} and no published user-bin launcher`)
     }
+  }
+
+  const probeFailure = takeLastProbeFailure()
+  const checkoutPresent = fs.existsSync(path.join(ACTIVE_HERMES_ROOT, 'hermes_cli', 'main.py'))
+
+  // Single source of truth with startup-resilience tests: repair / ignore-existing /
+  // missing checkout → bootstrap (first-run choice); present checkout that failed
+  // probe → still-starting. Inline duplicate here previously missed ignoreExisting,
+  // so hermes desktop --ignore-existing could never reach bootstrap-needed.
+  const firstRunDecision = refuseFirstRunWhenCheckoutPresent({
+    checkoutPresent,
+    // Usable active runtime already returned above; this rung only decides
+    // bootstrap vs still-starting after gates/probes failed or were skipped.
+    probeOk: false,
+    repair: bootstrapRepairRequested,
+    ignoreExisting: process.env.HERMES_DESKTOP_IGNORE_EXISTING === '1',
+    elapsedMs: probeFailure?.elapsedMs ?? 0,
+    reason: probeFailure?.reason ?? 'exit',
+    exitCode: probeFailure?.exitCode ?? null,
+    attempts: probeFailure?.attempts ?? 0
+  })
+
+  if (firstRunDecision.action === 'still-starting') {
+    rememberLog(
+      `[bootstrap] checkout present at ${ACTIVE_HERMES_ROOT}; not starting first-run setup. ` +
+        (probeFailure?.message ?? firstRunDecision.message)
+    )
+
+    const stillStarting = new Error(firstRunDecision.message) as Error & {
+      retryable?: boolean
+      stillStarting?: boolean
+    }
+
+    stillStarting.retryable = true
+    stillStarting.stillStarting = true
+    throw stillStarting
   }
 
   // 6. Nothing usable yet -- signal the bootstrap runner that we need to
@@ -12044,12 +12085,19 @@ async function startHermes(requestedProfile?: string) {
     // Local WSL backend — paths are bridgeable.
     setWslBridgeProfileState(primaryProfile, true)
 
-    const connection = await ensureLocalGateway(() => runGatewayEnsure(
-      { ...setup.backend, env: desktopBackendSpawnEnv(setup.backend.env || {}) },
-      resolveHermesCwd(),
-      HERMES_HOME,
-      profileBackendParentEnv({ hermesHome: HERMES_HOME, profile: primaryProfile })
-    ), undefined, restartStaleLocalGateway)
+    const leaveLaunchProbe = enterRuntimeProbe()
+    let connection
+
+    try {
+      connection = await ensureLocalGateway(() => runGatewayEnsure(
+        { ...setup.backend, env: desktopBackendSpawnEnv(setup.backend.env || {}) },
+        resolveHermesCwd(),
+        HERMES_HOME,
+        profileBackendParentEnv({ hermesHome: HERMES_HOME, profile: primaryProfile })
+      ), undefined, restartStaleLocalGateway)
+    } finally {
+      leaveLaunchProbe()
+    }
 
     backendConnectionState.assertCurrentAttempt(connectionAttempt)
 
