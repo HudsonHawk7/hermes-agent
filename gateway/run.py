@@ -2340,7 +2340,9 @@ _CONVERSATION_SCOPED_STATE: tuple = (
     "_transcript_lag_streaks",
     # Sidecar notes staged but never consumed (turn aborted before run_sync) must not leak into a
     # future conversation's first user message — session keys are source-derived and REUSED.
-    "_pending_turn_sidecar_notes")
+    "_pending_turn_sidecar_notes",
+    # A reply named a file that was never made. Consumed on the next user turn, then cleared.
+    "_pending_missing_media_notes")
 
 
 def _resolve_runtime_agent_kwargs() -> dict:
