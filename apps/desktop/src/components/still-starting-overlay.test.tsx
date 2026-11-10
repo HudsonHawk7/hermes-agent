@@ -31,9 +31,9 @@ test('probe timeout shows the still-starting retry state, not first-run setup', 
     visible: true
   })
 
-  const view = render(<BootFailureOverlay />)
+  render(<BootFailureOverlay />)
 
-  expect(view.container.querySelector('[data-still-starting="true"]')).not.toBeNull()
+  expect(screen.getByRole('dialog').querySelector('[data-still-starting="true"]')).not.toBeNull()
   expect(screen.getByRole('button', { name: /retry/i })).toBeTruthy()
   expect(screen.queryByText(/Connect to existing Hermes/i)).toBeNull()
   expect(screen.getAllByText(/Hermes is still starting \(probe took 22 s\)/).length).toBeGreaterThan(0)
