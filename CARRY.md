@@ -71,6 +71,7 @@ print('recipes_root:', cfg.get('scene_builder', {}).get('recipes_root'))
 | e2b5496fb58 | a good backup does not serve a gated model | A broken settings file is filtered before the backup is returned or cached. A backup with no list does not keep the profile, fallback, moa, or aux chain. Card t_76f52a9c. |
 | 560c5b7e361 | report code skew only when runtime files changed | A desktop-only or docs-only fast-forward no longer locks the model picker. Git errors still report skew. Card t_60621b61. Upstream not opened. |
 | 673f13534dd | a plugin save does not put a gated model back in memory | save_config stored the merged dict before the gate. A broken file is filtered before that copy is stored, returned, or cached. Card t_76f52a9c. |
+| 277f5b0ae3d | skip a gated model on the profile start load | The gateway loader and the CLI start path skip model.default unless the GM answered Yes. A backup or last-known-good on that loader does not put the gated model back. Card t_76f52a9c. |
 
 Add new rows here before pushing a carry. Upstream the individual fix as a normal PR from a short-lived branch off origin/main when appropriate.
 
