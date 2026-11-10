@@ -2340,7 +2340,9 @@ _CONVERSATION_SCOPED_STATE: tuple = (
     "_transcript_lag_streaks",
     # Sidecar notes staged but never consumed (turn aborted before run_sync) must not leak into a
     # future conversation's first user message — session keys are source-derived and REUSED.
-    "_pending_turn_sidecar_notes")
+    "_pending_turn_sidecar_notes",
+    # A reply named a file that was never made. Consumed on the next user turn, then cleared.
+    "_pending_missing_media_notes")
 
 
 def _resolve_runtime_agent_kwargs() -> dict:
@@ -2945,9 +2947,22 @@ from gateway.session_worker_construct import checkpoint_agent_kwargs as _checkpo
 def _resolve_gateway_model(config: dict | None = None) -> str:
     """The profile's model when nothing else names one: config.yaml (single source of truth), else the
     claimed welcome trial's. Temporary AIAgents (e.g. /compress) otherwise use the hardcoded default,
-    which fails under openai-codex."""
+    which fails under openai-codex.
+
+    A gated ``model.default`` is skipped unless the GM answered Yes. A check that
+    cannot prove the model is allowed does not return it.
+    """
+    import copy
+
     from hermes_cli.anon_auth import trial_model
-    model_cfg = (config if config is not None else _load_gateway_config()).get("model", {})
+    from hermes_cli.config import _apply_gm_gate
+
+    loaded = config if config is not None else _load_gateway_config()
+    if not isinstance(loaded, dict):
+        loaded = {}
+    else:
+        loaded = _apply_gm_gate(copy.deepcopy(loaded))
+    model_cfg = loaded.get("model", {})
     if isinstance(model_cfg, dict):
         model_cfg = model_cfg.get("default") or model_cfg.get("model")
     return (model_cfg if isinstance(model_cfg, str) else "") or trial_model()

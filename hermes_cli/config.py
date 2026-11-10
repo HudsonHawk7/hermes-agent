@@ -2250,11 +2250,9 @@ def _last_known_good_fallback(config_path: Path, path_key: str, cache_sig, exc: 
     lkg = _LAST_EXPANDED_CONFIG_BY_PATH.get(path_key)
     fallback = "last-known-good"
     if lkg is None:
-        # Fresh process (CLI restart, `hermes config get`): nothing loaded yet in this process, so
-        # fall back to the newest byte-exact copy the last successful parse left in backups/config/.
-        # It holds the raw file (``${VAR}`` templates intact), so it goes through the same
-        # canonicalize -> expand -> managed-overlay pipeline as a normal load.
+        # Fresh process: the newest good backup is the raw file. Filter it before it is served.
         from hermes_cli.config_backups import load_newest_good_backup
+        from hermes_cli.gm_gated_models import filter_served_backup
         from hermes_cli.moa_config import apply_user_moa_presets
         raw_good = load_newest_good_backup(config_path)
         if raw_good is not None:
@@ -2262,8 +2260,20 @@ def _last_known_good_fallback(config_path: Path, path_key: str, cache_sig, exc: 
             apply_user_moa_presets(merged_good, raw_good)
             normalized = _canonicalize_config(merged_good)
             expanded_good: dict[str, Any] = _expand_env_vars(normalized)  # type: ignore[assignment]
-            lkg, _ = _merge_managed_overlay(expanded_good)
+            lkg = filter_served_backup(_merge_managed_overlay(expanded_good)[0])
             fallback = "last-known-good-backup"
+    if isinstance(lkg, dict):
+        # save_config stores this copy before the gate. Filter it when it
+        # names the list, before it is returned or cached. A copy with no
+        # list is list-off and stays as loaded.
+        from hermes_cli.gm_gated_models import (
+            filter_cached_last_known_good,
+            patterns_from_config,
+        )
+        expanded_lkg = _expand_env_vars(copy.deepcopy(lkg))
+        if isinstance(expanded_lkg, dict) and patterns_from_config(expanded_lkg):
+            lkg = filter_cached_last_known_good(expanded_lkg)
+            _LAST_EXPANDED_CONFIG_BY_PATH[path_key] = copy.deepcopy(lkg)
     _warn_config_parse_failure(
         config_path, exc, fallback=fallback if lkg is not None else "defaults")
     if lkg is None:
@@ -2322,10 +2332,76 @@ def _load_config_cache_hit(path_key: str, cache_sig: Any) -> Optional[dict[str, 
     return None
 
 
+def _apply_gm_gate(config: dict[str, Any]) -> dict[str, Any]:
+    """Skip gated profile models. The key is never defaulted; a missing key is a no-op."""
+    try:
+        from hermes_cli.gm_gated_models import apply_profile_model_gate
+
+        return apply_profile_model_gate(config)
+    except Exception:
+        logger.warning(
+            "models.gm_gated: profile load skip failed; not keeping an unproven model",
+            exc_info=True,
+        )
+        return _drop_unproven_profile_models(config)
+
+
+def _apply_gm_gate_during_load(config: dict[str, Any]) -> dict[str, Any]:
+    """Apply the profile gate without re-reading the file this load is building."""
+    from hermes_cli import gm_gated_models as gate
+
+    gate._inside_config_load += 1
+    try:
+        return _apply_gm_gate(config)
+    finally:
+        gate._inside_config_load -= 1
+
+
+def _drop_unproven_profile_models(config: dict[str, Any]) -> dict[str, Any]:
+    """The gate threw, so no named model is proven allowed."""
+    cleared = dict(config)
+    model = cleared.get("model")
+    if isinstance(model, dict):
+        model = dict(model)
+        model["default"] = ""
+        cleared["model"] = model
+    cleared["fallback_providers"] = []
+    moa = cleared.get("moa")
+    if isinstance(moa, dict):
+        moa = dict(moa)
+        presets = moa.get("presets")
+        if isinstance(presets, dict):
+            presets = dict(presets)
+            for name, preset in list(presets.items()):
+                if not isinstance(preset, dict):
+                    continue
+                preset = dict(preset)
+                preset["reference_models"] = []
+                agg = preset.get("aggregator")
+                if isinstance(agg, dict):
+                    agg = dict(agg)
+                    agg["model"] = ""
+                    agg["provider"] = ""
+                    preset["aggregator"] = agg
+                presets[name] = preset
+            moa["presets"] = presets
+        cleared["moa"] = moa
+    auxiliary = cleared.get("auxiliary")
+    if isinstance(auxiliary, dict):
+        auxiliary = dict(auxiliary)
+        for task_name, block in list(auxiliary.items()):
+            if isinstance(block, dict):
+                block = dict(block)
+                block["model"] = ""
+                auxiliary[task_name] = block
+        cleared["auxiliary"] = auxiliary
+    return cleared
+
+
 def _load_config_impl(*, want_deepcopy: bool) -> dict[str, Any]:
     snapshot = _worker_config_snapshot()
     if snapshot is not None:
-        return _deep_merge(copy.deepcopy(DEFAULT_CONFIG), snapshot)
+        return _apply_gm_gate_during_load(_deep_merge(copy.deepcopy(DEFAULT_CONFIG), snapshot))
 
     # Lock-free fast path for cache hits — same publication contract as `_read_raw_config_impl`
     # above (whole-tuple replace, `_CONFIG_LOCK` only serializes rebuilds and writers). A hit costs
@@ -2398,6 +2474,7 @@ def _load_config_impl(*, want_deepcopy: bool) -> dict[str, Any]:
 
         normalized = _canonicalize_config(config)
         expanded, managed_config = _merge_managed_overlay(_expand_env_vars(normalized))
+        expanded = _apply_gm_gate_during_load(expanded)
         _LAST_EXPANDED_CONFIG_BY_PATH[path_key] = copy.deepcopy(expanded)
         if cache_sig is not None:
             # The cache stores its own deepcopy so load_config() callers can mutate freely while
@@ -2467,6 +2544,17 @@ def _strip_managed_keys_for_save(config: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
+_GM_GATED_COMMENT = """
+# models.gm_gated — named, never defaulted. Architect sets the list.
+# A matching model is not dispatched, and is skipped at profile load, unless
+# the GM answered Yes on `hermes kanban ask`. An agent cannot approve its own card.
+#models:
+#  gm_gated:
+#    - claude-fable-*
+#    - "*/claude-fable-*"
+"""
+
+
 def _commented_sections_for_save(normalized: dict[str, Any]) -> Optional[str]:
     """Commented-out example blocks for features that are off/unconfigured."""
     parts = []
@@ -2476,6 +2564,9 @@ def _commented_sections_for_save(normalized: dict[str, Any]) -> Optional[str]:
     fb_entries = fb if isinstance(fb, list) else [fb]
     if not any(isinstance(e, dict) and e.get("provider") and e.get("model") for e in fb_entries):
         parts.append(_FALLBACK_COMMENT)
+    models = normalized.get("models")
+    if not isinstance(models, dict) or "gm_gated" not in models:
+        parts.append(_GM_GATED_COMMENT)
     return "".join(parts) or None
 
 
@@ -2521,7 +2612,10 @@ def save_config(
         atomic_config_replace(config_path, normalized, extra_content_on_create=_commented_sections_for_save(normalized))
         _secure_file(config_path)
         _RAW_CONFIG_CACHE.pop(str(config_path), None)
-        _LAST_EXPANDED_CONFIG_BY_PATH[str(config_path)] = copy.deepcopy(current_normalized)
+        from hermes_cli.gm_gated_models import filter_cached_last_known_good
+        _LAST_EXPANDED_CONFIG_BY_PATH[str(config_path)] = filter_cached_last_known_good(
+            copy.deepcopy(current_normalized)
+        )
     from hermes_cli.observability.shared_metrics_disabled import record_config_saved
     record_config_saved(_raw_for_paths, current_normalized)
 
