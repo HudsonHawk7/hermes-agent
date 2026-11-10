@@ -81,13 +81,6 @@ export function shouldAttachFreshStill(settings: GroupPictureSettings): boolean 
   return settings.sendMode === 'every-message'
 }
 
-export function shouldWatchPictureFolders(
-  settings: GroupPictureSettings,
-  dirs: readonly string[] | null | undefined
-): boolean {
-  return settings.shareFolders === true && Array.isArray(dirs) && dirs.length > 0
-}
-
 export function pictureDirsFromConfig(record: unknown): string[] {
   return readPictureDirsFromConfig(record) || []
 }
@@ -103,7 +96,7 @@ export function pictureFolderOptionState(dirs: readonly string[] | null | undefi
 }
 
 /** Unset means the checkbox stays grey and the setting is named. */
-export function readPictureDirsFromConfig(config: unknown): string[] | null {
+function readPictureDirsFromConfig(config: unknown): string[] | null {
   if (!config || typeof config !== 'object') {return null}
   const desktop = (config as { desktop?: unknown }).desktop
 

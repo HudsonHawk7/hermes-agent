@@ -125,12 +125,14 @@ method("image.attach", params=ImageAttachParams, result=AttachedImageResult,
 
 class ImageAttachBytesParams(SessionParams):
     """``content_base64`` (or the ``data`` alias) carries the bytes; ``filename`` / ``ext`` only hint
-    the extension — magic bytes decide."""
+    the extension — magic bytes decide. ``privacy`` is the group-chat flag (bool or ``true`` / ``false``);
+    the canonical dispatcher refuses an undeclared key before the handler."""
 
     content_base64: str | None = None
     data: str | None = None
     filename: str | None = None
     ext: str | None = None
+    privacy: bool | str | None = None
 
 
 method("image.attach_bytes", params=ImageAttachBytesParams, result=AttachedImageResult,

@@ -40,36 +40,6 @@ export async function captureWebcamStill(deps: WebcamCapture): Promise<string> {
   }
 }
 
-export interface ScreenThumbnail {
-  isEmpty(): boolean
-  toDataURL(): string
-}
-
-export interface ScreenSource {
-  thumbnail: ScreenThumbnail
-}
-
-export async function captureScreenStill(
-  getSources: (options: {
-    types: ['screen']
-    thumbnailSize: { width: number; height: number }
-  }) => Promise<ScreenSource[]>
-): Promise<string> {
-  const sources = await getSources({
-    types: ['screen'],
-    thumbnailSize: { width: 1280, height: 720 }
-  })
-
-  const source = sources.find(item => !item.thumbnail.isEmpty())
-
-  if (!source) {throw new Error('no screen')}
-  const url = source.thumbnail.toDataURL()
-
-  if (!url.startsWith('data:image/')) {throw new Error('screenshot was not an image')}
-
-  return url
-}
-
 /** Browser webcam. The tracks are the camera light; stop() turns it off. */
 export function browserWebcamCapture(): WebcamCapture {
   return {
