@@ -82,9 +82,18 @@ def test_missing_media_directive_renders_notice_and_queues_next_turn_note(tmp_pa
     assert "not found on this host" in caplog.text
 
 
-def test_real_media_file_still_sends(tmp_path):
-    good = tmp_path / "real-clip.mp4"
+def test_real_media_file_still_sends(tmp_path, monkeypatch):
+    # Allowed cache only. The delivery check lists live profile dirs unless
+    # that walk is stubbed, and the home guard refuses that listing.
+    root = tmp_path / "media-cache"
+    good = root / "real-clip.mp4"
+    good.parent.mkdir(parents=True)
     good.write_bytes(b"\x00\x00\x00\x18ftyp")
+    monkeypatch.setattr("gateway.platforms.base.MEDIA_DELIVERY_SAFE_ROOTS", (root,))
+    monkeypatch.setattr(
+        "gateway.platforms.base._media_delivery_allowed_roots",
+        lambda: [root],
+    )
     reply = f"Here is the clip\nMEDIA:{good.as_posix()}"
     runner = SimpleNamespace()
     extracted = _outgoing(reply, runner)
