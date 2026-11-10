@@ -68,7 +68,8 @@ async function execProbe(
     timeout: number
     shell?: boolean
     windowsHide?: boolean
-  }
+  },
+  retryOnTimeout = true
 ): Promise<void> {
   const run = () =>
     new Promise<void>((resolve, reject) => {
@@ -93,7 +94,7 @@ async function execProbe(
   try {
     await run()
   } catch (err) {
-    if (!isTimeoutError(err)) {
+    if (!retryOnTimeout || !isTimeoutError(err)) {
       throw err
     }
 

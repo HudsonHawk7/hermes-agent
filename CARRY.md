@@ -73,6 +73,7 @@ print('recipes_root:', cfg.get('scene_builder', {}).get('recipes_root'))
 | 673f13534dd | a plugin save does not put a gated model back in memory | save_config stored the merged dict before the gate. A broken file is filtered before that copy is stored, returned, or cached. Card t_76f52a9c. |
 | 277f5b0ae3d | skip a gated model on the profile start load | The gateway loader and the CLI start path skip model.default unless the GM answered Yes. A backup or last-known-good on that loader does not put the gated model back. Card t_76f52a9c. |
 | 9a32014c4c7 | say so in chat when a reply names a file that was never made | A missing MEDIA file is replaced with the plain notice, and the next turn is told. Card t_4b0bc393. Not installed live. |
+| 23d5d4a529e | do not strand Desktop on first-run setup when Hermes is only slow | A timed-out probe no longer starts first-run setup when the checkout is present. The installer URL comes from the checkout remote. The startup launcher lookup stays off the main thread. Card t_713e0080. Upstream not opened. |
 
 Add new rows here before pushing a carry. Upstream the individual fix as a normal PR from a short-lived branch off origin/main when appropriate.
 
