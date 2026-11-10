@@ -80,6 +80,29 @@ export function pickGroupAttachments(): Promise<Attachment[]> {
   })
 }
 
+/** A picture file on disk (camera roll / screenshots) as a room attachment.
+ *  Null when the bridge can't read it as an image. Reads the file the OS
+ *  already saved; this function writes nothing. */
+export async function pathToGroupAttachment(filePath: string): Promise<Attachment | null> {
+  const reader = window.hermesDesktop?.readFileDataUrlForAttach ?? window.hermesDesktop?.readFileDataUrl
+
+  if (!reader) {
+    return null
+  }
+
+  const data: unknown = await reader(filePath).catch(() => null)
+
+  if (typeof data !== 'string' || !data.startsWith('data:image/')) {
+    return null
+  }
+
+  return {
+    name: filePath.split(/[\\/]/).pop() || 'picture',
+    data: await normalizeGroupAttachment(data),
+    kind: 'image'
+  }
+}
+
 /** Bound a group attachment's long edge so room logs (persisted with the
  *  plugin's other durable state) stay light while screenshots keep enough
  *  resolution for vision models to read text. No-op for small images or

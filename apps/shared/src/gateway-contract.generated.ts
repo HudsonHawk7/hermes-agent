@@ -2823,7 +2823,7 @@ export interface ImageAttachParams {
   profile?: string | null
   path: string
 }
-/** ``content_base64`` (or the ``data`` alias) carries the bytes; ``filename`` / ``ext`` only hint the extension — magic bytes decide. */
+/** ``content_base64`` (or the ``data`` alias) carries the bytes; ``filename`` / ``ext`` only hint the extension — magic bytes decide. ``privacy`` is the group-chat flag (bool or ``true`` / ``false``); the canonical dispatcher refuses an undeclared key before the handler. */
 export interface ImageAttachBytesParams {
   session_id: string
   profile?: string | null
@@ -2831,6 +2831,7 @@ export interface ImageAttachBytesParams {
   data?: string | null
   filename?: string | null
   ext?: string | null
+  privacy?: boolean | string | null
 }
 /** Host ``path`` or base64 ``content_base64`` / ``data``; ``first_page`` / ``last_page`` bound the render (per-call page cap enforced server-side). */
 export interface PdfAttachParams {

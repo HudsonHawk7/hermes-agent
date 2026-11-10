@@ -292,6 +292,7 @@ import { resolveGatewayVersion } from './gateway-version'
 import { probeGatewayWebSocket } from './gateway-ws-probe'
 import { windowsGitCandidates } from './git-binary-candidates'
 import { registerGitIpc } from './git-ipc'
+import { installGroupPictureCapture } from './group-picture-capture'
 import {
   assertExistingPathForOpen,
   ATTACHMENT_UPLOAD_DEFAULT_MAX_BYTES,
@@ -18102,6 +18103,7 @@ app.whenReady().then(() => {
   // here and surfaced in Settings via the IPC state (never silent).
   applyQuickEntrySettings(readQuickEntrySettings())
   installCommandScreenshot({ rendererUrl: DEV_SERVER || pathToFileURL(resolveRendererIndex()).toString() })
+  installGroupPictureCapture()
   installHudModifierTap({
     rendererUrl: DEV_SERVER || pathToFileURL(resolveRendererIndex()).toString(),
     summon: () => {

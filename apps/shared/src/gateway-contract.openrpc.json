@@ -20949,7 +20949,7 @@
       },
       "ImageAttachBytesParams": {
         "additionalProperties": false,
-        "description": "``content_base64`` (or the ``data`` alias) carries the bytes; ``filename`` / ``ext`` only hint\nthe extension \u2014 magic bytes decide.",
+        "description": "``content_base64`` (or the ``data`` alias) carries the bytes; ``filename`` / ``ext`` only hint\nthe extension \u2014 magic bytes decide. ``privacy`` is the group-chat flag (bool or ``true`` / ``false``);\nthe canonical dispatcher refuses an undeclared key before the handler.",
         "properties": {
           "session_id": {
             "title": "Session Id",
@@ -21014,6 +21014,21 @@
             ],
             "default": null,
             "title": "Ext"
+          },
+          "privacy": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Privacy"
           }
         },
         "required": [
