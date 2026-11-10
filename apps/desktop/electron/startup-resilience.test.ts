@@ -20,6 +20,21 @@ afterEach(() => {
   resetRuntimeProbeForTests()
 })
 
+test('ignore-existing with a present checkout falls through to bootstrap (first-run choice)', () => {
+  const decision = refuseFirstRunWhenCheckoutPresent({
+    checkoutPresent: true,
+    probeOk: false,
+    repair: false,
+    ignoreExisting: true,
+    elapsedMs: 0,
+    reason: 'exit',
+    exitCode: null,
+    attempts: 0
+  })
+
+  expect(decision.action).toBe('bootstrap')
+})
+
 test('probe timeout plus an existing checkout does not bootstrap and shows the retry state', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-probe-'))
   const home = path.join(root, 'home')

@@ -577,7 +577,11 @@ import { collectSshConfigHosts, parseSshGOutput } from './ssh-config'
 import { createSshProbeConnection, pickLocalPort, redactSecrets, SshConnection } from './ssh-connection'
 import { createSshIsolatedKeepaliveRegistry } from './ssh-isolated-keepalive'
 import { createSshTeardownTracker } from './ssh-teardown'
-import { enterRuntimeProbe, stillStartingMessage, takeLastProbeFailure } from './startup-resilience'
+import {
+  enterRuntimeProbe,
+  refuseFirstRunWhenCheckoutPresent,
+  takeLastProbeFailure
+} from './startup-resilience'
 import { createStreamThrottle } from './stream-throttle'
 import { installSystemCaTrust } from './system-ca'
 import { registerTerminalIpc } from './terminal-ipc'
@@ -5095,16 +5099,33 @@ async function resolveHermesBackend(backendArgs: string[]): Promise<ResolvedHerm
 
   const probeFailure = takeLastProbeFailure()
   const checkoutPresent = fs.existsSync(path.join(ACTIVE_HERMES_ROOT, 'hermes_cli', 'main.py'))
+  // Single source of truth with startup-resilience tests: repair / ignore-existing /
+  // missing checkout → bootstrap (first-run choice); present checkout that failed
+  // probe → still-starting. Inline duplicate here previously missed ignoreExisting,
+  // so hermes desktop --ignore-existing could never reach bootstrap-needed.
+  const firstRunDecision = refuseFirstRunWhenCheckoutPresent({
+    checkoutPresent,
+    // Usable active runtime already returned above; this rung only decides
+    // bootstrap vs still-starting after gates/probes failed or were skipped.
+    probeOk: false,
+    repair: bootstrapRepairRequested,
+    ignoreExisting: process.env.HERMES_DESKTOP_IGNORE_EXISTING === '1',
+    elapsedMs: probeFailure?.elapsedMs ?? 0,
+    reason: probeFailure?.reason ?? 'exit',
+    exitCode: probeFailure?.exitCode ?? null,
+    attempts: probeFailure?.attempts ?? 0
+  })
 
-  if (!bootstrapRepairRequested && checkoutPresent) {
-    const message = stillStartingMessage(probeFailure?.elapsedMs ?? 0)
-
+  if (firstRunDecision.action === 'still-starting') {
     rememberLog(
       `[bootstrap] checkout present at ${ACTIVE_HERMES_ROOT}; not starting first-run setup. ` +
-        (probeFailure?.message ?? message)
+        (probeFailure?.message ?? firstRunDecision.message)
     )
 
-    const stillStarting = new Error(message) as Error & { retryable?: boolean; stillStarting?: boolean }
+    const stillStarting = new Error(firstRunDecision.message) as Error & {
+      retryable?: boolean
+      stillStarting?: boolean
+    }
 
     stillStarting.retryable = true
     stillStarting.stillStarting = true

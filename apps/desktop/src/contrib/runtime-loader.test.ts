@@ -1342,7 +1342,7 @@ describe('linked dev package: the source checkout drives the desktop half', () =
       return { entries: [] }
     })
     readPluginSource.mockImplementation(async () => ({ text: source, truncated: false }))
-    watchDirectory.mockResolvedValue(true)
+    watchDirectory.mockResolvedValue({ id: 'dir-swapped' })
     watchPreviewFile.mockResolvedValue({ id: 'w-swapped' })
     Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' })
     const desktop = window.hermesDesktop as unknown as { readPluginSource: unknown; statPluginFile: unknown }
