@@ -5099,6 +5099,7 @@ async function resolveHermesBackend(backendArgs: string[]): Promise<ResolvedHerm
 
   const probeFailure = takeLastProbeFailure()
   const checkoutPresent = fs.existsSync(path.join(ACTIVE_HERMES_ROOT, 'hermes_cli', 'main.py'))
+
   // Single source of truth with startup-resilience tests: repair / ignore-existing /
   // missing checkout → bootstrap (first-run choice); present checkout that failed
   // probe → still-starting. Inline duplicate here previously missed ignoreExisting,
