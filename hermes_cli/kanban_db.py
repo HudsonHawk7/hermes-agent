@@ -1327,6 +1327,17 @@ def create_task(
                 # ACK-edge: the originating channel hears a child BLOCK, not just the fan-in.
                 inherit_creator_origin(conn, task_id, creator_task_id, created_at=now)
                 _inherit_notify_subs(conn, task_id, parents, created_at=now)
+            try:
+                from hermes_cli.gm_gated_models import park_if_gated
+
+                park_if_gated(
+                    conn, task_id, model_override,
+                    assignee=assignee, provider=provider_override,
+                )
+            except Exception:
+                _log.warning(
+                    "models.gm_gated: could not park %s after create", task_id, exc_info=True,
+                )
             return task_id
         except sqlite3.IntegrityError:
             if attempt == 1:
@@ -1495,12 +1506,27 @@ def set_model_override(
     Allowed while ``running``: it applies on the NEXT dispatch, which is the
     rate-limit-recovery flow (set, then reclaim/retry)."""
     model, provider = _validate_model_override(model, provider)
-    return _set_task_override(
+    changed = _set_task_override(
         conn, task_id,
         "UPDATE tasks SET model_override = ?, provider_override = ? WHERE id = ?", (model, provider),
         "model_override_set", {"model": model, "provider": provider},
         ("model_override", "provider_override"), archived_msg="cannot set model override",
     )
+    if model:
+        try:
+            from hermes_cli.gm_gated_models import park_if_gated
+
+            task = get_task(conn, task_id)
+            park_if_gated(
+                conn, task_id, model,
+                assignee=getattr(task, "assignee", None) if task else None,
+                provider=provider,
+            )
+        except Exception:
+            _log.warning(
+                "models.gm_gated: could not park %s after set-model", task_id, exc_info=True,
+            )
+    return changed
 
 
 def _set_task_override(

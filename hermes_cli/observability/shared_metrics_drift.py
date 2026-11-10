@@ -21,8 +21,9 @@ from .shared_metrics_contract import (
 def counter_dimensions_shape_is_known(metric_name: str, dimensions: dict[str, Any]) -> bool:
     """Whether the row's field set matches a current or legacy contract shape (values aside).
 
-    A row that fails this is structurally unknown — that is tamper evidence, not drift, and
-    packaging keeps failing closed on it (see test_package_builder_rejects_tampered_dimensions).
+    A row that fails this is structurally unknown — tamper, or a field an earlier build
+    recorded. Packaging quarantines that row (left out, never exported) instead of aborting
+    the period (see test_unknown_shape_row_is_quarantined_and_the_rest_of_the_period_packages).
     """
     fields = frozenset(dimensions)
     return fields == _METRIC_FIELDS.get(metric_name) or fields in _LEGACY_METRIC_FIELDS.get(metric_name, ())

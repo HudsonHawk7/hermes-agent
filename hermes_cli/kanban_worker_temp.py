@@ -2,7 +2,9 @@
 
 When ``kanban.worker_temp_root`` is set, every dispatcher-spawned worker gets
 TEMP/TMP/TMPDIR under ``<root>/<assignee>/<task_id>_<run_id>``. When unset, the
-inherited env is left alone — never a quiet C: fallback. The janitor walks the
+inherited env is left alone — never a quiet C: fallback. Boards are root-scoped,
+so an unset profile value falls back to the root Hermes home config. A profile
+value wins only when it is actually set. The janitor walks the
 root on a gateway timer (and via ``hermes kanban gc``) and deletes run folders
 older than ``kanban.worker_temp_max_age_hours``, except folders whose owner pid
 is still alive.
@@ -10,7 +12,10 @@ is still alive.
 When the configured root's leaf is ``_tmp``, the same pass also sweeps sibling
 ``<parent>/<agent>/tmp`` trees (legacy agent temp outside ``_tmp``). Deletes
 clear the read-only bit on retry so Windows git object files do not strand
-folders; every failed path is logged with its size.
+folders. A path that still cannot be removed is logged once, with its size and
+reason, and recorded under the sweep root. Later passes stay quiet about that
+same path and reason, still try to remove it, and drop the record when it goes.
+ACLs are never changed.
 """
 
 from __future__ import annotations
@@ -36,6 +41,7 @@ _OWNER_MARKER = ".owner.json"
 _SETTING_ROOT = "kanban.worker_temp_root"
 _SETTING_MAX_AGE = "kanban.worker_temp_max_age_hours"
 _SETTING_JANITOR = "kanban.worker_temp_janitor_minutes"
+_SPAWN_KEYS = ("worker_temp_root", "worker_temp_max_age_hours", "worker_temp_janitor_minutes")
 
 
 @dataclass(frozen=True)
@@ -64,16 +70,120 @@ def _positive_int(raw: Any, default: int) -> int:
     return value if value > 0 else default
 
 
-def load_worker_temp_settings(kanban_cfg: Optional[Mapping[str, Any]] = None) -> WorkerTempSettings:
-    """Read the three named settings from a ``kanban:`` block (or live config)."""
-    if kanban_cfg is None:
-        try:
-            from hermes_cli.config import load_config
+def _spawn_value_set(key: str, raw: Any) -> bool:
+    """True when *raw* is a user-set spawn value, not a blank or a default fill."""
+    if raw is None or raw is False or raw == "":
+        return False
+    if key == "worker_temp_root":
+        return bool(str(raw).strip())
+    return _positive_int(raw, 0) > 0
 
-            cfg = load_config() or {}
-            kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
-        except Exception:
-            kanban_cfg = {}
+
+def _yaml_mapping(path: Path) -> dict:
+    """Read one config file without the worker snapshot short-circuit."""
+    from utils import fast_safe_load
+
+    with open(path, encoding="utf-8-sig") as handle:
+        loaded = fast_safe_load(handle)
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _raw_kanban_block(home: Path) -> dict:
+    """The ``kanban:`` block of *home*/config.yaml, or {}.
+
+    Uses the effective reader (env expansion, no DEFAULT_CONFIG merge) so a
+    missing key stays missing. A frozen worker snapshot ignores the path
+    argument, so that case reads the file directly — the root file is the
+    point of this read.
+    """
+    path = Path(home) / "config.yaml"
+    try:
+        if not path.is_file():
+            return {}
+        from agent.safe_worker_policy import worker_config_snapshot
+
+        if worker_config_snapshot() is not None:
+            raw = _yaml_mapping(path)
+        else:
+            from hermes_cli.config_effective import load_user_config_effective
+
+            raw = load_user_config_effective(path) or {}
+    except Exception:
+        logger.debug("worker temp: could not read %s", path, exc_info=True)
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    block = raw.get("kanban")
+    return block if isinstance(block, dict) else {}
+
+
+def _root_and_profile_spawn_block() -> dict:
+    """Root spawn settings, with set profile values overlaid.
+
+    Boards live in the root Hermes home. A profile-scoped process whose own
+    config has no kanban section must still see the root's worker temp policy.
+    """
+    try:
+        from hermes_constants import get_default_hermes_root, get_hermes_home
+
+        root = get_default_hermes_root()
+        home = get_hermes_home()
+    except Exception:
+        logger.debug("worker temp: could not resolve hermes homes", exc_info=True)
+        return {}
+    merged = dict(_raw_kanban_block(root))
+    try:
+        same_home = home.resolve() == root.resolve()
+    except OSError:
+        same_home = str(home) == str(root)
+    if same_home:
+        return merged
+    profile = _raw_kanban_block(home)
+    for key in _SPAWN_KEYS:
+        if _spawn_value_set(key, profile.get(key)):
+            merged[key] = profile[key]
+    return merged
+
+
+def _active_kanban_from_load_config() -> dict:
+    """Last resort: the active loader, including a test double.
+
+    ``load_config`` fills defaults, so this must not override a value the
+    files already set. It only fills keys the files left blank, which keeps
+    an injected loader working when the fixture never wrote a kanban block.
+    """
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+    except Exception:
+        logger.debug("worker temp: load_config failed", exc_info=True)
+        return {}
+    block = cfg.get("kanban") if isinstance(cfg, dict) else None
+    return block if isinstance(block, dict) else {}
+
+
+def _resolve_spawn_kanban() -> dict:
+    merged = _root_and_profile_spawn_block()
+    missing = [key for key in _SPAWN_KEYS if not _spawn_value_set(key, merged.get(key))]
+    if not missing:
+        return merged
+    active = _active_kanban_from_load_config()
+    for key in missing:
+        if _spawn_value_set(key, active.get(key)):
+            merged[key] = active[key]
+    return merged
+
+
+def load_worker_temp_settings(kanban_cfg: Optional[Mapping[str, Any]] = None) -> WorkerTempSettings:
+    """Read the three named settings from a ``kanban:`` block (or live config).
+
+    No block passed: resolve from the root Hermes home, then overlay a profile
+    value only when that profile actually set it. An explicit block is the
+    caller's override and is not filled from disk.
+    """
+    if kanban_cfg is None:
+        kanban_cfg = _resolve_spawn_kanban()
     if not isinstance(kanban_cfg, Mapping):
         kanban_cfg = {}
     raw_root = kanban_cfg.get("worker_temp_root")
@@ -484,6 +594,80 @@ def _candidate_is_safe_name(name: str) -> bool:
     return True
 
 
+_STUCK_RECORD = ".janitor-stuck.json"
+
+
+def _load_stuck(root: Path) -> dict[str, str]:
+    """Path -> reason for removes this tree could not finish. Missing or junk is empty."""
+    try:
+        raw = json.loads((root / _STUCK_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        key: value
+        for key, value in raw.items()
+        if isinstance(key, str) and isinstance(value, str)
+    }
+
+
+def _save_stuck(root: Path, records: dict[str, str]) -> None:
+    path = root / _STUCK_RECORD
+    try:
+        if not records:
+            path.unlink(missing_ok=True)
+            return
+        tmp = path.with_name(_STUCK_RECORD + ".tmp")
+        tmp.write_text(json.dumps(records, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        logger.debug(
+            "worker-temp janitor: could not record a stuck path under %s",
+            root,
+            exc_info=True,
+        )
+
+
+def _remember_stuck(
+    root: Path,
+    run_dir: Path,
+    reason: str,
+    warn: Callable[..., None],
+    message: str,
+    *args: Any,
+) -> None:
+    """Log a failed remove once per path and reason. A later pass with the same reason is quiet."""
+    if not _strictly_below(run_dir, root):
+        warn(message, *args)
+        return
+    try:
+        key = str(run_dir.resolve())
+    except OSError:
+        warn(message, *args)
+        return
+    records = _load_stuck(root)
+    if records.get(key) == reason:
+        return
+    warn(message, *args)
+    records[key] = reason
+    _save_stuck(root, records)
+
+
+def _forget_stuck(root: Path, run_dir: Path) -> None:
+    if not _strictly_below(run_dir, root):
+        return
+    try:
+        key = str(run_dir.resolve())
+    except OSError:
+        return
+    records = _load_stuck(root)
+    if key not in records:
+        return
+    del records[key]
+    _save_stuck(root, records)
+
+
 def _sweep_one_tree(
     resolved: Path,
     *,
@@ -592,7 +776,11 @@ def _sweep_one_tree(
             try:
                 _rmtree_with_readonly_retry(run_dir)
             except OSError as exc:
-                warn(
+                _remember_stuck(
+                    resolved,
+                    run_dir,
+                    str(exc),
+                    warn,
                     "worker-temp janitor: failed to remove %s (%s B) — %s",
                     run_dir,
                     size,
@@ -601,13 +789,18 @@ def _sweep_one_tree(
                 refused += 1
                 continue
             if run_dir.exists():
-                warn(
+                _remember_stuck(
+                    resolved,
+                    run_dir,
+                    "still present after rmtree",
+                    warn,
                     "worker-temp janitor: failed to remove %s (%s B) — still present after rmtree",
                     run_dir,
                     size,
                 )
                 refused += 1
                 continue
+            _forget_stuck(resolved, run_dir)
             removed += 1
             bytes_freed += size
 

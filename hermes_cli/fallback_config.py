@@ -140,7 +140,20 @@ def get_fallback_chain(config: dict[str, Any] | None) -> list[dict[str, Any]]:
             if identity not in seen:
                 seen.add(identity)
                 chain.append(entry)
-    return chain
+    return _drop_gated_fallback(chain, config)
+
+
+def _drop_gated_fallback(chain, config):
+    try:
+        from hermes_cli.gm_gated_models import drop_gated_fallback
+
+        return drop_gated_fallback(chain, config=config)
+    except Exception:
+        logger.warning(
+            "models.gm_gated: fallback skip failed; not keeping the chain",
+            exc_info=True,
+        )
+        return []
 
 
 def scoped_fallback_chain(

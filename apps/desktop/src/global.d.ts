@@ -310,6 +310,11 @@ declare global {
        *  at the 512 KiB preview cap). Absent on older shells — callers fall
        *  back to readFileText and must reject a `truncated` result. */
       readPluginSource?: (filePath: string) => Promise<HermesReadFileTextResult>
+      /** mtime and size of a plugin entry file. The disk poll reloads when
+       *  either changed since load. Absent on older shells. */
+      statPluginFile?: (
+        filePath: string
+      ) => Promise<{ mtimeMs: number; path: string; size: number } | HermesReadFileErrorResult>
       selectPaths: (options?: HermesSelectPathsOptions) => Promise<string[]>
       /** Native save dialog; returns the chosen path or null on cancel. */
       selectSavePath?: (options?: {

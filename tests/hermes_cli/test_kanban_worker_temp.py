@@ -387,3 +387,269 @@ def test_sweep_includes_legacy_agent_tmp(tmp_path):
     assert not aged_short.exists()
     assert young_keep.exists(), "young legacy dir must be kept"
     assert primary_litter.exists(), "primary _tmp still requires task-id run names"
+
+
+def test_stuck_remove_is_logged_once_then_cleared_when_it_can(tmp_path, caplog, monkeypatch):
+    """A path the janitor cannot remove is recorded once and not logged on the next pass.
+
+    The next pass still tries. When the path becomes removable, it is removed and the
+    record is dropped. Fails on a janitor that warns on every pass.
+    """
+    root = tmp_path / "_tmp"
+    run = root / "hera" / "t_eaf8020a_9"
+    run.mkdir(parents=True)
+    (run / "left.txt").write_text("stuck", encoding="utf-8")
+    old = time.time() - (49 * 3600)
+    os.utime(run / "left.txt", (old, old))
+    os.utime(run, (old, old))
+    original = kwt._rmtree_with_readonly_retry
+
+    def _denied(folder: Path) -> None:
+        raise PermissionError(13, "Access is denied", str(folder))
+
+    monkeypatch.setattr(kwt, "_rmtree_with_readonly_retry", _denied)
+    cfg = {"worker_temp_root": str(root), "worker_temp_max_age_hours": 48}
+    with caplog.at_level(logging.WARNING):
+        first = kwt.sweep_worker_temp(kanban_cfg=cfg)
+        second = kwt.sweep_worker_temp(kanban_cfg=cfg)
+    fails = [
+        r for r in caplog.records
+        if "failed to remove" in r.getMessage() and "t_eaf8020a_9" in r.getMessage()
+    ]
+    assert len(fails) == 1, [r.getMessage() for r in caplog.records]
+    assert first.refused == 1 and second.refused == 1
+    assert run.is_dir()
+    record = root / ".janitor-stuck.json"
+    saved = json.loads(record.read_text(encoding="utf-8"))
+    key = str(run.resolve())
+    assert key in saved
+    assert "Access is denied" in saved[key]
+
+    monkeypatch.setattr(kwt, "_rmtree_with_readonly_retry", original)
+    caplog.clear()
+    third = kwt.sweep_worker_temp(kanban_cfg=cfg)
+    assert not run.exists()
+    assert third.removed == 1
+    assert not record.exists()
+    assert not any("failed to remove" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Everyone deny is a Windows ACL")
+def test_janitor_removes_killed_acl_test_leftover(tmp_path):
+    """A killed ACL test leaves Everyone (WD) on a nested folder. The janitor removes the tree.
+
+    (WD) is the deny those tests keep: it blocks creating a lock file, the owner can lift it,
+    and it does not block deleting the folder. (F) on a Python 3.13 0o700 folder cannot be
+    lifted by this user, so the tests must not leave that shape.
+    """
+    import subprocess
+
+    base = tmp_path / "ForceAgents"
+    new_root = base / "_tmp"
+    new_root.mkdir(parents=True)
+    top = base / "hera" / "tmp" / "hermes-pytest"
+    leftover = top / "pytest-0" / "test_startup0" / "runtime" / "bot_live_delivery"
+    leftover.mkdir(parents=True)
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    denied = subprocess.run(
+        ["icacls", str(leftover), "/deny", "*S-1-1-0:(WD)"],
+        capture_output=True,
+        check=False,
+        creationflags=flags,
+    )
+    assert denied.returncode == 0, denied.stderr
+    old = time.time() - (49 * 3600)
+    os.utime(leftover, (old, old))
+    os.utime(top, (old, old))
+    try:
+        result = kwt.sweep_worker_temp(
+            kanban_cfg={
+                "worker_temp_root": str(new_root),
+                "worker_temp_max_age_hours": 48,
+            }
+        )
+        assert not top.exists(), "killed-test leftover must be removed"
+        assert result.removed >= 1
+        assert result.refused == 0
+    finally:
+        if leftover.exists():
+            subprocess.run(
+                ["icacls", str(leftover), "/remove:d", "*S-1-1-0", "/T", "/C"],
+                capture_output=True,
+                check=False,
+                creationflags=flags,
+            )
+
+
+def _yaml_string(value: str) -> str:
+    """A YAML double-quoted scalar. json.dumps escapes backslashes."""
+    return json.dumps(value)
+
+
+def _profile_scoped_layout(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Synthetic Hermes root plus a named profile that has no kanban section.
+
+    The profile sits outside the native Hermes home, under ``profiles/``, so
+    ``get_default_hermes_root()`` resolves to the synthetic root rather than
+    the machine's real config.
+    """
+    root = tmp_path / "hermes-root"
+    profile = root / "profiles" / "solara"
+    profile.mkdir(parents=True)
+    temp_root = tmp_path / "agent-tmp"
+    root.joinpath("config.yaml").write_text(
+        "kanban:\n"
+        f"  worker_temp_root: {_yaml_string(str(temp_root))}\n"
+        "  worker_temp_max_age_hours: 12\n"
+        "  worker_temp_janitor_minutes: 7\n",
+        encoding="utf-8",
+    )
+    profile.joinpath("config.yaml").write_text("model: test\n", encoding="utf-8")
+    return root, profile, temp_root
+
+
+def _isolate_profile_home(monkeypatch, profile: Path) -> None:
+    """Point this process at *profile* and drop the root-path memo."""
+    import hermes_constants
+
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    monkeypatch.setattr(hermes_constants, "_default_hermes_root_memo", None, raising=False)
+
+
+def test_profile_scoped_spawn_pins_temp_from_root_config(monkeypatch, tmp_path):
+    """A profile with no kanban section still pins TEMP from the root config.
+
+    Boards are root-scoped. ``_default_spawn`` calls ``apply_worker_temp_env``
+    with no kanban block, so a process whose HERMES_HOME is profiles/<name>
+    must not drop ``kanban.worker_temp_root``. Fails on base: that spawn leaves
+    the inherited temp path.
+    """
+    from hermes_constants import get_default_hermes_root, get_hermes_home
+
+    root, profile, temp_root = _profile_scoped_layout(tmp_path)
+    _isolate_profile_home(monkeypatch, profile)
+    inherited = str(tmp_path / "windows-temp")
+    monkeypatch.setenv("TEMP", inherited)
+    monkeypatch.setenv("TMP", inherited)
+    monkeypatch.setenv("TMPDIR", inherited)
+
+    assert get_hermes_home().resolve() == profile.resolve()
+    assert get_default_hermes_root().resolve() == root.resolve(), (
+        "test isolation failed: root resolved to the native Hermes home"
+    )
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    captured = _capture_spawn_unmocked(monkeypatch, tmp_path, workspace, assignee="solara")
+    env = captured["env"]
+    marker = env.get("HERMES_WORKER_TEMP_ROOT") or env.get("TEMP")
+    assert marker, "profile-scoped spawn did not pin TEMP from the root worker_temp_root"
+    assert Path(marker).resolve().is_relative_to(temp_root.resolve())
+    assert "windows-temp" not in (env.get("TEMP") or "")
+    assert env.get("TEMP") == env.get("TMP") == env.get("TMPDIR")
+
+    settings = kwt.load_worker_temp_settings()
+    assert settings.max_age_hours == 12
+    assert settings.janitor_minutes == 7
+
+
+def _capture_spawn_unmocked(monkeypatch, tmp_path, workspace: Path, *, assignee: str) -> dict:
+    """Real ``_default_spawn`` with Popen stubbed and load_config left live."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_dispatch as kbd
+
+    captured: dict = {}
+
+    class FakeProc:
+        pid = 4242
+
+    def fake_popen(cmd, *args, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["env"] = dict(kwargs.get("env") or {})
+        captured["cwd"] = kwargs.get("cwd")
+        return FakeProc()
+
+    monkeypatch.setattr(kbd.subprocess, "Popen", fake_popen)
+    kbd._default_spawn(_make_task(kb, assignee=assignee), str(workspace))
+    return captured
+
+
+def test_set_profile_worker_temp_overrides_root(monkeypatch, tmp_path):
+    """A profile value that is actually set wins over the root config."""
+    _root, profile, root_temp = _profile_scoped_layout(tmp_path)
+    profile_temp = tmp_path / "profile-temp"
+    profile.joinpath("config.yaml").write_text(
+        "kanban:\n"
+        f"  worker_temp_root: {_yaml_string(str(profile_temp))}\n"
+        "  worker_temp_max_age_hours: 6\n",
+        encoding="utf-8",
+    )
+    _isolate_profile_home(monkeypatch, profile)
+    env: dict = {}
+    pinned = kwt.apply_worker_temp_env(env, task_id=_TID, run_id=4, assignee="solara")
+    assert pinned is not None
+    assert Path(pinned).resolve().is_relative_to(profile_temp.resolve())
+    assert not Path(pinned).resolve().is_relative_to(root_temp.resolve())
+    settings = kwt.load_worker_temp_settings()
+    assert settings.max_age_hours == 6
+    # Janitor minutes were not set on the profile, so the root value stands.
+    assert settings.janitor_minutes == 7
+
+
+def test_profile_scoped_gc_sweeps_root_worker_temp(monkeypatch, tmp_path, capsys):
+    """``hermes -p solara kanban gc`` must sweep the root-configured temp tree.
+
+    Same bug class as HTS-051's janitor path: ``_cmd_gc`` used to pass
+    ``kanban_cfg=_kanban_config()``. That snapshot is default-filled (or empty
+    for a profile with no kanban section), so ``load_worker_temp_settings``
+    skips disk resolution and the sweep silently no-ops. The watcher already
+    calls ``sweep_worker_temp()`` with no args; gc must do the same.
+    """
+    import argparse
+
+    from hermes_cli import kanban_ops
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_constants import get_default_hermes_root, get_hermes_home
+
+    _root, profile, temp_root = _profile_scoped_layout(tmp_path)
+    # Layout writes max_age_hours: 12 on the root; plant a run older than that.
+    run = temp_root / "solara" / f"{_TID_GC}_9"
+    run.mkdir(parents=True)
+    blob = run / "old.bin"
+    blob.write_bytes(b"g" * 1024)
+    old = time.time() - (20 * 3600)
+    os.utime(blob, (old, old))
+    os.utime(run, (old, old))
+
+    _isolate_profile_home(monkeypatch, profile)
+    assert get_hermes_home().resolve() == profile.resolve()
+    assert get_default_hermes_root().resolve() == _root.resolve(), (
+        "test isolation failed: root resolved to the native Hermes home"
+    )
+
+    class _Conn:
+        def execute(self, *a, **k):
+            return SimpleNamespace(fetchall=list)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(kbc, "connect_closing", lambda: _Conn())
+    monkeypatch.setattr(kb, "gc_events", lambda *a, **k: 0)
+    monkeypatch.setattr(kb, "gc_worker_logs", lambda *a, **k: 0)
+    monkeypatch.setattr(kb, "workspaces_root", lambda: tmp_path / "ws_root")
+
+    args = argparse.Namespace(event_retention_days=0, log_retention_days=0)
+    rc = kanban_ops._cmd_gc(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "worker-temp" in out
+    assert "removed 1" in out, (
+        f"profile-scoped gc did not sweep the root worker_temp_root; out={out!r} "
+        f"run_exists={run.exists()}"
+    )
+    assert not run.exists()

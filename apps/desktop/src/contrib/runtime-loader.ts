@@ -555,8 +555,12 @@ export async function loadRuntimePlugin(
 //  - each plugin.js is fs-watched (the preview watcher IPC, debounced in
 //    main): saving the file hot-reloads the plugin in place;
 //  - each root is fs-watched too (watchDirectory IPC), so new folders load +
-//    removed ones unload on the change tick; older Electron shells without
-//    watchDirectory fall back to the slow visible-tab poll.
+//    removed ones unload on the change tick;
+//  - a visible-tab poll stays up even when those watches succeed. Resolving
+//    the root runs Electron's reconcile (an installer writes the package's
+//    own desktop/plugin.js, which the desktop-plugins watch never sees), and
+//    a folder swap of the same path orphans the file watch (#91503). The poll
+//    reloads a known plugin.js whose mtime or size changed since it loaded.
 // Panes land via placement adoption and STAY where the user drags them —
 // the tree treats not-yet-loaded pane ids as hidden, so boot and reload are
 // collapse -> appear, never a placeholder flash.
@@ -640,6 +644,10 @@ interface DiskPlugin {
   packageOrigin?: PackageMarker['origin']
   /** Loaded plugin id (null while broken — kept so a fixing save reloads). */
   id: null | string
+  /** plugin.js mtime at last successful load. A poll reload keys off this. */
+  loadedMtimeMs?: number
+  /** plugin.js size at last successful load. Same-path swaps can keep mtime. */
+  loadedSize?: number
   /** Origin label (folder name) — the toast/inventory name for load errors. */
   origin: string
   /** Linked dev package only: the SOURCE `desktop/plugin.js` this copy came from. */
@@ -848,17 +856,86 @@ async function resyncLinkedDiskPlugins(): Promise<void> {
 
     if (await loadDiskPlugin(record)) {
       await watchDiskPluginFile(desktop, record)
+      // The copy's mtime moved with this write. Leave it unrecorded and the
+      // next poll disposes and registers the plugin again.
+      await rememberPluginFingerprint(desktop, record)
     } else {
       void scanDiskPlugins()
     }
   }
 }
 
+interface PluginFileFingerprint {
+  mtimeMs: number
+  size: number
+}
+
+function isPluginFileStat(value: unknown): value is PluginFileFingerprint {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+
+  const stat = value as { error?: unknown; mtimeMs?: unknown; size?: unknown }
+
+  return stat.error == null && typeof stat.mtimeMs === 'number' && typeof stat.size === 'number'
+}
+
+/** Cheap mtime+size read. Absent on older shells — the poll still reconciles,
+ *  and the manual reload remains the swap path until the shell is current. */
+async function readPluginFingerprint(
+  desktop: NonNullable<Window['hermesDesktop']>,
+  file: string
+): Promise<null | PluginFileFingerprint> {
+  const statFile = desktop.statPluginFile
+
+  if (!statFile) {
+    return null
+  }
+
+  try {
+    const result = await statFile(file)
+
+    return isPluginFileStat(result) ? { mtimeMs: result.mtimeMs, size: result.size } : null
+  } catch {
+    return null
+  }
+}
+
+async function rememberPluginFingerprint(
+  desktop: NonNullable<Window['hermesDesktop']>,
+  record: DiskPlugin
+): Promise<void> {
+  const fingerprint = await readPluginFingerprint(desktop, record.file)
+
+  if (!fingerprint) {
+    return
+  }
+
+  record.loadedMtimeMs = fingerprint.mtimeMs
+  record.loadedSize = fingerprint.size
+}
+
+/** True when plugin.js changed since this entry loaded. A missing baseline
+ *  is not a change — the load just recorded it, or the shell cannot stat. */
+async function knownPluginFileChanged(
+  desktop: NonNullable<Window['hermesDesktop']>,
+  record: DiskPlugin
+): Promise<boolean> {
+  const fingerprint = await readPluginFingerprint(desktop, record.file)
+
+  if (!fingerprint || record.loadedMtimeMs == null || record.loadedSize == null) {
+    return false
+  }
+
+  return record.loadedMtimeMs !== fingerprint.mtimeMs || record.loadedSize !== fingerprint.size
+}
+
 /** Reconcile the disk root with the inventory. `reloadKnown` (the manual
- *  "Reload desktop plugins" command) also re-reads every already-known entry
- *  file: an installer that atomically replaces a plugin folder keeps the
- *  same path, so the fs watch on the old inode never fires and the stale
- *  module would otherwise stay live until restart (#91503). */
+ *  "Reload desktop plugins" command) re-reads every already-known entry file.
+ *  The disk poll does the same when plugin.js mtime or size changed: an
+ *  installer that atomically replaces a plugin folder keeps the same path, so
+ *  the fs watch on the old inode never fires and the stale module would
+ *  otherwise stay live until restart (#91503). */
 async function scanDiskPlugins(reloadKnown = false): Promise<void> {
   const desktop = window.hermesDesktop
 
@@ -910,8 +987,11 @@ async function scanDiskPlugins(reloadKnown = false): Promise<void> {
         const known = disk.get(file)
 
         if (known) {
-          if (reloadKnown && (await loadDiskPlugin(known))) {
+          const changed = await knownPluginFileChanged(desktop, known)
+
+          if ((reloadKnown || changed) && (await loadDiskPlugin(known))) {
             await watchDiskPluginFile(desktop, known)
+            await rememberPluginFingerprint(desktop, known)
           }
 
           continue
@@ -942,6 +1022,7 @@ async function scanDiskPlugins(reloadKnown = false): Promise<void> {
 
         await watchDiskPluginFile(desktop, record)
         await watchDiskPluginSource(desktop, record)
+        await rememberPluginFingerprint(desktop, record)
       }
     }
 
@@ -1012,7 +1093,7 @@ export async function uninstallDiskPlugin(pluginId: string): Promise<{ ok: boole
 }
 
 /** Manual rescan (the ⌘K "Reload desktop plugins" fallback) — re-reads
- *  known entries too, unlike the fs-watch/poll reconcile. */
+ *  every known entry, not only one whose plugin.js mtime or size changed. */
 export const discoverRuntimePlugins = (): Promise<void> => scanDiskPlugins(true)
 
 /** True while the disk door's FIRST scan is in flight. Boot code that must
@@ -1051,9 +1132,19 @@ export function watchRuntimePlugins(): void {
       }
 
       if (record.watchId === id) {
-        void loadDiskPlugin(record).then(readable => {
+        void loadDiskPlugin(record).then(async readable => {
           if (!readable) {
             void scanDiskPlugins()
+
+            return
+          }
+
+          // An in-place save does not re-bind the watch. Record the new
+          // mtime/size or the next poll loads this plugin a second time.
+          const shell = window.hermesDesktop
+
+          if (shell) {
+            await rememberPluginFingerprint(shell, record)
           }
         })
 
@@ -1095,25 +1186,20 @@ export function watchRuntimePlugins(): void {
   }
 
   void scanDiskPlugins().then(() => $diskPluginsScanPending.set(false))
-  void startDirWatches().then(watched => {
-    if (watched) {
+  void startDirWatches()
+
+  // Stay up even when every root is watched. Directory watches do not see an
+  // installer write under plugins/<id>/desktop/, and a same-path folder swap
+  // orphans the file watch (#91503). Each tick resolves diskRoots(), which is
+  // what runs Electron's reconcile, then reloads a plugin.js whose mtime or
+  // size changed. Do not retire this — that is the bug the manual command
+  // was papering over.
+  window.setInterval(() => {
+    if (document.visibilityState !== 'visible') {
       return
     }
 
-    const timer = window.setInterval(() => {
-      if (document.visibilityState !== 'visible') {
-        return
-      }
-
-      void scanDiskPlugins()
-
-      // A root may have appeared since — upgrade to the watches and retire
-      // this poll once every root is covered.
-      void startDirWatches().then(upgraded => {
-        if (upgraded) {
-          window.clearInterval(timer)
-        }
-      })
-    }, DISK_POLL_MS)
-  })
+    void scanDiskPlugins()
+    void startDirWatches()
+  }, DISK_POLL_MS)
 }

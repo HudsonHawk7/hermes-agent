@@ -654,10 +654,16 @@ class SharedMetricsStore:
 
     @classmethod
     def _package_metrics(cls, rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
-        """Package rows, merging rows a re-bucket folded onto the same dimensions into one metric."""
+        """Package rows, merging rows a re-bucket folded onto the same dimensions into one metric.
+
+        A row whose field set the contract does not know is left out and logged once by metric
+        name. The caller settles every selected row, so that row is not exported and is not
+        retried. One stale shape must not abort the rest of the period.
+        """
         merged: dict[tuple[str, str], dict[str, Any]] = {}
+        quarantined: set[str] = set()
         for row in rows:
-            metric = cls._package_metric(row)
+            metric = cls._package_metric(row, quarantined)
             if metric is None:
                 continue
             key = (metric["name"], _compact_json(metric["dimensions"]))
@@ -668,15 +674,27 @@ class SharedMetricsStore:
         return list(merged.values())
 
     @staticmethod
-    def _package_metric(row: sqlite3.Row) -> dict[str, Any] | None:
+    def _package_metric(row: sqlite3.Row, quarantined: set[str] | None = None) -> dict[str, Any] | None:
         metric_name = str(row["metric_name"])
-        dimensions = json.loads(row["dimensions_json"])
-        # An unknown field set is tamper evidence and fails closed (must-not-be-exported). A known
+        try:
+            dimensions = json.loads(row["dimensions_json"])
+        except (TypeError, ValueError):
+            # The decode error can quote the payload. Do not log it.
+            dimensions = None
+        # An unknown field set is tamper or a field an earlier build recorded. Fail closed on
+        # that row (never export it, never log its values) but do not abort the period. A known
         # shape whose values fell out of the contract was recorded by an earlier build or catalog
         # (#133017): re-bucket it inside the closed enum, or leave the row out when its field has no
-        # bucket, rather than abort the whole period's package. Either way no stale value leaves.
+        # bucket. Either way no stale value leaves.
         if not isinstance(dimensions, dict) or not counter_dimensions_shape_is_known(metric_name, dimensions):
-            raise ValueError(f"Unsupported dimensions for shared metric: {metric_name}")
+            if quarantined is None or metric_name not in quarantined:
+                if quarantined is not None:
+                    quarantined.add(metric_name)
+                logger.warning(
+                    "Shared-metric %s row has an unknown dimension shape; quarantined and not exported",
+                    metric_name,
+                )
+            return None
         if not counter_dimensions_are_valid(metric_name, dimensions):
             conformed = conform_counter_dimensions(metric_name, dimensions)
             if conformed is None:
