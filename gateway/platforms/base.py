@@ -1396,7 +1396,14 @@ def _normalize_media_tag_path(raw: str) -> str:
     path = str(raw or "").strip()
     if len(path) >= 2 and path[0] == path[-1] and path[0] in "`\"'":
         path = path[1:-1].strip()
-    return path.lstrip("`\"'").rstrip("`\"',.;:)}]")
+    path = path.lstrip("`\"'").rstrip("`\"',.;:)}]")
+    # A model writes MEDIA:/S:/renders/a.png. The leading slash makes Windows
+    # treat the drive letter as a URL, so the picture never opens. Drop that
+    # one slash when the next characters are a drive prefix.
+    path = path.replace("\\", "/")
+    if os.name == "nt" and len(path) >= 4 and path[0] == "/" and path[2] == ":" and path[1].isalpha():
+        path = path[1:]
+    return path
 
 
 def _path_lacks_deliverable_extension(path: str) -> bool:

@@ -58,6 +58,8 @@ export function observeGroupChatLogResize(
 
   ro.observe(content)
 
+  if (viewport) {ro.observe(viewport)}
+
   return () => ro.disconnect()
 }
 

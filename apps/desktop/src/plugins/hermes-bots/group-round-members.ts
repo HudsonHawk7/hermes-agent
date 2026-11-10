@@ -13,6 +13,13 @@ import {
 import type { GroupChatRoom } from './group-chat'
 import { groupMemberAuthor, groupMemberKey } from './group-membership'
 import {
+  nextPictureBackPrompt,
+  type PicturesBackLedgerEntry,
+  replyHasPicture,
+  settlePicturesBack
+} from './group-picture-back'
+import { normalizeGroupPictureSettings } from './group-picture-settings'
+import {
   buildGroupChatTurnPrompt,
   formatGroupDeltaLines,
   GROUP_ADDRESSED_NUDGE_SUFFIX,
@@ -166,6 +173,20 @@ async function runVisibleMemberTurn(
   }
 }
 
+function markLatestMemberNoPicture(group: string) {
+  updateGroupChat(
+    group,
+    (room: GroupChatRoom) => {
+      const last = room.log.at(-1)
+
+      if (last && last.from.kind === 'member') {last.noPicture = true}
+
+      return room
+    },
+    { sync: false }
+  )
+}
+
 export async function runGroupRoundMember(
   context: GroupRoundMemberContext,
   member: GroupMember
@@ -187,8 +208,19 @@ export async function runGroupRoundMember(
   let reply: null | string = null
   let accepted = false
 
+  const pictureAsk = nextPictureBackPrompt(
+    prompt,
+    normalizeGroupPictureSettings(room.pictures),
+    room.picturesBackLedger?.[memberKey],
+    (deltaImages || []).some(img => !img.kind || img.kind === 'image')
+  )
+
+  const turnPrompt = pictureAsk.prompt
+  let pictureLedger: PicturesBackLedgerEntry | undefined = room.picturesBackLedger?.[memberKey]
+  let pictureBadge = false
+
   try {
-    reply = await runVisibleMemberTurn(context, member, prompt, deltaImages)
+    reply = await runVisibleMemberTurn(context, member, turnPrompt, deltaImages)
 
     // #129443: the participation rules ("reply only with something new,
     // else (pass)") let a directly addressed member pass just because a
@@ -201,7 +233,19 @@ export async function runGroupRoundMember(
     // discarded by the epoch check right below anyway, so nudging it would
     // burn a model call whose result can never be committed.
     if (context.isCurrent() && reply !== null && isGroupPassText(reply) && context.addressedKeys?.has(memberKey)) {
-      reply = await runVisibleMemberTurn(context, member, `${prompt}${GROUP_ADDRESSED_NUDGE_SUFFIX}`, deltaImages)
+      reply = await runVisibleMemberTurn(context, member, `${turnPrompt}${GROUP_ADDRESSED_NUDGE_SUFFIX}`, deltaImages)
+    }
+
+    if (context.isCurrent() && reply !== null) {
+      let settled = settlePicturesBack(pictureLedger, pictureAsk.owed, replyHasPicture(reply))
+
+      if (settled.askAgain) {
+        reply = await runVisibleMemberTurn(context, member, turnPrompt, deltaImages)
+        settled = settlePicturesBack(settled.entry, true, replyHasPicture(reply))
+      }
+
+      pictureLedger = settled.entry
+      pictureBadge = settled.badge
     }
 
     accepted = true
@@ -303,6 +347,10 @@ export async function runGroupRoundMember(
         }
       }
 
+      if (pictureLedger) {
+        r.picturesBackLedger = { ...(r.picturesBackLedger || {}), [memberKey]: pictureLedger }
+      }
+
       return r
     })
   }
@@ -318,6 +366,11 @@ export async function runGroupRoundMember(
       undefined,
       takeMemberTurnVision(memberKey)
     )
+
+    if (pictureBadge) {markLatestMemberNoPicture(context.group)}
+  } else if (pictureBadge) {
+    appendGroupChatEntry(context.group, groupMemberAuthor(member), 'no picture', thread)
+    markLatestMemberNoPicture(context.group)
   } else {
     // Pass / timeout / failed: drain so the next turn cannot inherit this receipt.
     takeMemberTurnVision(memberKey)

@@ -26,6 +26,7 @@ import {
   groupSessionOwner,
   hasThreadScopedGroupSession
 } from './group-membership'
+import { normalizeGroupPictureSettings } from './group-picture-settings'
 import {
   addFreshThreadRoomContext,
   formatFreshThreadRoomContext,
@@ -966,7 +967,12 @@ function groupTurnAttachmentSuffix(fileRefs: string[], failed: string[]) {
   return extras.join('\n\n')
 }
 
-async function stageGroupTurnAttachments(member: GroupMember, runtime: string, images?: Attachment[]) {
+async function stageGroupTurnAttachments(
+  member: GroupMember,
+  runtime: string,
+  images?: Attachment[],
+  privacy = true
+) {
   // Stage this delta's attachments into the member's session so the model
   // receives the actual payload with the prompt — the same attach RPCs the
   // 1:1 chat uses (they also work cross-connection, where the member's
@@ -1002,7 +1008,8 @@ async function stageGroupTurnAttachments(member: GroupMember, runtime: string, i
         await requestForBot(member, 'image.attach_bytes', {
           session_id: runtime,
           content_base64: img.data,
-          filename: label
+          filename: label,
+          privacy: privacy ? 'true' : 'false'
         })
       }
     } catch (error) {
@@ -1286,7 +1293,8 @@ async function runGroupChatMemberTurnLeased(
     // prompt lands after them.
     mirrorExternalGroupWrites(group, member, thread, snapshot?.messages)
 
-    const { failed, fileRefs } = await stageGroupTurnAttachments(member, runtime, images)
+    const privacyOn = normalizeGroupPictureSettings($groupChats.get()[group]?.pictures).privacyMode
+    const { failed, fileRefs } = await stageGroupTurnAttachments(member, runtime, images, privacyOn)
 
     if (!binding.isLive()) {
       return null

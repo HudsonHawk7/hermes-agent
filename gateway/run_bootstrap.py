@@ -758,6 +758,12 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # Snapshot the revision while sys.modules matches disk so a later `git pull` is detected safely.
     from gateway.code_skew import record_boot_fingerprint
     record_boot_fingerprint()
+    try:
+        from hermes_constants import get_hermes_home
+        from gateway.privacy_images import sweep_privacy_images
+        sweep_privacy_images(get_hermes_home())
+    except Exception:
+        logger.debug("privacy image sweep skipped", exc_info=True)
 
     # Config verdicts come before the duplicate-instance guard: `--replace` must not stop a healthy
     # gateway for a launch that cannot start.

@@ -1217,6 +1217,11 @@ def _run_prompt_submit(
             _recover_turn_exception(sid, session, st, e)
         finally:
             _release_turn_scopes(sid, session, st)
+            try:
+                from gateway.privacy_images import release_session_privacy_images
+                release_session_privacy_images(session, sid)
+            except Exception:
+                pass
             try:  # a raising settle step must not skip the trim / HERMES_HOME reset
                 _current_runtime_session_record.reset(runtime_session_token)
                 reset_transport(transport_token)
