@@ -179,7 +179,8 @@ test('probeWithBackoff stops on the first success and classifies a timeout', asy
 
   expect(failed.ok).toBe(false)
 
-  if (!failed.ok) {
+  // strictNullChecks:false (tsconfig.electron) does not narrow `if (!ok)`.
+  if (failed.ok === false) {
     expect(failed.failure.reason).toBe('timeout')
     expect(failed.failure.attempts).toBe(3)
   }

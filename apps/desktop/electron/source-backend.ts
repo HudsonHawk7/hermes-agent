@@ -70,7 +70,9 @@ export async function resolveSourceInstallationBackend(
 
     const probed = await probeWithBackoff(probe, { sleep: options.sleep })
 
-    if (!probed.ok) {
+    // strictNullChecks:false (tsconfig.electron) does not narrow `if (!ok)` on
+    // a boolean-literal discriminant under tsc 6.0.3 — use === false.
+    if (probed.ok === false) {
       noteProbeFailure(probed.failure)
       options.log?.(
         `[bootstrap] hermes --version probe ${probed.failure.reason} (exit ${probed.failure.exitCode ?? 'n/a'}) after ${probed.failure.elapsedMs}ms, ${probed.failure.attempts} tries, at ${root}`
