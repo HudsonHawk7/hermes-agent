@@ -281,6 +281,7 @@ def record_gm_ask(
     reason: Optional[str] = None,
     expected_run_id: Optional[int] = None,
     force_park: bool = False,
+    payload_extra: Optional[dict] = None,
 ) -> dict[str, Any]:
     """Validate *ask*, ensure the card is ``blocked``/``needs_input``, write
     ``gm_ask``. Returns ``{ask_event_id, ask, status}``.
@@ -290,6 +291,8 @@ def record_gm_ask(
     so only the normal ``block_task`` transition is used.
     """
     payload = validate_gm_ask(ask)
+    if payload_extra:
+        payload.update(payload_extra)
     payload["asked_by"] = (asked_by or payload.get("asked_by") or "worker").strip() or "worker"
     if get_open_gm_ask(conn, task_id) is not None:
         raise GmAskError(f"{task_id} already has an open GM ask — answer or undo it first")
@@ -438,6 +441,14 @@ def answer_gm_ask(
             }
 
         ask_event_id, ask_payload, _ask_at = open_ask
+        if isinstance(ask_payload, dict) and ask_payload.get("purpose") == "gm_gated_model":
+            from hermes_cli.gm_gated_models import (
+                reject_non_gm_gate_answer,
+                stamp_answering_identity,
+            )
+
+            by = stamp_answering_identity(by, via=via, gate=True)
+            reject_non_gm_gate_answer(conn, task_id, by)
         options = {o["key"]: o for o in ask_payload.get("options") or [] if isinstance(o, dict)}
 
         if sent_back:
@@ -462,6 +473,7 @@ def answer_gm_ask(
                 "key": key,
                 "note": note_text,
                 "by": by,
+                "model": ask_payload.get("model") if isinstance(ask_payload, dict) else None,
                 "via": via,
                 "ask_event_id": ask_event_id,
                 "label": opt.get("label"),

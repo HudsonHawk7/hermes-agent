@@ -64,7 +64,14 @@ print('recipes_root:', cfg.get('scene_builder', {}).get('recipes_root'))
 | f60589632df | record a desktop plugin fingerprint after a watch reload | A file-watch save and a linked-source resync now store the new mtime and size, so the next poll does not register the pane a second time. Card t_28520a5d. |
 | 9eff2de7d72 | pin worker temp from the root config when a profile has no kanban section | A profile-scoped spawn reads the root kanban.worker_temp_* values unless that profile set its own. Card t_b11af14f. Upstream not opened. |
 | ac2a1fcb19c | profile-scoped kanban gc self-resolves worker temp settings | `_cmd_gc` no longer passes a load_config snapshot into the sweep. Card t_2f029367. Upstream not opened. |
+| 4c7e2f8d05e | refuse a gated model unless the GM answered Yes | models.gm_gated is named and never defaulted. A matching card is not dispatched, and a matching profile model is skipped, unless the GM answered Yes on a hermes kanban ask. An agent cannot approve its own card. Card t_76f52a9c. |
+| fb3f882c14b | a later Yes and a thrown check do not unlock a gated model | The Yes must be on that ask and name that model. The profile Yes is filed and looked up on one key. A thrown check does not launch the model and does not keep the gated chain. Card t_76f52a9c. |
+| 0c3b3953a6b | an unreadable gate list does not launch a gated model | A thrown config load is not an empty list. The dispatch is refused, and the gated fallback, moa, aux, and profile chain are not kept. Card t_76f52a9c. |
+| c5a50c47e85 | a broken settings file does not launch a gated model | A returned FailedConfigRead with no last-known-good list is not an empty list. The dispatch is refused, and the gated fallback, moa, aux, and profile chain are not kept. Card t_76f52a9c. |
+| e2b5496fb58 | a good backup does not serve a gated model | A broken settings file is filtered before the backup is returned or cached. A backup with no list does not keep the profile, fallback, moa, or aux chain. Card t_76f52a9c. |
 | 560c5b7e361 | report code skew only when runtime files changed | A desktop-only or docs-only fast-forward no longer locks the model picker. Git errors still report skew. Card t_60621b61. Upstream not opened. |
+| 673f13534dd | a plugin save does not put a gated model back in memory | save_config stored the merged dict before the gate. A broken file is filtered before that copy is stored, returned, or cached. Card t_76f52a9c. |
+| 277f5b0ae3d | skip a gated model on the profile start load | The gateway loader and the CLI start path skip model.default unless the GM answered Yes. A backup or last-known-good on that loader does not put the gated model back. Card t_76f52a9c. |
 
 Add new rows here before pushing a carry. Upstream the individual fix as a normal PR from a short-lived branch off origin/main when appropriate.
 

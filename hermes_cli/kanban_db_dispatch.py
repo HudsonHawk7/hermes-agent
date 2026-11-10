@@ -8,6 +8,7 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import re
 import signal
@@ -2818,6 +2819,20 @@ def _dispatch_lane_task(
     skip is recorded on ``result``.
     """
     task_id = row["id"]
+    refused = False
+    try:
+        from hermes_cli.gm_gated_models import dispatch_refuses_gated
+
+        if not dry_run:
+            refused = bool(dispatch_refuses_gated(conn, task_id))
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "models.gm_gated: dispatch check failed for %s; not spawning",
+            task_id, exc_info=True,
+        )
+        refused = True
+    if refused:
+        return False
     # Non-profile assignees (control-plane lanes that pull via ``claim_task``)
     # would fail ``hermes -p <assignee>`` at startup and loop ready→crash→ready
     # forever. Bucketed apart from skipped_unassigned: the operator cannot fix
