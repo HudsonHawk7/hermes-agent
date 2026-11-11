@@ -824,17 +824,49 @@ def _provider_state_in(store: dict[str, Any], provider_id: str) -> Optional[dict
     return dict(state) if isinstance(state, dict) else None
 
 
+def _provider_block_has_credential_material(state: Optional[dict[str, Any]]) -> bool:
+    """True when a providers.<id> block still carries redeemable credential material.
+
+    Empty ``tokens: {}`` plus a ``last_auth_error`` stub (the 10/19 xAI refresh-failure
+    shape left on many named profiles) is NOT a grant: it must not shadow the global
+    root. A real grant has a non-empty access/refresh token (nested under ``tokens`` or
+    flat, Nous-style) or a Nous ``agent_key``.
+    """
+    if not isinstance(state, dict):
+        return False
+    tokens = state.get("tokens")
+    if isinstance(tokens, dict):
+        if str(tokens.get("access_token") or "").strip() or str(tokens.get("refresh_token") or "").strip():
+            return True
+    if str(state.get("access_token") or "").strip() or str(state.get("refresh_token") or "").strip():
+        return True
+    if str(state.get("agent_key") or "").strip():
+        return True
+    return False
+
+
 def _load_provider_state_with_source(
     auth_store: dict[str, Any], provider_id: str,
 ) -> tuple[Optional[dict[str, Any]], Optional[Path]]:
     """Provider state plus the auth.json path it came from (profile first, then the global root).
 
     Refresh paths that rotate single-use OAuth refresh tokens must write the updated chain back to
-    the same store they read."""
+    the same store they read.
+
+    A profile block with no credential material (empty tokens + last_auth_error stub) does
+    not count as a hit: fall through to the global root so long-running profile workers keep
+    borrowing the shared grant instead of shadowing it forever (t_99a52155).
+    """
     state = _provider_state_in(auth_store, provider_id)
-    if state is not None:
+    if state is not None and _provider_block_has_credential_material(state):
         return state, _auth_file_path()
     global_state = _provider_state_in(_load_global_auth_store(), provider_id)
+    if global_state is not None and _provider_block_has_credential_material(global_state):
+        return global_state, _global_auth_file_path()
+    # Prefer a material-bearing block; otherwise surface whatever the profile still holds
+    # (so callers that inspect last_auth_error keep a diagnostic) before a bare global miss.
+    if state is not None:
+        return state, _auth_file_path()
     return (global_state, _global_auth_file_path()) if global_state is not None else (None, None)
 
 

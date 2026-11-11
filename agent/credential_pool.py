@@ -35,6 +35,7 @@ from hermes_cli.auth import (
     CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
     PROVIDER_REGISTRY,
     SINGLE_USE_REFRESH_POOL_PROVIDERS,
+    _auth_file_path,
     _auth_store_lock,
     _codex_access_token_is_expiring,
     _decode_jwt_claims,
@@ -1508,8 +1509,15 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         with _auth_store_lock(timeout_seconds=self._single_use_refresh_lock_timeout()):
             if self.provider == "openai-codex":
                 synced = self._sync_entry_from_auth_store(entry)
-                if synced is not entry and not force and not self._entry_needs_refresh(synced):
-                    return synced
+                if synced is not entry:
+                    # Peer already rotated: adopt without burning the single-use refresh.
+                    if not force and not self._entry_needs_refresh(synced):
+                        return synced
+                    if force and (
+                        synced.access_token != entry.access_token
+                        or synced.refresh_token != entry.refresh_token
+                    ):
+                        return synced
                 return self._refresh_entry_impl(synced, force=force)
             synced = self._sync_entry_from_pool_store(entry)
             if self.provider == "anthropic" and synced.source == "claude_code":
@@ -1529,6 +1537,18 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                     return self._refresh_entry_impl(synced, force=force)
             if synced.access_token != entry.access_token or synced.refresh_token != entry.refresh_token:
                 return synced
+            # xAI (and other tokens-singleton providers that re-read auth.json in
+            # ``_refresh_entry_impl``): pool row may lag the providers block after a
+            # peer rotation. Adopt before POST so a force recovery never burns the
+            # single-use refresh that root already moved on from (t_99a52155).
+            if self.provider in _TOKENS_SINGLETON_PROVIDERS:
+                auth_synced = self._sync_entry_from_auth_store(synced)
+                if (
+                    auth_synced.access_token != entry.access_token
+                    or auth_synced.refresh_token != entry.refresh_token
+                ):
+                    return auth_synced
+                synced = auth_synced
             return self._refresh_entry_impl(synced, force=force)
 
     def _claude_code_credentials_lock(self):
@@ -1683,7 +1703,21 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             if self.provider == "anthropic":
                 updated = self._refresh_anthropic(entry)
             elif self.provider in _TOKENS_SINGLETON_PROVIDERS:
+                # xAI / Codex refresh tokens are single-use. If root (or a sibling) already
+                # rotated the pair, adopt it and skip the POST — burning a live shared refresh
+                # logs every profile out (t_99a52155).
+                stale_access = entry.access_token or ""
+                stale_refresh = entry.refresh_token or ""
                 entry = self._sync_entry_from_auth_store(entry)
+                if force and (
+                    (entry.access_token or "") != stale_access
+                    or (entry.refresh_token or "") != stale_refresh
+                ):
+                    logger.debug(
+                        "Pool entry %s: adopting %s tokens already rotated on disk, skipping refresh POST",
+                        entry.id, _TOKENS_SINGLETON_PROVIDERS[self.provider][0],
+                    )
+                    return entry
                 updated = self._post_tokens_refresh(entry)
             elif (plugin_refresh := plugin_refresh_hook(self.provider)) is not None:
                 rotated = plugin_refresh(entry)
@@ -1852,12 +1886,30 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             )
 
     def _clear_terminal_tokens_state(self, entry: PooledCredential, exc: Exception) -> None:
-        """Drop the dead Codex/xAI token pair from auth.json unless a peer already rotated it."""
+        """Drop the dead Codex/xAI token pair from auth.json unless a peer already rotated it.
+
+        Only writes to the store that owns the grant. A profile worker that borrowed root
+        must not plant an empty ``providers.<id>`` stub that shadows the shared login
+        (t_99a52155 / 10/19 xAI stubs).
+        """
         display = _TOKENS_SINGLETON_PROVIDERS[self.provider][1]
         try:
             with _auth_store_lock():
-                auth_store = _load_auth_store()
-                state = _load_provider_state(auth_store, self.provider) or {}
+                profile_store = _load_auth_store()
+                state, source_path = _load_provider_state_with_source(profile_store, self.provider)
+                if not isinstance(state, dict):
+                    return
+                profile_path = _auth_file_path()
+                if (
+                    source_path is not None
+                    and profile_path is not None
+                    and not _same_path(source_path, profile_path)
+                ):
+                    logger.debug(
+                        "Skipping profile terminal clear for %s; grant lives at %s",
+                        display, source_path,
+                    )
+                    return
                 tokens = (state.get("tokens") or {}) if isinstance(state, dict) else None
                 if isinstance(tokens, dict):
                     store_refresh = str(tokens.get("refresh_token") or "").strip()
@@ -1873,8 +1925,10 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                             "relogin_required": True,
                             "at": datetime.now(UTC).isoformat(),
                         }
-                        _save_provider_state(auth_store, self.provider, state)
-                        _save_auth_store(auth_store)
+                        target = source_path if source_path is not None else profile_path
+                        store = _load_auth_store(target) if target is not None else profile_store
+                        _save_provider_state(store, self.provider, state)
+                        _save_auth_store(store, target_path=target)
         except Exception as clear_exc:
             logger.debug("Failed to clear terminal %s OAuth state: %s", display, clear_exc)
 
