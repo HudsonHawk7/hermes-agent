@@ -35,6 +35,9 @@ ALREADY_RE = re.compile(
     r"already merged|already running the pr|already in live head|already live",
     re.IGNORECASE,
 )
+# Sentence end, not a character window. An 80-character window lets
+# "already in live HEAD" in the previous sentence cancel the next PR wait.
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 HOLD_RE = re.compile(
     r"do not promote|do not build|parked on purpose|on purpose|leave (?:it )?parked|on hold",
     re.IGNORECASE,
@@ -450,15 +453,20 @@ def _recent_human_note(conn, task_id: str) -> str:
 def _prs_that_are_waits(note: str) -> list[tuple[str, int]]:
     repo = _repo_for_note(note)
     found: list[tuple[str, int]] = []
-    for match in PRS_LIST_RE.finditer(note or ""):
-        window = note[max(0, match.start() - 80):match.end() + 80]
-        if ALREADY_RE.search(window) or re.search(r"do not promote", window, re.IGNORECASE):
+    for sentence in _sentences(note or ""):
+        # A landed phrase or a hold cancels only the PRs in this sentence.
+        if ALREADY_RE.search(sentence) or re.search(r"do not promote", sentence, re.IGNORECASE):
             continue
-        for number in re.findall(r"\d+", match.group(1)):
-            item = (repo, int(number))
-            if item not in found:
-                found.append(item)
+        for match in PRS_LIST_RE.finditer(sentence):
+            for number in re.findall(r"\d+", match.group(1)):
+                item = (repo, int(number))
+                if item not in found:
+                    found.append(item)
     return found
+
+
+def _sentences(note: str) -> list[str]:
+    return [part for part in SENTENCE_SPLIT_RE.split(note) if part.strip()]
 
 
 def _repo_for_note(note: str) -> str:

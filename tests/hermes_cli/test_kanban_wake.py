@@ -172,8 +172,16 @@ def test_already_in_live_head_is_not_a_wait():
         "Parked: member-media PR 19 is already in live HEAD d6270f17. "
         "Not next in a runnable lane. Do not promote."
     )
+    landed_only = "PR 19 is already in live HEAD."
     assert kw.parse_park_note(short, own_id="t_00000000")["until_prs"] == []
     assert kw.parse_park_note(longer, own_id="t_00000000")["until_prs"] == []
+    assert kw.parse_park_note(landed_only, own_id="t_00000000")["until_prs"] == []
+
+
+def test_landed_phrase_does_not_cancel_the_next_pr_wait():
+    mixed = "PR 19 is already in live HEAD. Waiting on PR 20."
+    parsed = kw.parse_park_note(mixed, own_id="t_00000000")
+    assert parsed["until_prs"] == [("HudsonHawk7/Force_2.1", 20)]
 
 
 def test_pr_list_captures_every_number():
