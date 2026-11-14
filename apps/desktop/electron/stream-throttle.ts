@@ -46,6 +46,11 @@ export interface StreamThrottleOptions {
   /** Native-Wayland workaround for #94865. False by default so other
    * platforms retain Chromium's idle background throttling. */
   keepFullscreenPainting?: boolean
+  /** Hidden e2e never shows the window. Electron 44's
+   * SetBackgroundThrottling(true) hides a never-shown page, and Chromium
+   * then pauses muted video. When set, idle re-throttle cannot turn
+   * throttling back on. Visible runs leave this unset. */
+  pinUnthrottled?: boolean
 }
 
 export interface StreamThrottle {
@@ -65,6 +70,7 @@ export function createStreamThrottle(
 ): StreamThrottle {
   const windows = new Set<ThrottleWindowLike>()
   const keepFullscreenPainting = options.keepFullscreenPainting === true
+  const pinUnthrottled = options.pinUnthrottled === true
   let unthrottled = false
   let trailing: unknown = null
   let lastBusy = false
@@ -101,7 +107,7 @@ export function createStreamThrottle(
     }
 
     try {
-      contents.setBackgroundThrottling(!unthrottled)
+      contents.setBackgroundThrottling(!(unthrottled || pinUnthrottled))
     } catch {
       // A window mid-teardown can throw; it's about to leave the set anyway.
     }
