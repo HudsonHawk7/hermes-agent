@@ -994,7 +994,14 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     ):
         conn.execute("UPDATE task_events SET kind = ? WHERE kind = ?", (new, old))
 
+    _ensure_task_wakes(conn)
     _rebuild_drifted_tables(conn)
+
+
+def _ensure_task_wakes(conn: sqlite3.Connection) -> None:
+    """Parked cards need a machine wake. Created here so old boards grow it too."""
+    from hermes_cli.kanban_wake import ensure_schema
+    ensure_schema(conn)
 
 
 def _backfill_legacy_inflight_runs(conn: sqlite3.Connection) -> None:

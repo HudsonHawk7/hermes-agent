@@ -1086,14 +1086,76 @@ def _cmd_answer(args: argparse.Namespace) -> int:
 
 
 def _cmd_schedule(args: argparse.Namespace) -> int:
+    from hermes_cli import kanban_wake as kw
     reason = _joined_words(args.reason)
     author = _profile_author()
     ids = _bulk_ids(args)
-    suffix = f": {reason}" if reason else ""
+    try:
+        until_ts = kw.parse_until(args.until) if getattr(args, "until", None) else None
+        until_prs = [kw.parse_until_pr(item) for item in (getattr(args, "until_pr", None) or [])]
+    except ValueError as exc:
+        return _err(f"kanban schedule: {exc}")
+    wait_on = list(getattr(args, "wait_on", None) or [])
+    wake = _wake_label(wait_on, until_prs, until_ts)
+    suffix = f": {reason} ({wake})" if reason else f" ({wake})"
+
+    def op(conn, tid):
+        scheduled = kb.schedule_task(
+            conn, tid, reason=reason, expected_run_id=_worker_run_id_for(tid),
+        )
+        task = kb.get_task(conn, tid)
+        if not scheduled and (task is None or task.status != "scheduled"):
+            return False
+        if reason and scheduled:
+            kb.add_comment(conn, tid, author, f"SCHEDULED: {reason}")
+        kw.record_wakes(
+            conn, tid, wait_on=wait_on, until_prs=until_prs, until_ts=until_ts,
+        )
+        return True
+
     with kbc.connect_closing() as conn:
-        op = _commented(conn, reason, author, "SCHEDULED", lambda tid: kb.schedule_task(
-            conn, tid, reason=reason, expected_run_id=_worker_run_id_for(tid)))
-        return _bulk_apply(ids, op, lambda tid: f"Scheduled {tid}{suffix}", lambda tid: f"cannot schedule {tid}")
+        return _bulk_apply(
+            ids, lambda tid: op(conn, tid),
+            lambda tid: f"Scheduled {tid}{suffix}",
+            lambda tid: f"cannot schedule {tid}",
+        )
+
+
+def _wake_label(wait_on, until_prs, until_ts) -> str:
+    parts = [f"wait-on {item}" for item in wait_on]
+    parts += [f"until-pr {repo}#{number}" for repo, number in until_prs]
+    if until_ts is not None:
+        parts.append(f"until {until_ts}")
+    return ", ".join(parts) if parts else "wake=none"
+
+
+def _cmd_wake_pass(args: argparse.Namespace) -> int:
+    """Promote cards whose waits are met. Orchestrator only."""
+    if os.environ.get("HERMES_KANBAN_TASK"):
+        return _err("kanban wake-pass is orchestrator-only; the sweep runs it")
+    from hermes_cli import kanban_wake as kw
+    now = time.time()
+    with kbc.connect_closing() as conn:
+        if getattr(args, "backfill", False):
+            for line in kw.backfill_scheduled(conn):
+                print(line)
+        archived = kw.archive_merged_gates(conn, pr_status=kw.github_pr_status)
+        promoted = kw.promote_ready(conn, now=now, pr_status=kw.github_pr_status)
+        if getattr(args, "daily", False):
+            for line in kw.daily_lines(conn, now=now):
+                print(line)
+    promoted_ids = promoted["promoted"]
+    print(
+        "wake-pass:"
+        f" promoted={len(promoted_ids)}"
+        f" archived={len(archived['archived'])}"
+        f" held={len(promoted['held'])}"
+    )
+    if promoted_ids:
+        print("promoted " + " ".join(promoted_ids))
+    if archived["archived"]:
+        print("archived " + " ".join(archived["archived"]))
+    return 0
 
 
 def _cmd_unblock(args: argparse.Namespace) -> int:
@@ -1408,7 +1470,7 @@ _HANDLERS = {
     "attachments": _cmd_attachments, "attach-rm": _cmd_attach_rm,
     "complete": _cmd_complete, "edit": _cmd_edit, "block": _cmd_block,
     "ask": _cmd_ask, "answer": _cmd_answer,
-    "schedule": _cmd_schedule, "unblock": _cmd_unblock,
+    "schedule": _cmd_schedule, "unblock": _cmd_unblock, "wake-pass": _cmd_wake_pass,
     "request-review": _cmd_request_review, "request-changes": _cmd_request_changes,
     "reopen-review": _cmd_reopen_review, "promote": _cmd_promote,
     "archive": _cmd_archive, "tail": _cmd_tail, "dispatch": _cmd_dispatch,
