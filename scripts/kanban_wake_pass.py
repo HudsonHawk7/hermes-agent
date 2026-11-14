@@ -1,6 +1,6 @@
 """One wake pass over every kanban board.
 
-The profile sweep calls this after install. The rules live in hermes_cli.kanban_wake.
+The dispatcher tick calls this. The rules live in hermes_cli.kanban_wake.
 A dry run prints what would move and writes nothing. --apply backfills, archives
 merged Gate PR cards, and promotes cards whose waits are met.
 The daily list prints on the first pass at or after 7 AM Central, or with --daily.
@@ -322,17 +322,20 @@ def collect_daily(now: float) -> list[str]:
     return found
 
 
-def main(argv: list[str]) -> int:
-    apply = "--apply" in argv
+def run_for_timer(*, apply: bool, argv: list[str] | None = None) -> list[str]:
+    """One wake pass. The dispatcher tick calls this. Returns the printed lines."""
+    extra = list(argv if argv is not None else (["--apply"] if apply else []))
+    if apply and "--apply" not in extra:
+        extra = ["--apply", *extra]
     now = time.time()
     state = load_daily_state()
-    plan = pass_plan(argv, state, now)
+    plan = pass_plan(extra, state, now)
     active = lane_load()
     parents = parent_status_map()
     profiles = host_dispatch_profiles()
-    print(f"dispatch profiles: {len(profiles)}")
+    out = [f"dispatch profiles: {len(profiles)}"]
     if not profiles:
-        print("dispatch profiles unreadable; promoting nothing")
+        out.append("dispatch profiles unreadable; promoting nothing")
     printed = 0
     folders = board_dirs()
     for folder in folders:
@@ -345,16 +348,20 @@ def main(argv: list[str]) -> int:
                 folder.name, folder, now=now, active=active, parents=parents, profiles=profiles,
             )
         )
-        for line in lines:
-            print(line)
-            printed += 1
+        out.extend(lines)
+        printed += len(lines)
     if plan["daily"]:
-        for line in collect_daily(now):
-            print(line)
+        out.extend(collect_daily(now))
     if apply and plan["stamp"]:
         state["last_daily_date"] = ct_day_and_hour(now)[0]
         save_daily_state(state)
-    print(f"wake-pass: boards={len(folders)} lines={printed} apply={int(apply)}")
+    out.append(f"wake-pass: boards={len(folders)} lines={printed} apply={int(apply)}")
+    return out
+
+
+def main(argv: list[str]) -> int:
+    for line in run_for_timer(apply="--apply" in argv, argv=argv):
+        print(line)
     return 0
 
 
