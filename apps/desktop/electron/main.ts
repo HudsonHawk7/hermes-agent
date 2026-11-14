@@ -16798,7 +16798,11 @@ const streamThrottle = createStreamThrottle(undefined, undefined, {
   // #94865 is specific to native Wayland fullscreen surfaces. Reuse the same
   // Ozone resolver as the rest of Desktop so XWayland/macOS/Windows retain the
   // normal idle throttling contract.
-  keepFullscreenPainting: process.platform === 'linux' && linuxOzoneBackend(process.env, process.argv) === 'wayland'
+  keepFullscreenPainting: process.platform === 'linux' && linuxOzoneBackend(process.env, process.argv) === 'wayland',
+  // Hidden e2e turns throttling off at create. Without this pin, register()
+  // and the 5s idle re-throttle turn it back on, which freezes muted video
+  // on a never-shown window. Visible runs leave the pin off.
+  pinUnthrottled: isDesktopE2eHidden()
 })
 
 function isAnyTurnInFlight() {
