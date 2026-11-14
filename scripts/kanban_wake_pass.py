@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-from hermes_cli import kanban_db_connect as kbc
+from hermes_cli.kanban_db_connect import connect as board_connect
 from hermes_cli import kanban_wake as kw
 
 SHARED_OWNERS = {"_kanban", "workspaces", "work", "wt", "scratch"}
@@ -25,6 +25,37 @@ def board_dirs() -> list[Path]:
     if not root.is_dir():
         return []
     return sorted(path for path in root.iterdir() if (path / "kanban.db").is_file())
+
+
+def host_dispatch_profiles() -> set[str]:
+    """Names the dispatcher will run. Empty means unreadable: promote nothing."""
+    path = Path(os.environ.get("LOCALAPPDATA", "")) / "hermes" / "config.yaml"
+    if not path.is_file():
+        return set()
+    in_kanban = False
+    collecting = False
+    names: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("kanban:"):
+            in_kanban = True
+            continue
+        if in_kanban and line and not line[:1].isspace():
+            break
+        if not in_kanban:
+            continue
+        stripped = line.strip()
+        if collecting:
+            if stripped.startswith("- "):
+                names.append(stripped[2:].strip().strip("'\""))
+                continue
+            break
+        if not stripped.startswith("dispatch_profiles:"):
+            continue
+        rest = stripped.split(":", 1)[1].strip()
+        if rest.startswith("[") and rest.endswith("]"):
+            return {part.strip().strip("'\"") for part in rest[1:-1].split(",") if part.strip()}
+        collecting = True
+    return {name for name in names if name}
 
 
 def _ro(folder: Path) -> sqlite3.Connection:
@@ -85,7 +116,7 @@ def latest_note(conn, task_id: str) -> str:
     ).fetchall()
     kept = []
     for row in rows:
-        if (row[0] or "") == "park-wake":
+        if (row[0] or "") in {"park-wake", "kanban_wake"}:
             continue
         kept.append(row[1] or "")
         if len(kept) >= 3:
@@ -93,7 +124,15 @@ def latest_note(conn, task_id: str) -> str:
     return "\n".join(kept)
 
 
-def dry_board(slug: str, folder: Path, *, now: float, active: dict[str, int], parents: dict[str, str]) -> list[str]:
+def dry_board(
+    slug: str,
+    folder: Path,
+    *,
+    now: float,
+    active: dict[str, int],
+    parents: dict[str, str],
+    profiles: set[str] | None = None,
+) -> list[str]:
     """Say what --apply would do. Does not write."""
     lines: list[str] = []
     conn = _ro(folder)
@@ -107,20 +146,71 @@ def dry_board(slug: str, folder: Path, *, now: float, active: dict[str, int], pa
                 continue
             if foreign_workspace(card["workspace_path"] or "", card["assignee"] or ""):
                 continue
-            parsed = kw.parse_park_note(note, own_id=card["id"])
-            if not _parsed_met(parsed, now, parents):
-                continue
             assignee = (card["assignee"] or "").strip()
-            if not assignee:
+            if not _assignee_runs(assignee, profiles):
                 continue
+            stored, summary = _stored_decision(conn, card["id"], now, parents)
+            if stored == "none" or stored == "unmet":
+                continue
+            if stored == "absent":
+                parsed = kw.parse_park_note(note, own_id=card["id"])
+                if not _parsed_met(parsed, now, parents):
+                    continue
+                summary = parsed["summary"]
             if active.get(assignee, 0) >= 1:
                 lines.append(f"{slug} would-hold {card['id']} lane full")
                 continue
-            lines.append(f"{slug} would-promote {card['id']} {parsed['summary']}")
+            lines.append(f"{slug} would-promote {card['id']} {summary}")
             active[assignee] = active.get(assignee, 0) + 1
     finally:
         conn.close()
     return lines
+
+
+def _assignee_runs(assignee: str, profiles: set[str] | None) -> bool:
+    if not assignee:
+        return False
+    if profiles is None:
+        return True
+    return assignee.lower() in {name.lower() for name in profiles}
+
+
+def _stored_decision(conn, task_id: str, now: float, parents: dict[str, str]) -> tuple[str, str]:
+    """absent, none, unmet, or met. Apply uses stored rows and does not re-parse them."""
+    try:
+        rows = conn.execute(
+            "SELECT kind, parent_id, repo, pr_number, until_ts FROM task_wakes WHERE task_id=?",
+            (task_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return "absent", ""
+    if not rows:
+        return "absent", ""
+    real = [row for row in rows if row["kind"] != "none"]
+    if not real:
+        return "none", "wake=none"
+    for row in real:
+        if row["kind"] == "parent" and parents.get(row["parent_id"]) not in kw.MET_PARENT:
+            return "unmet", ""
+        if row["kind"] == "time" and int(row["until_ts"] or 0) > int(now):
+            return "unmet", ""
+        if row["kind"] == "pr":
+            state = (kw.github_pr_status(row["repo"], int(row["pr_number"])) or "").lower()
+            if state not in kw.MET_PR:
+                return "unmet", ""
+    return "met", _stored_summary(real)
+
+
+def _stored_summary(rows) -> str:
+    parts = []
+    for row in rows:
+        if row["kind"] == "parent":
+            parts.append(f"wait-on {row['parent_id']}")
+        elif row["kind"] == "pr":
+            parts.append(f"until-pr {row['repo']}#{row['pr_number']}")
+        elif row["kind"] == "time":
+            parts.append(f"until {row['until_ts']}")
+    return ", ".join(parts) or "wake=none"
 
 
 def _parsed_met(parsed: dict, now: float, parents: dict[str, str]) -> bool:
@@ -137,9 +227,17 @@ def _parsed_met(parsed: dict, now: float, parents: dict[str, str]) -> bool:
     return True
 
 
-def apply_board(slug: str, *, now: float, active: dict[str, int], parents: dict[str, str], daily: bool) -> list[str]:
+def apply_board(
+    slug: str,
+    *,
+    now: float,
+    active: dict[str, int],
+    parents: dict[str, str],
+    daily: bool,
+    profiles: set[str] | None = None,
+) -> list[str]:
     lines: list[str] = []
-    with kbc.connect(board=slug) as conn:
+    with board_connect(board=slug) as conn:
         for line in kw.backfill_scheduled(conn):
             lines.append(f"{slug} backfill {line}")
         archived = kw.archive_merged_gates(conn, pr_status=kw.github_pr_status)
@@ -151,6 +249,7 @@ def apply_board(slug: str, *, now: float, active: dict[str, int], parents: dict[
             lane_active=active,
             lane_cap=1,
             skip_task=lambda task_id, conn=conn: _foreign_id(conn, task_id),
+            dispatch_profiles=profiles,
         )
         for task_id in promoted["promoted"]:
             assignee = _assignee(conn, task_id)
@@ -186,13 +285,21 @@ def main(argv: list[str]) -> int:
     now = time.time()
     active = lane_load()
     parents = parent_status_map()
+    profiles = host_dispatch_profiles()
+    print(f"dispatch profiles: {len(profiles)}")
+    if not profiles:
+        print("dispatch profiles unreadable; promoting nothing")
     printed = 0
     folders = board_dirs()
     for folder in folders:
         lines = (
-            apply_board(folder.name, now=now, active=active, parents=parents, daily=daily)
+            apply_board(
+                folder.name, now=now, active=active, parents=parents, daily=daily, profiles=profiles,
+            )
             if apply
-            else dry_board(folder.name, folder, now=now, active=active, parents=parents)
+            else dry_board(
+                folder.name, folder, now=now, active=active, parents=parents, profiles=profiles,
+            )
         )
         for line in lines:
             print(line)

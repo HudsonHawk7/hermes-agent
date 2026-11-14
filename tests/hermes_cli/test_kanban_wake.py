@@ -137,3 +137,80 @@ def test_backfill_comment_does_not_hide_a_hold(kanban_home):
         result = kw.promote_ready(conn, now=time.time(), pr_status=lambda repo, number: "merged")
         assert task_id not in result["promoted"]
         assert _status(conn, task_id) == "scheduled"
+
+
+def test_still_parked_and_do_not_restart_are_not_holds():
+    assert kw.hold_reason("x", "still parked. waiting on t_aaaaaaaa") == ""
+    assert kw.hold_reason("x", "Do not restart the gateway.") == ""
+    assert kw.hold_reason("x", "Do not promote.") == "deliberate_hold"
+    assert kw.hold_reason("x", "do not build") == "deliberate_hold"
+    assert kw.hold_reason("x", "parked on purpose") == "deliberate_hold"
+    assert kw.hold_reason("x", "leave parked") == "deliberate_hold"
+    assert kw.hold_reason("x", "on hold") == "deliberate_hold"
+
+
+def test_still_parked_note_does_not_block_a_met_parent(kanban_home):
+    with kbc.connect() as conn:
+        parent = kb.create_task(conn, title="done parent", assignee="aurora")
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (parent,))
+        child = _park(conn, "normal park", assignee="architect")
+        kb.add_comment(
+            conn,
+            child,
+            "probe",
+            "still parked. waiting on the parent. Do not restart the gateway.",
+        )
+        kw.record_wakes(conn, child, wait_on=[parent])
+        result = kw.promote_ready(conn, now=time.time(), pr_status=lambda repo, number: "open")
+        assert child in result["promoted"]
+        assert _status(conn, child) == "ready"
+
+
+def test_already_in_live_head_is_not_a_wait():
+    short = "PR 19 is already in live HEAD ... Do not promote."
+    longer = (
+        "Parked: member-media PR 19 is already in live HEAD d6270f17. "
+        "Not next in a runnable lane. Do not promote."
+    )
+    assert kw.parse_park_note(short, own_id="t_00000000")["until_prs"] == []
+    assert kw.parse_park_note(longer, own_id="t_00000000")["until_prs"] == []
+
+
+def test_pr_list_captures_every_number():
+    parsed = kw.parse_park_note(
+        "Parked until PRs 233, 234, 235 and 236 merge.",
+        own_id="t_00000000",
+    )
+    numbers = [number for _repo, number in parsed["until_prs"]]
+    assert numbers == [233, 234, 235, 236]
+
+
+def test_daily_list_reads_the_human_note_not_the_backfill(kanban_home):
+    with kbc.connect() as conn:
+        task_id = _park(conn, "needs a ruling")
+        kb.add_comment(conn, task_id, "darkeyes", "Parked: waiting on the GM.")
+        kw.record_wakes(conn, task_id)
+        kb.add_comment(conn, task_id, "park-wake", "backfill: wake=none")
+        conn.execute("UPDATE tasks SET created_at=1 WHERE id=?", (task_id,))
+        conn.execute(
+            "UPDATE task_events SET created_at=1 WHERE task_id=? AND kind='scheduled'",
+            (task_id,),
+        )
+        lines = kw.daily_lines(conn, now=1 + 4 * 24 * 3600)
+        assert any("waiting on the GM" in line for line in lines)
+
+
+def test_non_dispatch_assignee_stays_parked(kanban_home):
+    with kbc.connect() as conn:
+        parent = kb.create_task(conn, title="done parent", assignee="aurora")
+        conn.execute("UPDATE tasks SET status='done' WHERE id=?", (parent,))
+        child = _park(conn, "outside the dispatcher", assignee="architect_claudecode")
+        kw.record_wakes(conn, child, wait_on=[parent])
+        result = kw.promote_ready(
+            conn,
+            now=time.time(),
+            pr_status=lambda repo, number: "open",
+            dispatch_profiles={"probe", "hera"},
+        )
+        assert result["promoted"] == []
+        assert _status(conn, child) == "scheduled"

@@ -23,15 +23,20 @@ MET_PARENT = {"done", "archived"}
 MET_PR = {"merged", "closed"}
 
 TASK_ID_RE = re.compile(r"\b(t_[0-9a-f]{8})\b", re.IGNORECASE)
-PR_RE = re.compile(r"\bPRs?\s*#?\s*(\d+)\b", re.IGNORECASE)
+PRS_LIST_RE = re.compile(
+    r"\bPRs?\b\s*#?\s*((?:\d+\b\s*,?\s*(?:and\s+)?)+)",
+    re.IGNORECASE,
+)
 UNTIL_RE = re.compile(
     r"SCHEDULED_UNTIL=(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})?)"
 )
 GATE_TITLE_RE = re.compile(r"\bGate\s+PR\s*#?\s*(\d+)\b", re.IGNORECASE)
-ALREADY_RE = re.compile(r"already merged|already running the pr", re.IGNORECASE)
+ALREADY_RE = re.compile(
+    r"already merged|already running the pr|already in live head|already live",
+    re.IGNORECASE,
+)
 HOLD_RE = re.compile(
-    r"do not promote|do not build|do not restart|still parked|parked on purpose"
-    r"|on purpose|leave (?:it )?parked|on hold|not for (?:agent )?dispatch|read-only mirror",
+    r"do not promote|do not build|parked on purpose|on purpose|leave (?:it )?parked|on hold",
     re.IGNORECASE,
 )
 GM_WAIT_RE = re.compile(
@@ -159,10 +164,12 @@ def promote_ready(
     max_per_pass: int = MAX_PER_PASS,
     skip_task: Optional[Callable[[str], bool]] = None,
     commit: bool = True,
+    dispatch_profiles: Optional[set[str]] = None,
 ) -> dict[str, list[str]]:
     """Move scheduled cards to ready when their waits are met and the lane has room."""
     ensure_schema(conn)
     active = _lane_counts(conn, lane_active)
+    allowed = None if dispatch_profiles is None else {name.lower() for name in dispatch_profiles}
     promoted: list[str] = []
     held: list[str] = []
     for card in _scheduled(conn):
@@ -171,7 +178,7 @@ def promote_ready(
         if skip_task is not None and skip_task(card["id"]):
             continue
         outcome = _promote_one(
-            conn, card, now, pr_status, parent_status, active, lane_cap, commit,
+            conn, card, now, pr_status, parent_status, active, lane_cap, commit, allowed,
         )
         if outcome == "promoted":
             promoted.append(card["id"])
@@ -247,13 +254,19 @@ def daily_lines(
     ensure_schema(conn)
     lines: list[str] = []
     for card in _scheduled(conn):
-        note = (notes or {}).get(card["id"], _latest_comment(conn, card["id"]))
+        note = _daily_note(conn, card["id"], notes)
         if not _on_daily_list(conn, card, note, now, idle_seconds):
             continue
         title = (card["title"] or "").strip()
         waits = _wait_phrase(conn, card["id"], note)
         lines.append(f"{card['id']} {title} — {waits}")
     return lines
+
+
+def _daily_note(conn, card_id: str, notes: Optional[dict[str, str]]) -> str:
+    if notes and card_id in notes:
+        return notes[card_id]
+    return _recent_human_note(conn, card_id)
 
 
 def parse_park_note(note: str, *, own_id: str) -> dict:
@@ -370,9 +383,11 @@ def _lane_counts(conn, given: Optional[dict[str, int]]) -> dict[str, int]:
     return counts
 
 
-def _promote_one(conn, card, now, pr_status, parent_status, active, lane_cap, commit) -> str:
+def _promote_one(conn, card, now, pr_status, parent_status, active, lane_cap, commit, allowed) -> str:
     assignee = (card["assignee"] or "").strip()
     if not assignee:
+        return ""
+    if allowed is not None and assignee.lower() not in allowed:
         return ""
     note = _recent_human_note(conn, card["id"])
     if hold_reason(card["title"] or "", note) or GM_WAIT_RE.search(note or ""):
@@ -435,13 +450,14 @@ def _recent_human_note(conn, task_id: str) -> str:
 def _prs_that_are_waits(note: str) -> list[tuple[str, int]]:
     repo = _repo_for_note(note)
     found: list[tuple[str, int]] = []
-    for match in PR_RE.finditer(note):
-        window = note[max(0, match.start() - 80):match.end() + 40]
+    for match in PRS_LIST_RE.finditer(note or ""):
+        window = note[max(0, match.start() - 80):match.end() + 80]
         if ALREADY_RE.search(window) or re.search(r"do not promote", window, re.IGNORECASE):
             continue
-        item = (repo, int(match.group(1)))
-        if item not in found:
-            found.append(item)
+        for number in re.findall(r"\d+", match.group(1)):
+            item = (repo, int(number))
+            if item not in found:
+                found.append(item)
     return found
 
 
