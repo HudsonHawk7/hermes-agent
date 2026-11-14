@@ -457,20 +457,18 @@ def _archive_gate(conn, task_id: str, number: int, state: str) -> None:
 
 
 def _recent_human_note(conn, task_id: str) -> str:
-    """Park notes from people, not our own backfill line. The newest backfill
-    comment must not hide a 'do not promote' note underneath it."""
-    rows = conn.execute(
-        "SELECT author, body FROM task_comments WHERE task_id=? ORDER BY id DESC LIMIT 12",
-        (task_id,),
-    ).fetchall()
-    kept: list[str] = []
-    for row in rows:
-        if (row["author"] or "") == AUTHOR:
-            continue
-        kept.append(row["body"] or "")
-        if len(kept) >= 3:
-            break
-    return "\n".join(kept)
+    """The newest comment that is not our own backfill line.
+
+    A task id in an older comment is not a wait. A hold in this one
+    comment still blocks, even when a backfill line sits on top of it.
+    """
+    row = conn.execute(
+        "SELECT body FROM task_comments "
+        "WHERE task_id=? AND COALESCE(author, '') != ? "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id, AUTHOR),
+    ).fetchone()
+    return (row["body"] or "") if row else ""
 
 
 def _prs_that_are_waits(note: str) -> list[tuple[str, int]]:

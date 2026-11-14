@@ -127,7 +127,9 @@ def dry_board(
     conn = _ro(folder)
     try:
         cards = conn.execute(
-            "SELECT id, title, assignee, workspace_path FROM tasks WHERE status='scheduled'"
+            "SELECT id, title, assignee, workspace_path FROM tasks "
+            "WHERE status='scheduled' "
+            "ORDER BY priority DESC, created_at ASC, id ASC"
         ).fetchall()
         for card in cards:
             note = kw.human_park_note(conn, card["id"])

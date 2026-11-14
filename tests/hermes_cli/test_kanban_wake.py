@@ -280,6 +280,66 @@ def test_stored_none_with_a_hold_stays_parked(kanban_home):
         assert _status(conn, child) == "scheduled"
 
 
+def test_older_comment_task_id_is_not_a_wait(kanban_home):
+    with kbc.connect() as conn:
+        parent = _done_parent(conn)
+        child = _park(conn, "design backlog", assignee="probe")
+        kb.add_comment(conn, child, "hera", f"triage reassign of {parent}")
+        kb.add_comment(
+            conn,
+            child,
+            "darkeyes",
+            "still parked: design backlog, not next in a runnable lane.",
+        )
+        kw.record_wakes(conn, child)
+        kb.add_comment(conn, child, "park-wake", "backfill: wake=none")
+        kw.backfill_scheduled(conn)
+        assert kw.wake_kinds(conn, child) == ["none"]
+        result = kw.promote_ready(
+            conn, now=time.time(), pr_status=lambda repo, number: "open"
+        )
+        assert child not in result["promoted"]
+        assert _status(conn, child) == "scheduled"
+
+
+def test_hold_in_newest_comment_blocks_when_backfill_sits_on_top(kanban_home):
+    with kbc.connect() as conn:
+        parent = _done_parent(conn)
+        child = _park(conn, "held on purpose", assignee="probe")
+        kb.add_comment(conn, child, "hera", f"triage reassign of {parent}")
+        kb.add_comment(conn, child, "darkeyes", "Do not promote.")
+        kw.record_wakes(conn, child)
+        kb.add_comment(conn, child, "park-wake", "backfill: wake=none")
+        kw.backfill_scheduled(conn)
+        result = kw.promote_ready(
+            conn, now=time.time(), pr_status=lambda repo, number: "open"
+        )
+        assert child not in result["promoted"]
+        assert _status(conn, child) == "scheduled"
+
+
+def test_daily_list_does_not_name_an_older_task_id(kanban_home):
+    with kbc.connect() as conn:
+        parent = _done_parent(conn)
+        task_id = _park(conn, "design backlog", assignee="probe")
+        kb.add_comment(conn, task_id, "hera", f"triage reassign of {parent}")
+        kb.add_comment(
+            conn,
+            task_id,
+            "darkeyes",
+            "still parked: design backlog, not next in a runnable lane.",
+        )
+        kw.record_wakes(conn, task_id)
+        kb.add_comment(conn, task_id, "park-wake", "backfill: wake=none")
+        conn.execute(
+            "UPDATE task_events SET created_at=1 WHERE task_id=? AND kind='scheduled'",
+            (task_id,),
+        )
+        lines = kw.daily_lines(conn, now=1 + 4 * 24 * 3600)
+        assert any("wake=none" in line for line in lines)
+        assert not any(parent in line for line in lines)
+
+
 def test_cli_wake_pass_skips_a_non_dispatch_assignee(kanban_home, monkeypatch):
     monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
     monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)

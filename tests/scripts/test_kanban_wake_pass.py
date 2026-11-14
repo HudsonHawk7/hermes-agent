@@ -17,7 +17,8 @@ def _board(tmp_path, *, note: str, assignee: str = "hera"):
     db = sqlite3.connect(folder / "kanban.db")
     db.execute(
         "CREATE TABLE tasks ("
-        "id TEXT, title TEXT, assignee TEXT, workspace_path TEXT, status TEXT)"
+        "id TEXT, title TEXT, assignee TEXT, workspace_path TEXT, status TEXT, "
+        "priority INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0)"
     )
     db.execute(
         "CREATE TABLE task_comments ("
@@ -29,7 +30,8 @@ def _board(tmp_path, *, note: str, assignee: str = "hera"):
         "parent_id TEXT, repo TEXT, pr_number INTEGER, until_ts INTEGER)"
     )
     db.execute(
-        "INSERT INTO tasks VALUES ('t_child000', 'waiting', ?, '', 'scheduled')",
+        "INSERT INTO tasks (id, title, assignee, workspace_path, status) "
+        "VALUES ('t_child000', 'waiting', ?, '', 'scheduled')",
         (assignee,),
     )
     db.execute(
@@ -58,6 +60,77 @@ def test_dry_run_rereads_a_stored_none(tmp_path):
         profiles={"hera"},
     )
     assert any("would-promote t_child000" in line for line in lines)
+
+
+def test_dry_run_ignores_a_task_id_in_an_older_comment(tmp_path):
+    root = _board(tmp_path, note="placeholder", assignee="probe")
+    db = sqlite3.connect(root / "kanban.db")
+    db.execute("DELETE FROM task_comments")
+    db.execute(
+        "INSERT INTO task_comments (task_id, author, body) "
+        "VALUES ('t_child000', 'hera', 'triage reassign of t_aaaaaaaa')"
+    )
+    db.execute(
+        "INSERT INTO task_comments (task_id, author, body) VALUES "
+        "('t_child000', 'darkeyes', "
+        "'still parked: design backlog, not next in a runnable lane.')"
+    )
+    db.execute(
+        "INSERT INTO task_comments (task_id, author, body) "
+        "VALUES ('t_child000', 'park-wake', 'backfill: wake=none')"
+    )
+    db.commit()
+    db.close()
+    lines = dry_board(
+        "default",
+        root,
+        now=1,
+        active={},
+        parents={"t_aaaaaaaa": "done"},
+        profiles={"probe"},
+    )
+    assert lines == []
+
+
+def test_dry_run_walks_priority_then_created_time(tmp_path):
+    root = _board(tmp_path, note="placeholder", assignee="hera")
+    db = sqlite3.connect(root / "kanban.db")
+    db.execute("DELETE FROM tasks")
+    db.execute("DELETE FROM task_comments")
+    db.execute("DELETE FROM task_wakes")
+    db.execute(
+        "INSERT INTO tasks "
+        "(id, title, assignee, workspace_path, status, priority, created_at) "
+        "VALUES ('t_lowpri00', 'low', 'hera', '', 'scheduled', 0, 1)"
+    )
+    db.execute(
+        "INSERT INTO tasks "
+        "(id, title, assignee, workspace_path, status, priority, created_at) "
+        "VALUES ('t_aaaaaaa1', 'late high', 'hera', '', 'scheduled', 5, 30)"
+    )
+    db.execute(
+        "INSERT INTO tasks "
+        "(id, title, assignee, workspace_path, status, priority, created_at) "
+        "VALUES ('t_zzzzzzz2', 'early high', 'hera', '', 'scheduled', 5, 10)"
+    )
+    for task_id in ("t_lowpri00", "t_aaaaaaa1", "t_zzzzzzz2"):
+        db.execute(
+            "INSERT INTO task_comments (task_id, author, body) VALUES (?, 'darkeyes', ?)",
+            (task_id, "waiting on t_aaaaaaaa"),
+        )
+    db.commit()
+    db.close()
+    lines = dry_board(
+        "default",
+        root,
+        now=1,
+        active={},
+        parents={"t_aaaaaaaa": "done"},
+        profiles={"hera"},
+    )
+    assert lines[0].startswith("default would-promote t_zzzzzzz2")
+    assert any(line.startswith("default would-hold t_aaaaaaa1") for line in lines)
+    assert any(line.startswith("default would-hold t_lowpri00") for line in lines)
 
 
 def test_dry_run_hold_stays_parked(tmp_path):
