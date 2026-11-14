@@ -73,7 +73,7 @@ import {
   groupActivityTone
 } from './group-activity'
 import type { GroupActivityEntry } from './group-activity'
-import { filesToGroupAttachments, pickGroupAttachments } from './group-attachments'
+import { filesToGroupAttachments, pathToGroupAttachment, pickGroupAttachments } from './group-attachments'
 import {
   $groupChats,
   $groupChatWorkspace,
@@ -117,6 +117,9 @@ import {
   updateGroupComposerDraft
 } from './group-panes'
 import type { GroupComposerDraft, GroupDraftSetter } from './group-panes'
+import { browserWebcamCapture, captureWebcamStill } from './group-picture-capture'
+import { GroupPicturePanel } from './group-picture-panel'
+import { normalizeGroupPictureSettings, pictureDirsFromConfig } from './group-picture-settings'
 import { groupReplyMentionTag, sendToGroupChat, stopGroupThread } from './group-rounds'
 import { clearGroupClarify, renameGroupClarify } from './group-turns'
 import { botsText, useBots } from './i18n'
@@ -230,6 +233,8 @@ export async function disbandGroupChat(group: string, members: RosterRow[]) {
           members: Array.isArray(room.members) ? room.members : [],
           roomId: typeof room.roomId === 'string' && room.roomId ? room.roomId : null,
           image: room.image || null,
+          pictures: room.pictures,
+          picturesBackLedger: room.picturesBackLedger,
           syncRevision: Math.max(0, Number(room.syncRevision || 0))
         }
       }
@@ -1088,6 +1093,98 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
     }
   }, [])
 
+  const pictureSettings = normalizeGroupPictureSettings(room.pictures)
+  const [pictureDirs, setPictureDirs] = useState<string[] | null>(null)
+  const [picturesOpen, setPicturesOpen] = useState(false)
+
+  useEffect(() => {
+    let live = true
+    const api = window.hermesDesktop?.api
+
+    if (!api) {return}
+
+    void api<{ desktop?: { group_chat_picture_dirs?: unknown } }>({
+      path: '/api/config?include_defaults=false'
+    })
+      .then(record => {
+        if (live) {setPictureDirs(pictureDirsFromConfig(record))}
+      })
+      .catch(() => {
+        if (live) {setPictureDirs(null)}
+      })
+
+    return () => {
+      live = false
+    }
+  }, [group])
+
+  useEffect(() => {
+    if (!visible || !pictureSettings.shareFolders || !pictureDirs?.length) {return}
+
+    const seen = new Set<string>()
+    let stopped = false
+
+    const scan = async (seedOnly: boolean) => {
+      const readDir = window.hermesDesktop?.readDir
+
+      if (!readDir || stopped) {return}
+
+      for (const dir of pictureDirs) {
+        const listing = await readDir(dir).catch(() => null)
+        const entries = listing && Array.isArray(listing.entries) ? listing.entries : []
+
+        for (const entry of entries) {
+          if (entry.isDirectory) {continue}
+
+          const file = entry.path
+
+          if (seen.has(file)) {continue}
+
+          seen.add(file)
+
+          if (seedOnly) {continue}
+
+          const attachment = await pathToGroupAttachment(file)
+
+          if (attachment && !stopped) {addImages(null, [attachment])}
+        }
+      }
+    }
+
+    let timer = 0
+
+    void scan(true).then(() => {
+      if (!stopped) {timer = window.setInterval(() => void scan(false), 4000)}
+    })
+
+    return () => {
+      stopped = true
+      window.clearInterval(timer)
+    }
+    // The scan must not restart just because the composer callback identity changed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, pictureSettings.shareFolders, pictureDirs, group])
+
+  useEffect(() => {
+    if (!visible || pictureSettings.sendMode !== 'every-n-minutes') {return}
+
+    const minutes = pictureSettings.sendEveryMinutes
+
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'hidden') {return}
+
+      void captureWebcamStill(browserWebcamCapture())
+        .then(data => {
+          sendToGroupChat(group, memberDescriptors(), '', null, [{ name: 'webcam.jpg', data, kind: 'image' }])
+        })
+        .catch(() => undefined)
+    }, minutes * 60_000)
+
+    return () => window.clearInterval(timer)
+    // The cadence must not restart just because the roster callback identity changed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, pictureSettings.sendMode, pictureSettings.sendEveryMinutes, group])
+
   const dropFiles = (event: DragEvent<HTMLDivElement>) => {
     const hasFiles = [...(event.dataTransfer?.types || [])].includes('Files')
     setDragOver(false)
@@ -1159,6 +1256,19 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
             : b.group.memberCount(members.length)}
         </span>
       </Tip>
+      <GroupPicturePanel
+        onChange={patch =>
+          updateGroupChat(group, (current: GroupChatRoom) => ({
+            ...current,
+            pictures: normalizeGroupPictureSettings({ ...current.pictures, ...patch })
+          }))
+        }
+        onToggle={() => setPicturesOpen(open => !open)}
+        open={picturesOpen}
+        pictureDirs={pictureDirs}
+        priceTable={undefined}
+        settings={pictureSettings}
+      />
       <Tip label={b.group.settingsHint(group)}>
         <Button
           aria-label={b.group.settingsLabel(group)}
@@ -1311,11 +1421,46 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
     </div>
   )
 
+  const deliverComposer = (
+    text: string,
+    images: Attachment[],
+    thread: null | string,
+    clearedRevision: number,
+    before: ReturnType<typeof groupComposerDraftSnapshot>
+  ) => {
+    void (async () => {
+      let next = images
+
+      if (pictureSettings.sendMode === 'every-message') {
+        try {
+          const data = await captureWebcamStill(browserWebcamCapture())
+          next = [...images, { name: 'webcam.jpg', data, kind: 'image' }]
+        } catch {
+          next = images
+        }
+      }
+
+      const restore = () => {
+        const restored = restoreGroupComposerDraft(composerKeyRef.current, clearedRevision, before)
+
+        if (restored) {setComposerDraft(restored)}
+      }
+
+      if (!text && !next.length) {
+        restore()
+
+        return
+      }
+
+      if (!sendToGroupChat(group, memberDescriptors(), text, thread, next)) {restore()}
+    })()
+  }
+
   const submit = () => {
     const text = draft.trim()
     const images = imagesFor(null)
 
-    if (!text && !images.length) {
+    if (!text && !images.length && pictureSettings.sendMode !== 'every-message') {
       return
     }
 
@@ -1337,22 +1482,16 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
     // Main composer = START A NEW THREAD with the whole group (Slack shape).
     // Full descriptors ride into the turn loop: remote members keep their
     // connection fields so their turns route to their own machines.
-    const minted = sendToGroupChat(group, memberDescriptors(), text, null, images)
+    const minted = deliverComposer(text, images, null, cleared.revision, before)
 
-    if (!minted) {
-      const restored = restoreGroupComposerDraft(composerKeyRef.current, cleared.revision, before)
-
-      if (restored) {
-        setComposerDraft(restored)
-      }
-    }
+    void minted
   }
 
   const submitReply = (thread: string) => {
     const text = (replyDrafts[thread] || '').trim()
     const images = imagesFor(thread)
 
-    if (!text && !images.length) {
+    if (!text && !images.length && pictureSettings.sendMode !== 'every-message') {
       return
     }
 
@@ -1374,15 +1513,7 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
 
     // Reply box = CONTINUE this thread; the member turns it triggers are
     // scoped to it.
-    const sent = sendToGroupChat(group, memberDescriptors(), text, thread, images)
-
-    if (!sent) {
-      const restored = restoreGroupComposerDraft(composerKeyRef.current, cleared.revision, before)
-
-      if (restored) {
-        setComposerDraft(restored)
-      }
-    }
+    deliverComposer(text, images, thread, cleared.revision, before)
   }
 
   /** Pending-attachment chips + the picker for one composer (thread = null →
@@ -1440,6 +1571,53 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
         <Codicon name="attach" />
       </Button>
     </Tip>
+  )
+
+  const pictureButtons = (thread: null | string) => (
+    <>
+      <Tip label="Webcam picture">
+        <Button
+          aria-label="Webcam picture"
+          className="shrink-0 text-(--ui-text-tertiary) hover:text-foreground"
+          data-testid="group-webcam"
+          onClick={() =>
+            void captureWebcamStill(browserWebcamCapture())
+              .then(data => addImages(thread, [{ name: 'webcam.jpg', data, kind: 'image' }]))
+              .catch(() => undefined)
+          }
+          size="sm"
+          type="button"
+          variant="ghost"
+        >
+          📸
+        </Button>
+      </Tip>
+      <Tip label="Screenshot">
+        <Button
+          aria-label="Screenshot"
+          className="shrink-0 text-(--ui-text-tertiary) hover:text-foreground"
+          data-testid="group-screenshot"
+          onClick={() => {
+            const shot = window.hermesDesktop?.captureGroupScreenshot
+
+            if (!shot) {return}
+
+            void shot()
+              .then(data => {
+                if (typeof data === 'string' && data.startsWith('data:image/')) {
+                  addImages(thread, [{ name: 'screenshot.png', data, kind: 'image' }])
+                }
+              })
+              .catch(() => undefined)
+          }}
+          size="sm"
+          type="button"
+          variant="ghost"
+        >
+          🖥
+        </Button>
+      </Tip>
+    </>
   )
 
   // #91359: recognized @mentions render as inline references; recomputed
@@ -1585,6 +1763,11 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
             data-selectable-text="true"
             data-slot="group-chat-message-content"
           >
+            {entry.noPicture ? (
+              <span className="mr-1 rounded bg-amber-500/15 px-1 text-[0.65rem] text-amber-700 dark:text-amber-300" data-testid="group-no-picture">
+                no picture
+              </span>
+            ) : null}
             {MessageTextContent ? (
               <MessageTextContent decorateText={mentionText} media={!member?.remoteSource} text={entry.text} />
             ) : Streamdown ? (
@@ -1699,6 +1882,7 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
               placeholder={b.group.replyInThreadPlaceholder}
               value={replyDrafts[id] || ''}
             />
+            {pictureButtons(id)}
             {attachButton(id)}
             <Button disabled={!(replyDrafts[id] || '').trim() && !imagesFor(id).length} size="sm" type="submit">
               {b.group.reply}
@@ -1848,6 +2032,7 @@ function LegacyGroupChatWorkspace({ group, members, onBack, visible = true }: Gr
               placeholder={b.group.newThreadPlaceholder(group)}
               value={draft}
             />
+            {pictureButtons(null)}
             {attachButton(null)}
             <Button disabled={!draft.trim() && !imagesFor(null).length} size="sm" type="submit">
               {b.group.newThread}

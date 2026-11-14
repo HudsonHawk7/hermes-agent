@@ -1181,6 +1181,62 @@ def _existing_regular_file(raw: str) -> bool:
         return False
 
 
+MISSING_MEDIA_NOTICE = "That file doesn't exist; nothing was made."
+
+
+def queue_missing_media_note(runner, session_key: str, paths: list) -> None:
+    """Tell the agent's next turn that its last reply named a file that was never made."""
+    if runner is None or not session_key or not paths:
+        return
+    notes = getattr(runner, "_pending_missing_media_notes", None)
+    if not isinstance(notes, dict):
+        notes = {}
+        try:
+            runner._pending_missing_media_notes = notes
+        except Exception:
+            return
+    names = ", ".join(os.path.basename(p) or p for p in paths)
+    notes[session_key] = (
+        "[System note: Your last reply named a file that does not exist "
+        f"({names}). Nothing was made. Tell the user plainly; do not claim the file is ready.]"
+    )
+
+
+def rewrite_missing_media_directives(text: str, session_key: str = "") -> tuple[str, list[str]]:
+    """Replace MEDIA tags whose files are not on this host with the chat notice.
+
+    ``_validated_delivery_path`` still logs the Skipping WARNING. A file that exists
+    but is denied by policy is left alone. Tags inside code or quotes are not rewritten.
+    """
+    if not text or "MEDIA:" not in text.upper():
+        return text, []
+    scan = _mask_media_scan_text(text)
+    replacements: list[tuple[int, int, str]] = []
+    for match in MEDIA_TAG_CLEANUP_RE.finditer(scan):
+        raw = _normalize_media_tag_path(match.group("path"))
+        if not raw:
+            continue
+        dropped: list[dict] = []
+        if _validated_delivery_path(raw, session_key, "MEDIA directive path", dropped):
+            continue
+        reason = (dropped[0].get("reason") if dropped else "") or ""
+        if reason != "not found on this host":
+            continue
+        replacements.append((match.start(), match.end(), raw))
+    if not replacements:
+        return text, []
+    parts: list[str] = []
+    cursor = 0
+    missing: list[str] = []
+    for start, end, raw in replacements:
+        parts.append(text[cursor:start])
+        parts.append(MISSING_MEDIA_NOTICE)
+        missing.append(raw)
+        cursor = end
+    parts.append(text[cursor:])
+    return re.sub(r"\n{3,}", "\n\n", "".join(parts)).strip(), missing
+
+
 SUPPORTED_DOCUMENT_TYPES = {
     ".pdf": "application/pdf", ".md": "text/markdown", ".txt": "text/plain", ".csv": "text/csv",
     ".log": "text/plain", ".json": "application/json", ".xml": "application/xml",
@@ -1340,7 +1396,14 @@ def _normalize_media_tag_path(raw: str) -> str:
     path = str(raw or "").strip()
     if len(path) >= 2 and path[0] == path[-1] and path[0] in "`\"'":
         path = path[1:-1].strip()
-    return path.lstrip("`\"'").rstrip("`\"',.;:)}]")
+    path = path.lstrip("`\"'").rstrip("`\"',.;:)}]")
+    # A model writes MEDIA:/S:/renders/a.png. The leading slash makes Windows
+    # treat the drive letter as a URL, so the picture never opens. Drop that
+    # one slash when the next characters are a drive prefix.
+    path = path.replace("\\", "/")
+    if os.name == "nt" and len(path) >= 4 and path[0] == "/" and path[2] == ":" and path[1].isalpha():
+        path = path[1:]
+    return path
 
 
 def _path_lacks_deliverable_extension(path: str) -> bool:
@@ -4456,6 +4519,10 @@ class BasePlatformAdapter(ABC):
         # The handler's routed profile scope is gone by now; Docker MEDIA translation and the
         # bare-path validator infer the sandbox from the ACTIVE profile (#109024).
         with self._media_delivery_scope(event.source):
+            response, missing_media = rewrite_missing_media_directives(response, session_key)
+            if missing_media:
+                queue_missing_media_note(
+                    getattr(self, "gateway_runner", None), session_key, missing_media)
             media_files, response = self.extract_media(response)
             media_files = self.filter_media_delivery_paths(media_files, session_key=session_key)
             images, text_content = self.extract_images(response)

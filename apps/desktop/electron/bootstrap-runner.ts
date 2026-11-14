@@ -42,6 +42,7 @@ import path from 'node:path'
 import { stripAnsi } from '../../shared/src/ansi'
 
 import { pathEnvKey, storeFirstPath } from './backend-env'
+import { installScriptSource, readCheckoutGithubRemote } from './startup-resilience'
 import { hiddenWindowsChildOptions } from './windows-child-options'
 
 const IS_WINDOWS = process.platform === 'win32'
@@ -224,12 +225,22 @@ function cachedScriptPath(hermesHome, cacheKey) {
   return path.join(bootstrapCacheDir(hermesHome), `install-${cacheKey}.${process.platform === 'win32' ? 'ps1' : 'sh'}`)
 }
 
-function downloadInstallScript(ref, destPath) {
-  // Fetch from GitHub raw at the install ref: the packaged SHA for a fresh
-  // install, the branch for an existing checkout or a non-git fallback stamp
-  // (never the all-zero placeholder, which is not a real GitHub commit).
+/** Installer URL for a ref. A fork branch uses the checkout remote, never a hard-coded upstream URL. */
+export function installerUrlForRef(ref, scriptName, remoteUrl) {
+  return installScriptSource({ ref, scriptName, remoteUrl })
+}
+
+function downloadInstallScript(ref, destPath, remoteUrl) {
+  // Fetch from the checkout's own remote when the ref is a fork branch.
+  // Upstream main/master and pinned SHAs may still use NousResearch.
   const scriptName = installScriptName()
-  const url = `https://raw.githubusercontent.com/NousResearch/hermes-agent/${ref}/scripts/${scriptName}`
+  const source = installerUrlForRef(ref, scriptName, remoteUrl)
+
+  if ('error' in source) {
+    return Promise.reject(new Error(source.error))
+  }
+
+  const url = source.url
 
   return new Promise((resolve, reject) => {
     fs.mkdirSync(path.dirname(destPath), { recursive: true })
@@ -316,7 +327,9 @@ async function resolveInstallScript({
   hermesHome,
   emit,
   pinCommit = true,
-  _download = downloadInstallScript
+  activeRoot = null,
+  _download = downloadInstallScript,
+  _readRemote = readCheckoutGithubRemote
 }) {
   // 1. Dev shortcut: prefer a local checkout's installer so we can iterate
   //    without pushing. SOURCE_REPO_ROOT comes from main.ts (path.resolve
@@ -354,7 +367,20 @@ async function resolveInstallScript({
       (installRef.pinned ? '' : ' (unpinned branch)')
   })
 
-  await _download(installRef.ref, cached)
+  const remoteUrl = await _readRemote(activeRoot || sourceRepoRoot)
+  const source = installerUrlForRef(installRef.ref, installScriptName(), remoteUrl)
+
+  if ('error' in source) {
+    emit({ type: 'log', line: `[bootstrap] ${source.error}` })
+    throw new Error(source.error)
+  }
+
+  emit({
+    type: 'log',
+    line: `[bootstrap] installer source ${source.ownerRepo} for ${installRef.ref}`
+  })
+
+  await _download(installRef.ref, cached, remoteUrl)
   emit({ type: 'log', line: `[bootstrap] saved to ${cached}` })
 
   return { path: cached, source: 'download', commit: resolvedCommit, kind: installScriptKind() }
@@ -925,7 +951,15 @@ async function runBootstrap(opts) {
     }
 
     // 1. Resolve the platform installer.
-    const scriptInfo = await resolveInstallScript({ installStamp, sourceRepoRoot, hermesHome, emit, pinCommit })
+    const scriptInfo = await resolveInstallScript({
+      installStamp,
+      sourceRepoRoot,
+      hermesHome,
+      emit,
+      pinCommit,
+      activeRoot
+    })
+
     abortSignal?.throwIfAborted()
 
     const installerKind = scriptInfo.kind || 'powershell'

@@ -11,6 +11,9 @@
 
 import type { ProfileSessionPreview } from '@hermes/plugin-sdk'
 
+import type { PicturesBackLedgerEntry } from './group-picture-back'
+import type { GroupPictureSettings } from './group-picture-settings'
+
 /**
  * The compact age suffixes the sidebar's session rows render ("now", "m", "h",
  * "d"). Structural rather than an import of core's `Translations`, which the
@@ -194,6 +197,8 @@ export interface GroupMessage {
    * on the desktop stage path) — never assumed from model name alone.
    */
   vision?: GroupVisionReceipt
+  /** Set when a pictures-back turn still had no image after the one retry. */
+  noPicture?: boolean
 }
 
 /** Per-member outcome for user-attached images on the turn they answered. */
@@ -251,6 +256,10 @@ export interface GroupChat {
   rosterOrder?: number
   /** "Pin to top" on the room row (`group-pin.ts`); the outer band of the room order. */
   pinned?: boolean
+  /** Per-room picture settings. Missing means Off, privacy ON. */
+  pictures?: GroupPictureSettings
+  /** Per-girl picture-back count. Keyed by the durable member key. */
+  picturesBackLedger?: Record<string, PicturesBackLedgerEntry>
   /** Which user-made sidebar section this group chat is filed under
    *  (`user-sections.ts`). Like a bot's `sectionId` it is membership on the
    *  item, but a group's only durable identity is its room record, so the

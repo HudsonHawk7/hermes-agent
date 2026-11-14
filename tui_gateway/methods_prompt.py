@@ -1040,10 +1040,15 @@ def _(rid, params: dict) -> dict:
     ext = _sniff_image_ext(img_bytes, filename or (f"x{ext_hint}" if ext_hint else ""))
     if ext not in _allowed_image_extensions():
         return _err(rid, 4016, f"unsupported image extension: {ext}")
+    privacy = params.get("privacy") in (True, "true", "1", 1)
     try:
-        img_path = _queue_attached_image(session, img_bytes, ext, prefix="upload")
+        img_path = _queue_attached_image(
+            session, img_bytes, ext, prefix="privacy" if privacy else "upload")
     except Exception as e:
         return _err(rid, 5027, f"write failed: {e}")
+    if privacy:
+        from gateway.privacy_images import note_privacy_staged
+        note_privacy_staged(session, str(img_path), session_id=session.get("session_id") or session.get("id"))
     return _ok(rid, _attached_image_result(
         session, img_path,
         remainder="", text=f"[User attached image: {img_path.name}]", bytes=len(img_bytes)))

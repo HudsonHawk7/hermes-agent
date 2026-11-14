@@ -504,6 +504,40 @@ def heal_forked_single_use_oauth_grants(provider_id: str) -> Optional[dict[str, 
         return None
 
 
+def _heal_empty_provider_stub(
+    profile_store: dict[str, Any], root_store: dict[str, Any], provider_id: str,
+) -> Optional[bool]:
+    """Strip a profile ``providers.<id>`` block that carries no credential material.
+
+    The 10/19 xAI refresh failure left many named profiles with
+    ``tokens: {}`` + ``last_auth_error`` (and an empty pool list). That stub is not a
+    grant, but ``_load_provider_state_with_source`` used to treat any dict as a hit and
+    shadow the shared root forever. When root still holds a real grant (providers block
+    or pool row), drop the empty stub so the profile borrows root again. Returns False
+    when the stub was stripped (nothing to adopt), else None.
+    """
+    from hermes_cli.auth import _provider_block_has_credential_material
+
+    p_providers = profile_store.get("providers")
+    if not isinstance(p_providers, dict):
+        return None
+    p_block = p_providers.get(provider_id)
+    if not isinstance(p_block, dict) or _provider_block_has_credential_material(p_block):
+        return None
+    r_providers = root_store.get("providers") if isinstance(root_store, dict) else None
+    r_block = r_providers.get(provider_id) if isinstance(r_providers, dict) else None
+    root_has_grant = (
+        isinstance(r_block, dict) and _provider_block_has_credential_material(r_block)
+    )
+    if not root_has_grant:
+        _r_pool, r_rows = _pool_rows(root_store, provider_id)
+        root_has_grant = any(_is_forkable_pool_row(provider_id, row) for row in r_rows)
+    if not root_has_grant:
+        return None
+    del p_providers[provider_id]
+    return False
+
+
 def _heal_forked_provider_block(
     profile_store: dict[str, Any], root_store: dict[str, Any], provider_id: str,
     lineage_proven: bool = False) -> Optional[bool]:
@@ -517,6 +551,11 @@ def _heal_forked_provider_block(
     Returns None when nothing matched, False when the profile copy was dropped (root already
     newest), True when the profile copy was fresher and was adopted into root.
     """
+    # Empty last_auth_error stubs first: they are not grants and must not block the fork path.
+    stub = _heal_empty_provider_stub(profile_store, root_store, provider_id)
+    if stub is not None:
+        return stub
+
     p_providers, r_providers = profile_store.get("providers"), root_store.get("providers")
     if not (isinstance(p_providers, dict) and isinstance(r_providers, dict)):
         return None

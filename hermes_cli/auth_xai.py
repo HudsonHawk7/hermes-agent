@@ -386,11 +386,38 @@ def _quarantine_xai_oauth_tokens(exc: AuthError) -> None:
     """Clear dead xAI tokens after a terminal (400/401/403) refresh failure so later sessions fail fast.
 
     Best-effort: persistence failures are logged and swallowed; the caller re-raises regardless.
+
+    Writes only to the store that actually owned the grant (``_load_provider_state_with_source``).
+    A profile worker that borrowed root must not stamp an empty ``providers.xai-oauth`` stub into
+    the profile — that stub shadows root forever and is what left 14 profiles dark after the
+    10/19 refresh failure (t_99a52155).
     """
-    from hermes_cli.auth import _last_auth_error_marker, _load_auth_store, _load_provider_state, _save_auth_store, _store_provider_state
+    from hermes_cli.auth import (
+        _auth_file_path,
+        _last_auth_error_marker,
+        _load_auth_store,
+        _load_provider_state_with_source,
+        _same_path,
+        _save_auth_store,
+        _store_provider_state,
+    )
     try:
-        store = _load_auth_store()
-        state = _load_provider_state(store, "xai-oauth") or {}
+        profile_store = _load_auth_store()
+        state, source_path = _load_provider_state_with_source(profile_store, "xai-oauth")
+        if not isinstance(state, dict):
+            return
+        # Borrowed root grant: never plant a shadowing empty stub on the profile.
+        profile_path = _auth_file_path()
+        if (
+            source_path is not None
+            and profile_path is not None
+            and not _same_path(source_path, profile_path)
+        ):
+            logger.debug(
+                "xAI OAuth: skipping profile quarantine; grant lives at %s",
+                source_path,
+            )
+            return
         tokens = dict(state.get("tokens") or {})
         tokens.pop("access_token", None)
         tokens.pop("refresh_token", None)
@@ -401,8 +428,10 @@ def _quarantine_xai_oauth_tokens(exc: AuthError) -> None:
         state["last_auth_error"] = _last_auth_error_marker(
             "xai-oauth", exc, reason="runtime_refresh_failure", default_code="xai_refresh_failed",
         )
+        target = source_path if source_path is not None else profile_path
+        store = _load_auth_store(target) if target is not None else profile_store
         _store_provider_state(store, "xai-oauth", state, set_active=False)
-        _save_auth_store(store)
+        _save_auth_store(store, target_path=target)
     except Exception as save_exc:
         logger.debug("xAI OAuth: failed to persist quarantined state: %s", save_exc)
 

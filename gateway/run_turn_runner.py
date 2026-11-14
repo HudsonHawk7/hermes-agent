@@ -909,6 +909,7 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                 + ctx.message
             )
         self._prepend_pending_note("_pending_skills_reload_notes")
+        self._prepend_pending_note("_pending_missing_media_notes")
         if api_text is not None:
             persist_override = clean_text  # recovery wording is API-only too, never the stored row
         # Safety net: a startup auto-resume event carries empty text; if the resume_pending branch
@@ -1419,12 +1420,22 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                 }
             return {"final_response": final_response, **common}
         final_response = self._append_auto_media_tags(final_response, result, agent_history, history_media_paths)
+        from gateway.platforms.base import queue_missing_media_note, rewrite_missing_media_directives
+        rewritten, missing_media = rewrite_missing_media_directives(
+            final_response or "", ctx.session_key or "")
+        transformed = bool(result.get("response_transformed", False))
+        if missing_media:
+            # Desktop already streamed the promise with the tag stripped. The rewritten
+            # final replaces that bubble (response_transformed) and the next turn is told.
+            final_response = rewritten
+            transformed = True
+            queue_missing_media_note(self._runner, ctx.session_key or "", missing_media)
         # Auto-titling runs at TURN START (agent/turn_context.py) from the user's message alone, so a
         # failed/interrupted turn is still titled.
         return {
             "final_response": final_response, "last_reasoning": result.get("last_reasoning"), **common, **viewer_meta,
             "response_previewed": previewed,
-            "response_transformed": result.get("response_transformed", False),
+            "response_transformed": transformed,
             "response_reused": result.get("response_reused", False),
             # Lets the persistence block tell whether the codex app-server path self-persisted (it
             # didn't — see codex_runtime.py); default True keeps skip-db for the standard runtime.
