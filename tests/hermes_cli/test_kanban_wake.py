@@ -1,5 +1,6 @@
 """Parks wake themselves: unmet stays parked, met promotes, a merged gate archives, caps hold."""
 
+import argparse
 import time
 from pathlib import Path
 
@@ -222,3 +223,65 @@ def test_non_dispatch_assignee_stays_parked(kanban_home):
         )
         assert result["promoted"] == []
         assert _status(conn, child) == "scheduled"
+
+
+def _done_parent(conn) -> str:
+    parent = kb.create_task(conn, title="done parent", assignee="aurora")
+    conn.execute("UPDATE tasks SET status='done' WHERE id=?", (parent,))
+    conn.commit()
+    return parent
+
+
+def test_stored_none_does_not_hide_a_met_human_wait(kanban_home):
+    with kbc.connect() as conn:
+        parent = _done_parent(conn)
+        child = _park(conn, "waiting on a done parent", assignee="probe")
+        kb.add_comment(conn, child, "hera", f"still parked. waiting on {parent}")
+        kw.record_wakes(conn, child)
+        kb.add_comment(conn, child, "park-wake", "backfill: wake=none")
+        kw.backfill_scheduled(conn)
+        assert "parent" in kw.wake_kinds(conn, child)
+        result = kw.promote_ready(
+            conn, now=time.time(), pr_status=lambda repo, number: "open"
+        )
+        assert child in result["promoted"]
+        assert _status(conn, child) == "ready"
+
+
+def test_stored_none_with_a_hold_stays_parked(kanban_home):
+    with kbc.connect() as conn:
+        parent = _done_parent(conn)
+        child = _park(conn, "held on purpose", assignee="probe")
+        kb.add_comment(conn, child, "hera", f"waiting on {parent}. Do not promote.")
+        kw.record_wakes(conn, child)
+        kb.add_comment(conn, child, "park-wake", "backfill: wake=none")
+        kw.backfill_scheduled(conn)
+        result = kw.promote_ready(
+            conn, now=time.time(), pr_status=lambda repo, number: "open"
+        )
+        assert child not in result["promoted"]
+        assert _status(conn, child) == "scheduled"
+
+
+def test_cli_wake_pass_skips_a_non_dispatch_assignee(kanban_home, monkeypatch):
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
+    from hermes_cli import kanban as kanban_cli
+    from hermes_cli import kanban_db_dispatch as kbd
+
+    assert str(kanban_home) in str(kb.kanban_db_path())
+    monkeypatch.setattr(
+        kbd, "_dispatch_profile_allowlist", lambda _normalize: frozenset({"probe"})
+    )
+    with kbc.connect() as conn:
+        parent = _done_parent(conn)
+        outsider = _park(conn, "not dispatched", assignee="architect_claudecode")
+        insider = _park(conn, "dispatched", assignee="probe")
+        kw.record_wakes(conn, outsider, wait_on=[parent])
+        kw.record_wakes(conn, insider, wait_on=[parent])
+    args = argparse.Namespace(backfill=False, daily=False)
+    assert kanban_cli._cmd_wake_pass(args) == 0
+    with kbc.connect() as conn:
+        assert _status(conn, outsider) == "scheduled"
+        assert _status(conn, insider) == "ready"

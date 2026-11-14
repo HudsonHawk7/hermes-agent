@@ -72,7 +72,16 @@ def github_pr_status(repo: str, number: int, cache: Optional[dict] = None) -> Op
 
 
 def ensure_schema(conn) -> None:
-    """Create the wake table. Safe to call on every board, new or old."""
+    """Create the wake table. Safe to call on every board, new or old.
+
+    A board that already has the table is left alone, so a read-only pass
+    can list it without writing.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_wakes'"
+    ).fetchone()
+    if row:
+        return
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS task_wakes (
@@ -230,14 +239,36 @@ def backfill_task(conn, task_id: str, note: str) -> str:
     return summary
 
 
+def human_park_note(conn, task_id: str) -> str:
+    """The park note promote, backfill, and the dry-run all read."""
+    return _recent_human_note(conn, task_id)
+
+
+def _backfill_note(conn, task_id: str, notes: Optional[dict[str, str]]) -> str:
+    if notes and task_id in notes:
+        return notes[task_id]
+    return human_park_note(conn, task_id)
+
+
+def _note_has_wait(task_id: str, note: str) -> bool:
+    parsed = parse_park_note(note or "", own_id=task_id)
+    return bool(parsed["wait_on"] or parsed["until_prs"] or parsed["until_ts"] is not None)
+
+
 def backfill_scheduled(conn, notes: Optional[dict[str, str]] = None) -> list[str]:
-    """Backfill each scheduled card that has no wake row yet."""
+    """Backfill scheduled cards from the human park note.
+
+    A stored wake=none is not final. When that note has a real wait, replace
+    the none row. A real stored wait is left alone.
+    """
     ensure_schema(conn)
     done: list[str] = []
     for card in _scheduled(conn):
-        if wake_kinds(conn, card["id"]):
+        kinds = wake_kinds(conn, card["id"])
+        note = _backfill_note(conn, card["id"], notes)
+        replace_none = kinds == ["none"] and _note_has_wait(card["id"], note)
+        if kinds and not replace_none:
             continue
-        note = (notes or {}).get(card["id"], _latest_comment(conn, card["id"]))
         summary = backfill_task(conn, card["id"], note)
         done.append(f"{card['id']} {summary}")
     return done
@@ -423,14 +454,6 @@ def _gate_repo(conn, task_id: str, default_repo: str) -> str:
 def _archive_gate(conn, task_id: str, number: int, state: str) -> None:
     kb.add_comment(conn, task_id, AUTHOR, f"superseded: Gate PR {number} is {state}")
     kb.archive_task(conn, task_id)
-
-
-def _latest_comment(conn, task_id: str) -> str:
-    row = conn.execute(
-        "SELECT body FROM task_comments WHERE task_id=? ORDER BY id DESC LIMIT 1",
-        (task_id,),
-    ).fetchone()
-    return (row["body"] if row else "") or ""
 
 
 def _recent_human_note(conn, task_id: str) -> str:

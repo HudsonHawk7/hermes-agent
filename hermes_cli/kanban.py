@@ -1129,6 +1129,22 @@ def _wake_label(wait_on, until_prs, until_ts) -> str:
     return ", ".join(parts) if parts else "wake=none"
 
 
+def _wake_dispatch_profiles() -> set[str] | None:
+    """Assignees this home's dispatcher will claim.
+
+    None means the key is absent, so any existing profile may run. A set,
+    including an empty one, is what the dispatcher will actually claim.
+    """
+    try:
+        from hermes_cli.profiles import normalize_profile_name
+    except Exception:
+        return set()
+    allowlist = kbd._dispatch_profile_allowlist(normalize_profile_name)
+    if allowlist is None:
+        return None
+    return set(allowlist)
+
+
 def _cmd_wake_pass(args: argparse.Namespace) -> int:
     """Promote cards whose waits are met. Orchestrator only."""
     if os.environ.get("HERMES_KANBAN_TASK"):
@@ -1140,7 +1156,10 @@ def _cmd_wake_pass(args: argparse.Namespace) -> int:
             for line in kw.backfill_scheduled(conn):
                 print(line)
         archived = kw.archive_merged_gates(conn, pr_status=kw.github_pr_status)
-        promoted = kw.promote_ready(conn, now=now, pr_status=kw.github_pr_status)
+        promoted = kw.promote_ready(
+            conn, now=now, pr_status=kw.github_pr_status,
+            dispatch_profiles=_wake_dispatch_profiles(),
+        )
         if getattr(args, "daily", False):
             for line in kw.daily_lines(conn, now=now):
                 print(line)

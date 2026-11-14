@@ -3,14 +3,17 @@
 The profile sweep calls this after install. The rules live in hermes_cli.kanban_wake.
 A dry run prints what would move and writes nothing. --apply backfills, archives
 merged Gate PR cards, and promotes cards whose waits are met.
+The daily list prints on the first pass at or after 7 AM Central, or with --daily.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from hermes_cli.kanban_db_connect import connect as board_connect
@@ -18,6 +21,7 @@ from hermes_cli import kanban_wake as kw
 
 SHARED_OWNERS = {"_kanban", "workspaces", "work", "wt", "scratch"}
 ANCHORS = ("forceagents", "sandboxes")
+DAILY_HOUR_CT = 7
 
 
 def board_dirs() -> list[Path]:
@@ -109,21 +113,6 @@ def foreign_workspace(path: str, assignee: str) -> bool:
     return owner != (assignee or "").lower()
 
 
-def latest_note(conn, task_id: str) -> str:
-    rows = conn.execute(
-        "SELECT author, body FROM task_comments WHERE task_id=? ORDER BY id DESC LIMIT 12",
-        (task_id,),
-    ).fetchall()
-    kept = []
-    for row in rows:
-        if (row[0] or "") in {"park-wake", "kanban_wake"}:
-            continue
-        kept.append(row[1] or "")
-        if len(kept) >= 3:
-            break
-    return "\n".join(kept)
-
-
 def dry_board(
     slug: str,
     folder: Path,
@@ -141,7 +130,7 @@ def dry_board(
             "SELECT id, title, assignee, workspace_path FROM tasks WHERE status='scheduled'"
         ).fetchall()
         for card in cards:
-            note = latest_note(conn, card["id"])
+            note = kw.human_park_note(conn, card["id"])
             if kw.hold_reason(card["title"] or "", note) or kw.GM_WAIT_RE.search(note or ""):
                 continue
             if foreign_workspace(card["workspace_path"] or "", card["assignee"] or ""):
@@ -150,9 +139,9 @@ def dry_board(
             if not _assignee_runs(assignee, profiles):
                 continue
             stored, summary = _stored_decision(conn, card["id"], now, parents)
-            if stored == "none" or stored == "unmet":
+            if stored == "unmet":
                 continue
-            if stored == "absent":
+            if stored in ("none", "absent"):
                 parsed = kw.parse_park_note(note, own_id=card["id"])
                 if not _parsed_met(parsed, now, parents):
                     continue
@@ -279,10 +268,63 @@ def _assignee(conn, task_id: str) -> str:
     return (row["assignee"] if row else "") or ""
 
 
+def ct_day_and_hour(now: float) -> tuple[str, int]:
+    moment = datetime.fromtimestamp(now, tz=kw._central())
+    return moment.date().isoformat(), moment.hour
+
+
+def should_run_daily(state: dict, now: float) -> bool:
+    """True on the first pass at or after 7 AM Central each calendar day."""
+    day, hour = ct_day_and_hour(now)
+    if hour < DAILY_HOUR_CT:
+        return False
+    return state.get("last_daily_date") != day
+
+
+def pass_plan(argv: list[str], state: dict, now: float) -> dict:
+    """Whether this pass prints the daily list, and whether an apply stamps the day."""
+    due = should_run_daily(state, now)
+    return {"daily": "--daily" in argv or due, "stamp": "--apply" in argv and due}
+
+
+def daily_state_path() -> Path:
+    return Path(os.environ.get("LOCALAPPDATA", "")) / "hermes" / "kanban" / "wake-pass-state.json"
+
+
+def load_daily_state() -> dict:
+    try:
+        raw = json.loads(daily_state_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def save_daily_state(state: dict) -> None:
+    path = daily_state_path()
+    if not path.parent.is_dir():
+        return
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+
+def collect_daily(now: float) -> list[str]:
+    found: list[str] = []
+    for folder in board_dirs():
+        conn = _ro(folder)
+        try:
+            for line in kw.daily_lines(conn, now=now):
+                found.append(f"{folder.name} daily {line}")
+        except sqlite3.OperationalError:
+            continue
+        finally:
+            conn.close()
+    return found
+
+
 def main(argv: list[str]) -> int:
     apply = "--apply" in argv
-    daily = "--daily" in argv
     now = time.time()
+    state = load_daily_state()
+    plan = pass_plan(argv, state, now)
     active = lane_load()
     parents = parent_status_map()
     profiles = host_dispatch_profiles()
@@ -294,7 +336,7 @@ def main(argv: list[str]) -> int:
     for folder in folders:
         lines = (
             apply_board(
-                folder.name, now=now, active=active, parents=parents, daily=daily, profiles=profiles,
+                folder.name, now=now, active=active, parents=parents, daily=False, profiles=profiles,
             )
             if apply
             else dry_board(
@@ -304,6 +346,12 @@ def main(argv: list[str]) -> int:
         for line in lines:
             print(line)
             printed += 1
+    if plan["daily"]:
+        for line in collect_daily(now):
+            print(line)
+    if apply and plan["stamp"]:
+        state["last_daily_date"] = ct_day_and_hour(now)[0]
+        save_daily_state(state)
     print(f"wake-pass: boards={len(folders)} lines={printed} apply={int(apply)}")
     return 0
 
