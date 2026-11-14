@@ -209,6 +209,23 @@ def test_daily_list_reads_the_human_note_not_the_backfill(kanban_home):
         assert any("waiting on the GM" in line for line in lines)
 
 
+def test_daily_list_shows_a_human_wait_hidden_by_stored_none(kanban_home):
+    with kbc.connect() as conn:
+        parent = kb.create_task(conn, title="done parent", assignee="aurora")
+        task_id = _park(conn, "waiting on a done parent")
+        kb.add_comment(conn, task_id, "darkeyes", f"still parked. waiting on {parent}")
+        kw.record_wakes(conn, task_id)
+        kb.add_comment(conn, task_id, "park-wake", "backfill: wake=none")
+        conn.execute("UPDATE tasks SET created_at=1 WHERE id=?", (task_id,))
+        conn.execute(
+            "UPDATE task_events SET created_at=1 WHERE task_id=? AND kind='scheduled'",
+            (task_id,),
+        )
+        lines = kw.daily_lines(conn, now=1 + 4 * 24 * 3600)
+        assert any(parent in line for line in lines)
+        assert not any("wake=none" in line for line in lines)
+
+
 def test_non_dispatch_assignee_stays_parked(kanban_home):
     with kbc.connect() as conn:
         parent = kb.create_task(conn, title="done parent", assignee="aurora")

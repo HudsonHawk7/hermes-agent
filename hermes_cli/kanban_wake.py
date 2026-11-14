@@ -547,6 +547,9 @@ def _on_daily_list(conn, card, note: str, now: float, idle_seconds: int) -> bool
 def _wait_phrase(conn, task_id: str, note: str) -> str:
     kinds = wake_kinds(conn, task_id)
     if kinds == ["none"] or not kinds:
+        parsed = parse_park_note(note or "", own_id=task_id)
+        if parsed["wait_on"] or parsed["until_prs"] or parsed["until_ts"] is not None:
+            return parsed["summary"]
         if GM_WAIT_RE.search(note or ""):
             return "waiting on the GM"
         return "wake=none"
