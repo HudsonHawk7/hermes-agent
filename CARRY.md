@@ -76,6 +76,7 @@ print('recipes_root:', cfg.get('scene_builder', {}).get('recipes_root'))
 | 23d5d4a529e | do not strand Desktop on first-run setup when Hermes is only slow | A timed-out probe no longer starts first-run setup when the checkout is present. The installer URL comes from the checkout remote. The startup launcher lookup stays off the main thread. Card t_713e0080. Upstream not opened. |
 | 417f9c66f92 | adopt root xAI pair on stale 403; never burn shared refresh | Empty 10/19 profile stubs no longer shadow root; force recovery adopts the newer pair without POSTing the single-use refresh. Card t_99a52155. Upstream not opened. |
 | 7394973f315 | a met park wait can wake, and a landed PR is not a wait | A park note that says still parked is not a hold. A PR already in live HEAD is not a wait. A list of PRs is kept whole. The daily list reads the human note. An assignee the dispatcher will not run stays parked. Card t_8e458816. Not installed. |
+| 6348ea86626 | a landed phrase does not cancel the next PR wait | Cancellation stays in the same sentence. "PR 19 is already in live HEAD. Waiting on PR 20." keeps Force_2.1#20. A landed-only sentence still records nothing. Card t_8e458816. Not installed. |
 
 Add new rows here before pushing a carry. Upstream the individual fix as a normal PR from a short-lived branch off origin/main when appropriate.
 
