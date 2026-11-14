@@ -3748,8 +3748,8 @@ def run_daemon(
 
     while not stop_event.is_set():
         try:
-            # Re-resolved every tick (config load is mtime-cached) so operator
-            # edits apply without a restart.
+            from hermes_cli.kanban_wake_tick import wake_on_dispatch_tick
+            wake_on_dispatch_tick(apply=True)
             max_in_progress = resolve_max_in_progress(configured_max_in_progress())
             per_profile = configured_max_in_progress_per_profile()
             with contextlib.closing(_kbc.connect()) as conn:

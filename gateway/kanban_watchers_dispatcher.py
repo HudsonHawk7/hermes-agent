@@ -214,7 +214,12 @@ class _KanbanDispatcher:
                     conn.close()
 
     def tick_once(self) -> list[tuple[str, Optional[object]]]:
-        """Run one dispatch_once per board. Returns (slug, result) pairs."""
+        """One dispatcher tick: wake scheduled cards, then one pass per board."""
+        try:
+            from hermes_cli.kanban_wake_tick import wake_on_dispatch_tick
+            wake_on_dispatch_tick(apply=True)
+        except Exception:
+            logger.exception("kanban dispatcher: wake pass failed")
         return [(slug, self.tick_once_for_board(slug)) for slug in self._board_slugs()]
 
     def ready_nonempty(self) -> bool:
