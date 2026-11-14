@@ -56,6 +56,8 @@ After publishing, pass `metadata.published_pr` to completion. The first matching
 URL binds the card permanently; retries cannot substitute a green sibling PR.
 CLI `show --json` and `kanban_show` expose the persisted contract.
 
+A gate card owns only its own check. Append `#force/ui-proof` (or another context) so that card completes when that check is green on the current head, even if other required checks are still missing. The bare URL, or `#all,merged`, is the merge card: every repository-required check, plus a merged PR. A proof card must not parent the cards that post the checks it waits on. File the chain as proof, then verify, then review.
+
 The shared `complete_task` boundary covers worker tools, CLI, review approval and
 dashboard completion. It reads classic branch protection and active ruleset
 required contexts, paginates exact-head check runs and legacy statuses, then
