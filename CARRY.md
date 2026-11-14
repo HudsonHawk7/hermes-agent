@@ -79,6 +79,7 @@ print('recipes_root:', cfg.get('scene_builder', {}).get('recipes_root'))
 | 6348ea86626 | a landed phrase does not cancel the next PR wait | Cancellation stays in the same sentence. "PR 19 is already in live HEAD. Waiting on PR 20." keeps Force_2.1#20. A landed-only sentence still records nothing. Card t_8e458816. Not installed. |
 | d29216e1b30 | a stored wake=none does not hide the park note | Backfill and the dry-run read the human note. A stored none is replaced when that note has a real wait. The daily list is the first pass at or after 7 AM Central. hermes kanban wake-pass uses the dispatch allowlist. Card t_8e458816. Not installed. |
 | c1c5845acc7 | the daily list names a wait that a stored none hid | A parked card whose human note names a card or a PR shows that wait, not wake=none. Card t_8e458816. Not installed. |
+| ad11f7217a0 | the park note is the newest human comment | A task id in an older comment is not a wait. A hold in the newest comment still blocks when a backfill line sits on top. The dry-run walks the same order as promote. Card t_8e458816. Not installed. |
 
 Add new rows here before pushing a carry. Upstream the individual fix as a normal PR from a short-lived branch off origin/main when appropriate.
 
