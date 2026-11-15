@@ -733,6 +733,12 @@ export const PluginsTab = memo(function PluginsTab({
   const packageSwitch = (pkg: PluginPackage) => {
     const { agent, desktop } = pkg
 
+    // The card switch reads the AGENT half when the package has one, so an
+    // agent half enabled by config reads as "on" while the desktop half is
+    // still off and its pane is nowhere. Say so on the card, with the one tap
+    // that fixes it.
+    const desktopHidden = Boolean(desktop && desktop.status === 'disabled' && agent?.status === 'enabled')
+
     const setEnabled = (enable: boolean) => {
       if (agent?.key) {
         void toggleAgentPlugin(requestGateway, agent.key, enable, p.toggleFailed(agent.name), scope)
@@ -744,13 +750,28 @@ export const PluginsTab = memo(function PluginsTab({
     }
 
     return (
-      <CatalogSwitch
-        aria-label={pkg.name}
-        checked={agent ? agent.status === 'enabled' : desktop?.status !== 'disabled'}
-        disabled={agent ? !agent.key || agentBusy(agent) : false}
-        onCheckedChange={setEnabled}
-        size="xs"
-      />
+      <span className="flex items-center gap-1.5">
+        {desktop && desktopHidden && (
+          <Tip label={p.desktopHalfOffTip(pkg.name)}>
+            <Button
+              aria-label={`${p.desktopHalfOff}: ${pkg.name}`}
+              className="h-5 px-1.5 text-[0.65rem]"
+              onClick={() => void setPluginEnabled(desktop.id, true)}
+              size="xs"
+              variant="outline"
+            >
+              {p.desktopHalfOff}
+            </Button>
+          </Tip>
+        )}
+        <CatalogSwitch
+          aria-label={pkg.name}
+          checked={agent ? agent.status === 'enabled' : desktop?.status !== 'disabled'}
+          disabled={agent ? !agent.key || agentBusy(agent) : false}
+          onCheckedChange={setEnabled}
+          size="xs"
+        />
+      </span>
     )
   }
 

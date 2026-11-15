@@ -2471,6 +2471,9 @@ export const frOverrides = {
       desktopHalfPendingTip:
         "Ce paquet contient une partie Desktop qui n'a pas encore été copiée dans l'application. Relancez l'analyse ou redémarrez l'application.",
       desktopHalfRemote: 'indisponible (backend distant)',
+      desktopHalfOff: 'Bureau désactivé',
+      desktopHalfOffTip: (name: string) =>
+        `${name} est actif côté agent, mais sa moitié Bureau est désactivée : son panneau reste caché. Activez-la ici.`,
       desktopHalfRemoteTip:
         'La moitié bureau de ce paquet se trouve sur le disque du backend distant, que cette application ne peut pas lire. Pour l’utiliser ici, lancez Installer depuis Git avec l’URL du dépôt du paquet et la cible Bureau cochée — cela clone la moitié bureau sur cette machine.',
       emptyAll: 'Aucun plugin pour le moment.',
