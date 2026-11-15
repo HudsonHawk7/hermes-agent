@@ -293,6 +293,11 @@ def _preflight_compression(
     _lift = getattr(_compressor, "lift_structural_backoff_if_grown", None)
     if callable(_lift):
         _lift(len(out.messages))
+    from agent.context_compressor_floor import note_fixed_prompt_floor
+    _floor_prompt = out.active_system_prompt
+    if _floor_prompt is None:
+        _floor_prompt = system_message if system_message is not None else getattr(agent, "system_prompt", "") or ""
+    note_fixed_prompt_floor(agent, _compressor, system_prompt=_floor_prompt)
     if _tc._review_fork_first_request_pending(agent) or not _tc._should_run_preflight_estimate(
         out.messages, _compressor.protect_first_n, _compressor.protect_last_n,
         _compressor.threshold_tokens,

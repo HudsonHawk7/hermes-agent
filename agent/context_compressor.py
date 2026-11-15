@@ -2666,10 +2666,9 @@ class ContextCompressor(
         ceiling, which the feasibility probe re-derives per runtime."""
         base_percent = resolve_model_threshold(model, self.model_thresholds, self._config_threshold_percent, provider)
         effective_percent = self._effective_threshold_percent(context_length, base_percent)
-        threshold = self._compute_threshold_tokens(context_length, effective_percent, self.max_tokens)
-        cap = self._effective_threshold_cap(context_length)
-        if cap is not None:
-            threshold = min(threshold, cap)
+        ratio = self._compute_threshold_tokens(context_length, effective_percent, self.max_tokens)
+        from agent.context_compressor_floor import cap_trigger_tokens
+        threshold = cap_trigger_tokens(self, ratio, context_length, honor_aux=False)
         return base_percent, effective_percent, threshold
 
     def _effective_threshold_cap(self, context_length: int) -> int | None:
@@ -2753,13 +2752,8 @@ class ContextCompressor(
     def _apply_threshold_tokens_cap(self) -> None:
         """Clamp threshold_tokens to the configured cap (itself clamped to the context length) and to the
         auxiliary summariser's window when the feasibility probe installed one."""
-        cap = self._effective_threshold_cap(self.context_length)
-        if cap is not None and cap < self.threshold_tokens:
-            self.threshold_tokens = cap
-        # Durable, so every recomputation honours it rather than a one-time assignment (#114707).
-        _aux_ceiling = getattr(self, "_aux_context_ceiling", None)
-        if isinstance(_aux_ceiling, int) and 0 < _aux_ceiling < self.threshold_tokens:
-            self.threshold_tokens = _aux_ceiling
+        from agent.context_compressor_floor import apply_threshold_cap
+        apply_threshold_cap(self)
 
     @staticmethod
     def _effective_threshold_percent(context_length: int, threshold_percent: float) -> float:
