@@ -2756,6 +2756,11 @@ DEFAULT_CONFIG = {
         # Extra ports detection probes for an external llama-server (besides 8080).
         "detect_ports": [],
     },
+    "hermesforce": {
+        # Profile allowed to change the live HermesForce install. Any other
+        # profile is refused. Null means nobody is exempt.
+        "install_owner": "Architect_ClaudeCode",
+    },
     "_config_version": 51,  # Config schema version - bump this when adding new required fields
 }
 
