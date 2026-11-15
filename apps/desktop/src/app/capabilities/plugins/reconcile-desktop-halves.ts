@@ -139,7 +139,17 @@ async function sweep(
   const done: ReconciledDesktopHalf[] = []
 
   for (const [packageName, profile] of enabledIn) {
-    await enablePackageDesktopHalf(packageName, { keepUserChoice: true })
+    try {
+      await enablePackageDesktopHalf(packageName, { keepUserChoice: true })
+    } catch (error) {
+      // One package that will not load must not keep the others dark, and it
+      // must not vanish: say which one failed and why.
+      window.hermesDesktop?.logLine?.(
+        `[plugins] could not enable desktop half ${packageName}: ${error instanceof Error ? error.message : String(error)}`
+      )
+
+      continue
+    }
 
     for (const record of Object.values($pluginRecords.get())) {
       if (desktopPackageName(record) === packageName && record.status === 'loaded') {
