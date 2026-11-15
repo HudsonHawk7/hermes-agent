@@ -16,12 +16,14 @@ export function partText(part: unknown): string {
   return (!row.type || row.type === 'text') && typeof row.text === 'string' ? row.text : ''
 }
 
-export function messageContentText(content: unknown): string {
-  if (typeof content === 'string') {
-    return content.trim()
-  }
+import { unwrapCompactionSteerText } from '@/lib/chat-messages'
 
-  return Array.isArray(content) ? content.map(partText).join('').trim() : ''
+export function messageContentText(content: unknown): string {
+  const text = typeof content === 'string' ? content.trim() : Array.isArray(content) ? content.map(partText).join('').trim() : ''
+
+  // The sticky banner paints this string as-is, so a compaction restatement would show its
+  // model-facing wrappers as if the user typed them. Peel them at the last step before paint.
+  return unwrapCompactionSteerText(text)
 }
 
 // Cheap streaming-stable "does this message have visible text" check: returns

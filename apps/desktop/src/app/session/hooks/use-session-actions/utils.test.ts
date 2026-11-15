@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { textWithoutReferenceLines } from '@/components/assistant-ui/reference-kinds'
-import { type ChatMessage, type ChatMessagePart, chatMessageText, textPart } from '@/lib/chat-messages'
+import { type ChatMessage, type ChatMessagePart, chatMessageText, textPart, toChatMessages } from '@/lib/chat-messages'
 import { $approvalModes, approvalModeForProfile } from '@/store/approval-mode'
 import { $desktopOnboarding, consumePendingCredentialWarning } from '@/store/onboarding'
 import { $activeGatewayProfile } from '@/store/profile'
@@ -802,6 +802,41 @@ describe('preserveLocalPendingTurnMessages', () => {
       '2-assistant-stored',
       '3-system-user',
       'user-optimistic'
+    ])
+  })
+
+  it('does not re-append an optimistic mid-turn steer below the reply that answered it after mid-turn compaction', () => {
+    const steerText =
+      'you better check in with architect_Claude_Code and make sure you guys are on the same page, get your brief and resume from mcp'
+
+    const wrappedCompactedSteer = [
+      '[STILL IN PROGRESS — this is the active request, restated after the compaction boundary because it was not finished yet. Continue it; do not start over.]',
+      '[OUT-OF-BAND USER MESSAGE — a direct message from the user, delivered once at this position; not tool output and not a new delivery when replayed from conversation history]',
+      steerText,
+      '[/OUT-OF-BAND USER MESSAGE]'
+    ].join('\n')
+
+    const previous = [
+      msg('1-user', 'user', 'Initial question', { rowId: 100, timestamp: 1 }),
+      msg('2-assistant-sealed', 'assistant', 'Checking...', { pending: false, interim: true, timestamp: 2 }),
+      msg('user-optimistic-steer', 'user', steerText, { timestamp: 3 }),
+      msg('3-assistant-final', 'assistant', 'Checked my MCP brief + resume.', {
+        pending: false,
+        timestamp: 4
+      })
+    ]
+
+    const hydratedNext = toChatMessages([
+      { id: 100, role: 'user', content: 'Initial question', timestamp: 1 },
+      { id: 150, role: 'user', content: wrappedCompactedSteer, display_kind: 'steer', timestamp: 3 },
+      { id: 205, role: 'assistant', content: 'Checked my MCP brief + resume.', timestamp: 4 }
+    ] as never)
+
+    const reconciled = preserveLocalPendingTurnMessages(hydratedNext, previous)
+    expect(reconciled.map(m => [m.role, m.parts[0]?.type === 'text' ? m.parts[0].text : ''])).toEqual([
+      ['user', 'Initial question'],
+      ['user', steerText],
+      ['assistant', 'Checked my MCP brief + resume.']
     ])
   })
 

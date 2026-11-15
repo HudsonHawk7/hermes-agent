@@ -2212,12 +2212,48 @@ def _message_contains_busy_steer(message: Any) -> bool:
     return open_marker in text and close_marker in text
 
 
+def _display_inner_text(text: str) -> str:
+    """The words a user actually typed, once compaction scaffolding is peeled.
+
+    A still-running turn is restated under the in-flight header, and a steer inside its markers.
+    Both change the stored bytes without changing the turn, so display identity must be computed
+    on the peeled text or the banner paints the request once per compaction.
+    """
+    from agent.context_compressor import _INFLIGHT_TASK_REPLAY_HEADER
+    from agent.prompt_builder import STEER_MARKER_CLOSE, STEER_MARKER_OPEN
+
+    if _INFLIGHT_TASK_REPLAY_HEADER in text:
+        text = text.rsplit(_INFLIGHT_TASK_REPLAY_HEADER, 1)[1].strip()
+    start = text.find(STEER_MARKER_OPEN)
+    end = text.find(STEER_MARKER_CLOSE, start + len(STEER_MARKER_OPEN)) if start != -1 else -1
+    if start != -1 and end != -1:
+        text = text[start + len(STEER_MARKER_OPEN):end].strip()
+    return text
+
+
 def _extract_steer_text_from_message(message: Any) -> Optional[str]:
-    """Extract the inner user text from a steer marker, or None."""
+    """Extract the inner user text from a steer marker, or None.
+
+    A mid-turn compaction restates the steer under ``_INFLIGHT_TASK_REPLAY_HEADER``
+    (standalone, or merged onto the summary carrier). The header is model-facing
+    scaffolding, so it is peeled before the steer markers are located — otherwise a
+    compacted steer paints the wrappers as if the user typed them.
+    """
     text = _message_text(message)
     if not text:
         return None
+    from agent.context_compressor import _INFLIGHT_TASK_REPLAY_HEADER
+    if _INFLIGHT_TASK_REPLAY_HEADER in text:
+        text = text.rsplit(_INFLIGHT_TASK_REPLAY_HEADER, 1)[1].strip()
+    if not text:
+        return None
     open_marker, close_marker = _steer_markers()
+    if open_marker not in text and _STEER_FALLBACK_OPEN not in text:
+        # No steer marker: only the in-flight header was peeled. That header is scaffolding the
+        # user never typed, but the words after it are an ordinary turn, not a steer — returning
+        # them here would stamp display_kind='steer' on every restated request. None lets the
+        # caller peel the header itself without re-tagging the row.
+        return None
     start = text.find(open_marker)
     if start == -1:
         # Fallback: marker wording may evolve; look for the stable prefix, then skip to the end of the opening line.

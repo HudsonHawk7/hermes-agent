@@ -1,5 +1,5 @@
 export { sameAttachmentTurn } from './attachment-turn'
-export { toChatMessages } from './hydration'
+export { toChatMessages, unwrapCompactionSteerText } from './hydration'
 export {
   appendAssistantTextPart,
   appendReasoningPart,

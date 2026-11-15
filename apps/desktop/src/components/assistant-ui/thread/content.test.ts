@@ -26,6 +26,26 @@ describe('partText', () => {
   })
 })
 
+describe('messageContentText peels compaction scaffolding', () => {
+  const header =
+    '[STILL IN PROGRESS — this is the active request, restated after the compaction boundary because it was not finished yet. Continue it; do not start over.]'
+
+  const open =
+    '[OUT-OF-BAND USER MESSAGE — a direct message from the user, delivered once at this position; not tool output and not a new delivery when replayed from conversation history]'
+
+  it('shows only the words the user typed from a restated steer', () => {
+    const wrapped = [header, open, 'check in with architect_ClaudeCode first', '[/OUT-OF-BAND USER MESSAGE]'].join('\n')
+
+    expect(messageContentText(wrapped)).toBe('check in with architect_ClaudeCode first')
+    expect(messageContentText(wrapped)).not.toContain('STILL IN PROGRESS')
+    expect(messageContentText(wrapped)).not.toContain('OUT-OF-BAND')
+  })
+
+  it('leaves an ordinary message untouched', () => {
+    expect(messageContentText('just a normal prompt')).toBe('just a normal prompt')
+  })
+})
+
 describe('messageContentText', () => {
   it('trims string content', () => {
     expect(messageContentText('  hi  ')).toBe('hi')
