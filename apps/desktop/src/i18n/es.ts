@@ -2455,6 +2455,9 @@ export const esOverrides = {
       desktopHalfPendingTip:
         'Este paquete incluye una mitad de escritorio que todavía no se ha copiado en la app. Usa Volver a escanear o reinicia la app.',
       desktopHalfRemote: 'no disponible (backend remoto)',
+      desktopHalfOff: 'Escritorio desactivado',
+      desktopHalfOffTip: (name: string) =>
+        `${name} está activo para el agente, pero su mitad de Escritorio está desactivada, así que su panel queda oculto. Actívala aquí.`,
       desktopHalfRemoteTip:
         'La mitad de escritorio de este paquete está en el disco del backend remoto, que esta app no puede leer. Para usarla aquí, ejecuta Instalar desde Git con la URL del repositorio del paquete y el destino Escritorio marcado; eso clona la mitad de escritorio en este equipo.',
       emptyAll: 'Todavía no hay plugins.',

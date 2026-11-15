@@ -429,7 +429,6 @@ describe('PluginsTab', () => {
       expect(screen.getByRole('switch', { name: 'Desktop: Meter' }).getAttribute('aria-checked')).toBe('true')
     )
     expect($pluginDecisions.get()['meter-ui']).toBe(true)
-    requestGateway.mockImplementation(async () => ({ plugins: [] }))
     $pluginDecisions.set({})
   })
 
@@ -456,7 +455,28 @@ describe('PluginsTab', () => {
     )
     expect($pluginDecisions.get()['meter-ui']).toBe(false)
     expect(screen.getByRole('switch', { name: 'Desktop: Meter' }).getAttribute('aria-checked')).toBe('false')
-    requestGateway.mockImplementation(async () => ({ plugins: [] }))
+    $pluginDecisions.set({})
+  })
+
+  it('shows a "Desktop off" pill on the card when the agent half is on and the desktop half is off', async () => {
+    $pluginDecisions.set({})
+    publishPlugin(
+      { id: 'meter-ui', name: 'Meter', kind: 'disk', status: 'disabled', packageName: 'meter' },
+      { activate: () => patchPlugin('meter-ui', { status: 'loaded' }), deactivate: () => undefined }
+    )
+    $agentPlugins.set([
+      { description: '', key: 'meter', name: 'meter', source: 'git', status: 'enabled', version: '1' }
+    ])
+
+    renderPlugins({ profile: null })
+
+    // The card switch follows the agent half, which is on. Without the pill the
+    // row reads fully on while the pane is hidden and there is no way to see
+    // that from the card.
+    const pill = await screen.findByRole('button', { name: 'Desktop off: Meter' })
+    fireEvent.click(pill)
+    await waitFor(() => expect($pluginDecisions.get()['meter-ui']).toBe(true))
+    expect($pluginRecords.get()['meter-ui'].status).toBe('loaded')
     $pluginDecisions.set({})
   })
 

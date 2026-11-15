@@ -1906,6 +1906,8 @@ catalog: CatalogTranslations
       desktopHalfPending: string
       desktopHalfPendingTip: string
       desktopHalfRemote: string
+      desktopHalfOff: string
+      desktopHalfOffTip: (name: string) => string
       desktopHalfRemoteTip: string
       emptyAll: string
       empty: string

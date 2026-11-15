@@ -83,6 +83,7 @@ print('recipes_root:', cfg.get('scene_builder', {}).get('recipes_root'))
 | 31c896e3f06 | the dispatcher tick calls the wake pass | The gateway tick and the standalone daemon both call the version-controlled wake pass. A failure is logged and does not stop dispatch. Card t_8e458816. Not installed. |
 | 709b922ed32 | a hidden e2e window stays unthrottled after idle | Stream-throttle no longer turns background throttling back on at register or 5s after a turn when hidden e2e is on. Visible runs are unchanged. Card t_5257eea6. Not installed. |
 | 50385ceae94 | only the install owner changes the live HermesForce install | A worker is refused for a desktop stop, a pack move, a live-root package install, a gateway lifecycle command, or a write under the live install. The install owner is not. The refusal names hermesforce-build-protocol. Card t_1ce4e426. Not installed. |
+| 0b906a1128c | a config-enabled agent half shows its desktop pane | A marker'd desktop half whose agent half is enabled in any local profile (config.yaml plugins.enabled, not just the install dialog or the Agent switch) turns on with keepUserChoice, so its pane and composer button register; an explicit OFF decision still wins and a remote backend is untouched. The Plugins card shows a "Desktop off" pill when the halves disagree. Card t_2c5afefa. Not installed. |
 
 Add new rows here before pushing a carry. Upstream the individual fix as a normal PR from a short-lived branch off origin/main when appropriate.
 

@@ -2066,6 +2066,9 @@ export const zhOverrides = {
       desktopHalfPending: '复制中…',
       desktopHalfPendingTip: '此包附带的桌面部分尚未复制到应用中。请重新扫描或重启应用。',
       desktopHalfRemote: '不可用（远程后端）',
+      desktopHalfOff: '桌面已关闭',
+      desktopHalfOffTip: (name: string) =>
+        `${name} 的智能体部分已开启，但桌面部分仍关闭，因此它的面板不显示。在这里开启。`,
       desktopHalfRemoteTip:
         '此包的桌面部分位于远程后端的磁盘上，本应用无法读取。要在此使用，请通过“从 Git 安装”输入该包的仓库地址并勾选桌面目标，即可将桌面部分克隆到本机。',
       emptyAll: '还没有插件。',

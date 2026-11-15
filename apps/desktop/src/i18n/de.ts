@@ -2464,6 +2464,9 @@ export const deOverrides = {
       desktopHalfPendingTip:
         'Dieses Paket enthält eine Desktop-Hälfte, die noch nicht in die App kopiert wurde. Verwenden Sie „Erneut scannen“ oder starten Sie die App neu.',
       desktopHalfRemote: 'nicht verfügbar (Remote-Backend)',
+      desktopHalfOff: 'Desktop aus',
+      desktopHalfOffTip: (name: string) =>
+        `${name} ist für den Agenten aktiv, aber die Desktop-Hälfte ist aus, deshalb bleibt ihr Bereich verborgen. Hier einschalten.`,
       desktopHalfRemoteTip:
         'Die Desktop-Hälfte dieses Pakets liegt auf der Festplatte des Remote-Backends, die diese App nicht lesen kann. Um sie hier zu nutzen, führen Sie „Aus Git installieren“ mit der Repository-URL des Pakets und aktiviertem Desktop-Ziel aus – dadurch wird die Desktop-Hälfte auf diesen Rechner geklont.',
       emptyAll: 'Noch keine Plugins.',

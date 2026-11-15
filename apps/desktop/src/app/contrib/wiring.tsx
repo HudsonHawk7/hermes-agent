@@ -13,6 +13,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { type CSSProperties, lazy, type ReactNode, Suspense, useCallback, useEffect, useMemo, useRef } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 
+import { reconcileAgentEnabledDesktopHalves } from '@/app/capabilities/plugins/reconcile-desktop-halves'
 import { formatRefValue } from '@/components/assistant-ui/directive-text'
 import { BootFailureOverlay } from '@/components/boot-failure-overlay'
 import { ConfirmHost } from '@/components/confirm-host'
@@ -39,11 +40,13 @@ import { SharedMetricsConsentDialog } from '@/components/shared-metrics/consent-
 import { TipHost } from '@/components/tips'
 import { UpdateHoldOverlay } from '@/components/update-hold-overlay'
 import { emitGatewayEvent } from '@/contrib/events'
+import { $pluginRecords } from '@/contrib/plugins-store'
 import { translateNow } from '@/i18n'
 import { type ChatMessage, chatMessageText } from '@/lib/chat-messages'
 import { isMessagingSource } from '@/lib/session-source'
 import { activateWakeIndicator } from '@/lib/wake-indicator'
 import { playWakeSound } from '@/lib/wake-sound'
+import { $agentPlugins } from '@/store/agent-plugins'
 import { $billingSettingsRequest } from '@/store/billing-block'
 import { $desktopBoot } from '@/store/boot'
 import { requestVoiceConversationStart } from '@/store/composer'
@@ -895,6 +898,28 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     report()
 
     return window.hermesDesktop?.updates?.onPendingRun?.(report)
+  }, [gatewayState, requestGateway])
+
+  // A unified package's desktop half follows its agent half, including an agent
+  // half enabled by CONFIG rather than by this app's own switch (a provisioned
+  // config.yaml). Runs on gateway open and on every inventory publish, so a
+  // half that lands after boot is picked up without opening the Plugins page.
+  useEffect(() => {
+    if (gatewayState !== 'open' || isAuxiliaryWindow()) {
+      return
+    }
+
+    const reconcile = () => void reconcileAgentEnabledDesktopHalves(requestGateway)
+
+    reconcile()
+
+    const stopRecords = $pluginRecords.subscribe(reconcile)
+    const stopAgent = $agentPlugins.subscribe(reconcile)
+
+    return () => {
+      stopRecords()
+      stopAgent()
+    }
   }, [gatewayState, requestGateway])
 
   useDesktopMetrics({
