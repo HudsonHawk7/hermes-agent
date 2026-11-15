@@ -1066,6 +1066,17 @@ def _user_deny_block(command: str) -> dict | None:
     return _user_deny_block_result(deny_pattern)
 
 
+
+def _live_install_floor(command: str) -> dict | None:
+    """Refuse a live HermesForce mutation from anyone but the install owner.
+
+    Sits beside approvals.deny so yolo, mode=off, and a container skip cannot
+    bypass it. The message points at hermesforce-build-protocol.
+    """
+    from tools.live_install_guard import live_install_block
+    return live_install_block(command)
+
+
 def _floor_block(command: str, *, sudo_guard: bool = False) -> dict | None:
     """Unconditional floors, BEFORE yolo / mode=off / cron approve-mode so no
     session-level setting can bypass them: hardline catastrophic commands,
@@ -1089,7 +1100,7 @@ def _floor_block(command: str, *, sudo_guard: bool = False) -> dict | None:
         if is_sudo_guess:
             logger.warning("Sudo stdin guard block: %s (command: %s)", sudo_guess_desc, command[:200])
             return _sudo_stdin_block_result(sudo_guess_desc)
-    return _user_deny_block(command)
+    return _live_install_floor(command) or _user_deny_block(command)
 
 
 def check_dangerous_command(command: str, env_type: str,
@@ -1099,7 +1110,7 @@ def check_dangerous_command(command: str, env_type: str,
     a Docker sandbox that bind-mounts host paths must not skip approval.
     Returns ``{"approved": True/False, "message": str or None, ...}``."""
     if _should_skip_container_guards(env_type, has_host_access=has_host_access):
-        return _user_deny_block(command) or _approved()
+        return _live_install_floor(command) or _user_deny_block(command) or _approved()
     blocked = _floor_block(command)
     if blocked is not None:
         return blocked
@@ -1155,7 +1166,7 @@ def check_all_command_guards(command: str, env_type: str,
     want to veto or escalate a command do it from ``pre_tool_call``.
     ``has_host_access``: a Docker sandbox with bind-mounted host paths takes the normal flow."""
     if _should_skip_container_guards(env_type, has_host_access=has_host_access):
-        return _user_deny_block(command) or _approved()
+        return _live_install_floor(command) or _user_deny_block(command) or _approved()
 
     blocked = _floor_block(command, sudo_guard=True)
     if blocked is not None:

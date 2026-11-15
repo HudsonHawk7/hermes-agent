@@ -333,7 +333,13 @@ def get_write_denied_error(path: str, *, verb: str = "Write", entry: bool = Fals
         )
     if denial == "nt_namespace":
         return get_nt_namespace_error(path, verb=verb)
-    return f"{verb} denied: '{path}' is a protected system/credential file." if denial else None
+    if denial:
+        return f"{verb} denied: '{path}' is a protected system/credential file."
+    from tools.live_install_guard import write_path_block_message
+    live = write_path_block_message(path)
+    if live:
+        return f"{verb} denied: {live}"
+    return None
 
 
 def is_write_approval_required(path: str) -> bool:

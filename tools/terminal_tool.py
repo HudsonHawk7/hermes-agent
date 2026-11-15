@@ -1386,13 +1386,17 @@ def _pre_exec_block(
     """Raise :class:`_Rejected` with the blocked-result JSON when the command must not run.
 
     Order matters: gateway lifecycle first (protects the running gateway),
-    then the dangerous-workdir check, then the self-repo guard (local only).
+    then the live-install owner check, then the dangerous-workdir check, then the self-repo guard (local only).
     """
     blocked = gateway_lifecycle_block(
         command=command, env=env, env_type=env_type, cwd=cwd, workdir=workdir, session_key=session_key,
     )
     if blocked:
         raise _Rejected(blocked)
+    from tools.live_install_guard import live_install_block
+    live = live_install_block(command, cwd=workdir or cwd)
+    if live:
+        raise _Rejected(_error_json(live["message"], status="blocked"))
     if workdir:
         workdir_error = _validate_workdir(workdir)
         if workdir_error:
