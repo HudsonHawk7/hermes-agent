@@ -85,6 +85,7 @@ print('recipes_root:', cfg.get('scene_builder', {}).get('recipes_root'))
 | 50385ceae94 | only the install owner changes the live HermesForce install | A worker is refused for a desktop stop, a pack move, a live-root package install, a gateway lifecycle command, or a write under the live install. The install owner is not. The refusal names hermesforce-build-protocol. Card t_1ce4e426. Not installed. |
 | 0b906a1128c | a config-enabled agent half shows its desktop pane | A marker'd desktop half whose agent half is enabled in any local profile (config.yaml plugins.enabled, not just the install dialog or the Agent switch) turns on with keepUserChoice, so its pane and composer button register; an explicit OFF decision still wins and a remote backend is untouched. The Plugins card shows a "Desktop off" pill when the halves disagree. Card t_2c5afefa. Not installed. |
 
+| 7e92a31c306 | one package that will not load does not keep the rest dark | A twin test seeds two marker'd packages, makes enablePackageDesktopHalf throw for one, and asserts the other still reaches loaded with the could-not-enable log line naming the failing package. Without the per-package catch the sweep aborts. Card t_f71da6f6. Not installed. |
 Add new rows here before pushing a carry. Upstream the individual fix as a normal PR from a short-lived branch off origin/main when appropriate.
 
 ## Automation
