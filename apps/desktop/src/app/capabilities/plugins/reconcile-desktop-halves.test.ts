@@ -121,8 +121,10 @@ beforeEach(() => {
   register.mockReset()
   getStatus.mockClear()
   enablePackageDesktopHalf.mockClear()
+
   enablePackageDesktopHalf.mockImplementation(async (packageName, opts) => {
     const actual = await vi.importActual('@/contrib/plugins-store')
+
     return actual.enablePackageDesktopHalf(packageName, opts)
   })
 
@@ -327,6 +329,7 @@ describe('reconcileAgentEnabledDesktopHalves', () => {
       { name: 'broken-half', status: 'enabled' },
       { name: 'good-half', status: 'enabled' }
     )
+
     const done = await reconcileAgentEnabledDesktopHalves(request as never)
 
     expect(done).toEqual([{ id: 'good-pane', packageName: 'good-half', profile: 'default' }])
