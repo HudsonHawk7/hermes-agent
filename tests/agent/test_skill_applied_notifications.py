@@ -39,3 +39,53 @@ def test_unapplied_skill_operations_never_notify():
     ):
         for mode in ("on", "verbose"):
             assert summarize_background_review_actions(_messages(args, data), [], mode) == []
+
+
+def test_multi_file_skill_patch_collapses_duplicate_skill_verb_label(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    name = "force-session-ops"
+    content = (
+        f"---\nname: {name}\n"
+        "description: Use when starting a Force session. Tracks work items.\n"
+        "---\nCheck board rules first.\n"
+    )
+    create_res = json.loads(skill_manage(action="", name="", operations=[
+        {"name": name, "action": "create", "content": content},
+        {"name": name, "action": "write_file", "file_path": "references/force-work-item-tracking.md",
+         "file_content": "Use ApprovedUtc when setting Approved.\n"},
+    ]))
+    assert create_res["success"], create_res
+
+    patch_ops = [
+        {"name": name, "action": "patch", "old_string": "Check board rules first.", "new_string": "Check board and schema rules first."},
+        {"name": name, "action": "patch", "file_path": "references/force-work-item-tracking.md",
+         "old_string": "Use ApprovedUtc when setting Approved.",
+         "new_string": "Use ApprovedUtc (never UpdatedUtc) when setting Approved."},
+    ]
+    patch_res = json.loads(skill_manage(action="", name="", operations=patch_ops))
+    assert patch_res["success"], patch_res
+
+    actions = summarize_background_review_actions(_messages({"operations": patch_ops}, patch_res), [], "on")
+    assert actions == [
+        "Skill 'force-session-ops' patched (SKILL.md, references/force-work-item-tracking.md)"
+    ]
+
+    # Separate skill_manage calls in the same review pass also collapse rather than stuttering.
+    separate_messages = [
+        {"role": "assistant", "tool_calls": [{"id": "s1", "function": {
+            "name": "skill_manage", "arguments": json.dumps({"operations": [patch_ops[0]]})}}]},
+        {"role": "tool", "tool_call_id": "s1", "content": json.dumps({
+            "success": True, "operations_applied": 1,
+            "results": [{"success": True, "name": name, "action": "patch"}],
+        })},
+        {"role": "assistant", "tool_calls": [{"id": "s2", "function": {
+            "name": "skill_manage", "arguments": json.dumps({"operations": [patch_ops[1]]})}}]},
+        {"role": "tool", "tool_call_id": "s2", "content": json.dumps({
+            "success": True, "operations_applied": 1,
+            "results": [{"success": True, "name": name, "action": "patch",
+                         "file_path": "references/force-work-item-tracking.md"}],
+        })},
+    ]
+    assert summarize_background_review_actions(separate_messages, [], "on") == [
+        "Skill 'force-session-ops' patched (SKILL.md, references/force-work-item-tracking.md)"
+    ]

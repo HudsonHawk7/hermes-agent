@@ -11,6 +11,7 @@ import copy
 import json
 import logging
 import os
+import re
 import threading
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
@@ -682,14 +683,30 @@ def _action_lines(data: dict, detail: dict, verbose: bool) -> list[str]:
         if not data.get("operations_applied") or not isinstance(results, list):
             return []
         lines = []
+        grouped: dict[tuple, list] = {}
+        order: list[tuple] = []
         for result in results:
             if not isinstance(result, dict) or result.get("success") is not True:
                 continue
             verb_key = verbs.get(result.get("action"))
-            if verb_key and result.get("name"):
-                path = f" ({result['file_path']})" if result.get("file_path") else ""
-                lines.append(t("display.review.skill_result", name=result["name"],
-                               verb=t(f"display.review.skill_verb.{verb_key}"), path=path))
+            if not (verb_key and result.get("name")):
+                continue
+            key = (result["name"], verb_key)
+            grouped.setdefault(key, [])
+            if key not in order:
+                order.append(key)
+            if result.get("file_path"):
+                grouped[key].append(result["file_path"])
+            elif result.get("action") in ("patch", "edit"):
+                # A SKILL.md patch carries no file_path; naming it keeps the collapsed line honest.
+                grouped[key].append("SKILL.md")
+        for key in order:
+            name, verb_key = key
+            paths = grouped[key]
+            # One skill patched across several files is one change, not a stuttered label per file.
+            path = f" ({', '.join(paths)})" if paths else ""
+            lines.append(t("display.review.skill_result", name=name,
+                           verb=t(f"display.review.skill_verb.{verb_key}"), path=path))
         return lines
     lower = message.lower()
     if not verbose and ("created" in lower or "updated" in lower or
@@ -703,6 +720,45 @@ def _action_lines(data: dict, detail: dict, verbose: bool) -> list[str]:
         return [_verbose_skill_line(data, detail, message)] if is_skill else _verbose_memory_lines(label, detail)
     hit = any(k in lower for k in ("added", "replaced", "removed", "applied")) or (target and "add" in lower)
     return [t("display.review.label_updated", label=label)] if hit else []
+
+
+def _collapse_skill_action_lines(actions: list[str]) -> list[str]:
+    """Fold repeated ``Skill '<name>' <verb>`` lines from one review pass into one line.
+
+    One ``skill_manage`` call already groups its own results; separate calls in the same pass
+    (SKILL.md, then a supporting file) still emit one line each, and the status line reads the
+    verb twice. Verbose preview lines (``📝 …``) are left alone — they carry distinct diffs.
+    """
+    pattern = re.compile(r"^Skill '(.+?)' (\w+)(?: \((.+)\))?$")
+    grouped: dict[tuple, list] = {}
+    order: list[tuple] = []
+    for line in actions:
+        match = pattern.match(line)
+        if not match:
+            continue
+        key = (match.group(1), match.group(2))
+        grouped.setdefault(key, [])
+        if key not in order:
+            order.append(key)
+        if match.group(3):
+            grouped[key].extend(part.strip() for part in match.group(3).split(",") if part.strip())
+    # Nothing repeated and nothing multi-file: the lines are already the collapsed form.
+    if not any(len(paths) > 1 or sum(1 for line in actions if (m := pattern.match(line)) and (m.group(1), m.group(2)) == key) > 1 for key, paths in grouped.items()):
+        return actions
+    collapsed = []
+    seen: set[tuple] = set()
+    for line in actions:
+        match = pattern.match(line)
+        key = (match.group(1), match.group(2)) if match else None
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+            paths = list(dict.fromkeys(grouped.get(key) or []))
+            collapsed.append(f"Skill '{key[0]}' {key[1]}" + (f" ({', '.join(paths)})" if paths else ""))
+        else:
+            collapsed.append(line)
+    return collapsed
 
 
 def summarize_background_review_actions(
@@ -739,7 +795,8 @@ def summarize_background_review_actions(
         if not isinstance(data, dict) or not data.get("success"):
             continue
         actions.extend(_action_lines(data, call_details.get(tcid) or {}, verbose))
-    return actions
+    # A review pass that patches one skill in several calls would otherwise stutter the same verb.
+    return _collapse_skill_action_lines(actions)
 
 
 def build_memory_write_metadata(

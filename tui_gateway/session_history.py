@@ -315,10 +315,20 @@ def _history_to_messages(history: list[dict], *, profile_home=None, image_urls: 
                     except (json.JSONDecodeError, TypeError):
                         args = {}
                     tool_call_args[tc_id] = (fn["name"], args)
-        if role == "user" and m.get("display_kind") == STEER_DISPLAY_KIND:
+        if role == "user":
             # Mid-turn /steer: show the user's own words, not the model-facing marker wrapper.
+            # Compaction restates a steer under the in-flight header and drops display_kind, so
+            # the markers themselves are the signal — a typed row is not required. Imported inside:
+            # this module's names are rebound onto server.py, and a module-level import would not follow.
             from agent.conversation_compression import _extract_steer_text_from_message
-            content_text = _extract_steer_text_from_message(m) or content_text
+            from agent.context_compressor import _INFLIGHT_TASK_REPLAY_HEADER
+            if steer_text := _extract_steer_text_from_message(m):
+                content_text = steer_text
+                m = {**m, "display_kind": STEER_DISPLAY_KIND}
+            elif _INFLIGHT_TASK_REPLAY_HEADER in content_text:
+                # An ordinary turn restated after compaction carries only the header. Peel it
+                # without tagging the row a steer — the user never typed that line.
+                content_text = content_text.rsplit(_INFLIGHT_TASK_REPLAY_HEADER, 1)[1].strip()
         if role == "tool":
             tc_name, tc_args = tool_call_args.get(m.get("tool_call_id") or "", (None, None))
             name = tc_name or m.get("tool_name") or "tool"
