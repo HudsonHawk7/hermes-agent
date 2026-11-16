@@ -268,6 +268,11 @@ def compress_after_tool_results(
         )
 
     _compressor = agent.context_compressor
+    from agent.context_compressor_floor import note_fixed_prompt_floor
+    note_fixed_prompt_floor(
+        agent, _compressor,
+        system_prompt=active_system_prompt if active_system_prompt is not None else (system_message or ""),
+    )
     # A new checkpoint must reach the provider before stale usage can trigger
     # local compression, overflow warnings, or destructive tool-result pruning.
     if bool(getattr(_compressor, "awaiting_real_usage_after_compression", False)):
