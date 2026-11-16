@@ -15,9 +15,14 @@
  */
 
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 import type { Dirent } from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 
 import { test } from 'vitest'
+
+import { createDesktopProfilePreferences } from './desktop-profile'
 
 import {
   decideMigration,
@@ -30,6 +35,7 @@ import {
   readExistingPreference,
   readLegacyActiveProfile,
   scoreStateDb,
+  profileOptsOutOfDesktopStartup,
   withDefaultCandidate
 } from './profile-migration'
 
@@ -642,9 +648,9 @@ test('readExistingPreference treats _migrated as heuristic-owned', () => {
   })
 })
 
-test('migrateActiveProfileIfMissing repairs a pre-existing heuristic pin when default now wins', () => {
-  // Sol P1 / #100576: file already exists with _migrated:true so first-boot
-  // skip left affected installs stuck. Re-score and clear.
+test('migrateActiveProfileIfMissing does not re-score a well-formed heuristic pin', () => {
+  // A _migrated file used to be rewritten on every boot. A remembered pick
+  // kept that flag, so the large state.db won again. A well-formed file stays.
   let written: unknown = null
 
   const fs = makeFs({
@@ -661,8 +667,8 @@ test('migrateActiveProfileIfMissing repairs a pre-existing heuristic pin when de
     }
   })
 
-  assert.equal(migrateActiveProfileIfMissing('/cfg/active-profile.json', deps), true)
-  assert.deepEqual(written, { profile: null })
+  assert.equal(migrateActiveProfileIfMissing('/cfg/active-profile.json', deps), false)
+  assert.equal(written, null)
 })
 
 test('migrateActiveProfileIfMissing leaves a still-correct heuristic pin alone', () => {
@@ -684,4 +690,125 @@ test('migrateActiveProfileIfMissing leaves a still-correct heuristic pin alone',
 
   assert.equal(migrateActiveProfileIfMissing('/cfg/active-profile.json', deps), false)
   assert.equal(written, null)
+})
+
+
+// A remembered pick must survive the next bare boot. On the base this file
+// still carries _migrated, so the boot re-scores and the large profile wins.
+test('a remembered pick of B survives a bare boot when A has the larger state.db', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'active-profile-pick-'))
+  const cfg = path.join(root, 'active-profile.json')
+  const hermesHome = path.join(root, 'hermes')
+  const profilesRoot = path.join(hermesHome, 'profiles')
+
+  try {
+    fs.mkdirSync(path.join(profilesRoot, 'a'), { recursive: true })
+    fs.mkdirSync(path.join(profilesRoot, 'b'), { recursive: true })
+    fs.writeFileSync(path.join(profilesRoot, 'a', 'state.db'), Buffer.alloc(1_000_000, 1))
+    fs.writeFileSync(path.join(profilesRoot, 'b', 'state.db'), Buffer.alloc(100, 1))
+    const old = new Date(Date.now() - 30 * 86_400_000)
+    fs.utimesSync(path.join(profilesRoot, 'b', 'state.db'), old, old)
+    fs.writeFileSync(cfg, JSON.stringify({ profile: 'b', _migrated: true }))
+
+    createDesktopProfilePreferences(cfg).remember('b')
+
+    const migrated = migrateActiveProfileIfMissing(cfg, {
+      legacyActivePath: path.join(hermesHome, 'active_profile'),
+      hermesHome,
+      profilesRoot,
+      existsSync: target => fs.existsSync(target),
+      readFileSync: (target, enc) => fs.readFileSync(target, enc),
+      statSync: target => fs.statSync(target),
+      readdirSync: target => fs.readdirSync(target, { withFileTypes: true }) as Dirent[],
+      isHermesProcess: () => false,
+      now: () => Date.now(),
+      writeJson: (target, decision) => {
+        fs.mkdirSync(path.dirname(target), { recursive: true })
+        fs.writeFileSync(target, JSON.stringify(decision))
+      },
+      isValidProfileName
+    })
+
+    const saved = JSON.parse(fs.readFileSync(cfg, 'utf8'))
+
+    assert.equal(saved.profile, 'b')
+    assert.equal(migrated, false)
+    assert.equal(saved._migrated, undefined)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('profileOptsOutOfDesktopStartup reads only a top-level false value', () => {
+  assert.equal(profileOptsOutOfDesktopStartup('desktop_startup: false\n'), true)
+  assert.equal(profileOptsOutOfDesktopStartup("desktop_startup: 'no'\n"), true)
+  assert.equal(profileOptsOutOfDesktopStartup('desktop_startup: true\n'), false)
+  assert.equal(profileOptsOutOfDesktopStartup('name: probe\n'), false)
+  assert.equal(profileOptsOutOfDesktopStartup('nested:\n  desktop_startup: false\n'), false)
+})
+
+test('a missing file does not auto-pick a profile that opts out of desktop startup', () => {
+  let written = null
+
+  const fs = makeFs({
+    '/home/u/.hermes/profiles/probe': { dir: true },
+    '/home/u/.hermes/profiles/probe/state.db': { size: 900 * 1024 * 1024, mtime: NOW },
+    '/home/u/.hermes/profiles/probe/profile.yaml': { content: 'desktop_startup: false\n' },
+    '/home/u/.hermes/profiles/writer': { dir: true },
+    '/home/u/.hermes/profiles/writer/state.db': { size: 2 * 1024 * 1024, mtime: NOW - 86_400_000 }
+  })
+
+  const deps = baseDeps({
+    ...fs,
+    writeJson: (_p, payload) => {
+      written = payload
+    }
+  })
+
+  assert.equal(migrateActiveProfileIfMissing('/cfg/active-profile.json', deps), true)
+  assert.deepEqual(written, { profile: 'writer', _migrated: true })
+})
+
+test('a profile name is not special: without the flag it can still be auto-picked', () => {
+  let written = null
+
+  const fs = makeFs({
+    '/home/u/.hermes/profiles/probe': { dir: true },
+    '/home/u/.hermes/profiles/probe/state.db': { size: 900 * 1024 * 1024, mtime: NOW }
+  })
+
+  const deps = baseDeps({
+    ...fs,
+    writeJson: (_p, payload) => {
+      written = payload
+    }
+  })
+
+  assert.equal(migrateActiveProfileIfMissing('/cfg/active-profile.json', deps), true)
+  assert.deepEqual(written, { profile: 'probe', _migrated: true })
+})
+
+test('a malformed active-profile.json is seeded, and an opted-out running gateway is not', () => {
+  let written = null
+
+  const fs = makeFs({
+    '/cfg/active-profile.json': { content: '{not json' },
+    '/home/u/.hermes/profiles/probe': { dir: true },
+    '/home/u/.hermes/profiles/probe/gateway.pid': { content: '{"pid":42}' },
+    '/home/u/.hermes/profiles/probe/profile.yaml': { content: 'desktop_startup: false\n' },
+    '/home/u/.hermes/profiles/probe/state.db': { size: 900 * 1024 * 1024, mtime: NOW },
+    '/home/u/.hermes/profiles/writer': { dir: true },
+    '/home/u/.hermes/profiles/writer/state.db': { size: 2 * 1024 * 1024, mtime: NOW - 86_400_000 }
+  })
+
+  const deps = baseDeps({
+    ...fs,
+    isHermesProcess: pid => pid === 42,
+    writeJson: (_p, payload) => {
+      written = payload
+    }
+  })
+
+  assert.equal(migrateActiveProfileIfMissing('/cfg/active-profile.json', deps), true)
+  assert.deepEqual(written, { profile: 'writer', _migrated: true })
 })

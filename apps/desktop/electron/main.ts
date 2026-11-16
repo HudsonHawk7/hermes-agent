@@ -464,6 +464,7 @@ import {
   profileNameFromDeleteRequest,
   resolveRouteProfile
 } from './profile-delete-routing'
+import { commandLineIsHermes, hermesProcessProbe } from './hermes-process'
 import { migrateActiveProfileIfMissing as migrateActiveProfileIfMissingPure } from './profile-migration'
 import { prepareProfileRenameLifecycle, profileRenameFromRequest } from './profile-rename-routing'
 import {
@@ -8906,28 +8907,35 @@ function isHermesProcess(pid) {
     return false
   }
 
-  // On macOS / Linux, check the command line to avoid PID recycling false positives.
+  // /proc exists on Linux. macOS and Windows fall through. Windows has no ps,
+  // so the probe there is a CIM command-line query (hermes-process.ts).
   try {
     const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8')
 
-    return cmdline.includes('hermes')
+    return commandLineIsHermes(cmdline)
   } catch {
-    // /proc not available (macOS) — fall back to ps. Use -o args= to inspect
-    // the full command line, not just the process name.  -o comm= would return
-    // "python3" for any Python process, creating false positives.
-    try {
-      const { execSync } = require('child_process')
-      const out = execSync(`ps -p ${pid} -o args=`, { encoding: 'utf8', timeout: 2000 })
+    const spec = hermesProcessProbe(process.platform, pid)
 
-      return out.includes('hermes')
+    if (!spec) {
+      return false
+    }
+
+    try {
+      const { execFileSync } = require('child_process')
+      const out = execFileSync(spec.command, spec.args, {
+        encoding: 'utf8',
+        timeout: 2000,
+        windowsHide: true
+      })
+
+      return commandLineIsHermes(out)
     } catch {
       return false
     }
   }
 }
-
-// Seed active-profile.json from the best available signal when the file does
-// not yet exist.  Runs exactly once (no-op once the file exists).  Priority:
+// Seed active-profile.json when the file is missing or malformed.
+// A well-formed file is a pick and is never re-scored.  Priority:
 //   1. Legacy ~/.hermes/active_profile (explicit CLI choice via hermes profile use)
 //   2. Running gateway (gateway.pid with verified liveness + hermes identity)
 //   3. state.db heuristics (hybrid recency×size score picks the primary workspace)

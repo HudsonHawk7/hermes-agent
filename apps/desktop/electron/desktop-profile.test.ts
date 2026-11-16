@@ -214,3 +214,33 @@ test.each([null, 'local'])(
     }
   }
 )
+
+
+test('a pick or a default drops the migration flag so the next boot cannot re-score it', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'desktop-profile-flag-'))
+  const target = path.join(root, 'active-profile.json')
+
+  try {
+    fs.writeFileSync(target, JSON.stringify({ profile: 'probe', _migrated: true, defaultRoute: null }))
+    const preferences = createDesktopProfilePreferences(target)
+
+    preferences.remember('writer')
+    let saved = JSON.parse(fs.readFileSync(target, 'utf8'))
+    assert.equal(saved.profile, 'writer')
+    assert.equal(saved._migrated, undefined)
+
+    fs.writeFileSync(target, JSON.stringify({ profile: 'writer', _migrated: true }))
+    preferences.setDefault({ connectionId: null, profile: 'writer' })
+    saved = JSON.parse(fs.readFileSync(target, 'utf8'))
+    assert.equal(saved._migrated, undefined)
+    assert.equal(saved.defaultRoute.profile, 'writer')
+
+    fs.writeFileSync(target, JSON.stringify({ profile: 'writer', _migrated: true, defaultRoute: { connectionId: null, profile: 'writer' } }))
+    preferences.profileChanged(null, 'writer', null, 'local')
+    saved = JSON.parse(fs.readFileSync(target, 'utf8'))
+    assert.equal(saved._migrated, undefined)
+    assert.equal(saved.defaultRoute, null)
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
