@@ -128,6 +128,17 @@ export function createDesktopProfilePreferences(
     return DESKTOP_PROFILE_NAME_RE.test(profile) ? profile : null
   }
 
+  function withoutMigrationFlag(value: Record<string, unknown>): Record<string, unknown> {
+    if (!Object.prototype.hasOwnProperty.call(value, "_migrated")) {
+      return value
+    }
+
+    const next = { ...value }
+    delete next._migrated
+
+    return next
+  }
+
   function remember(name: unknown): null | string {
     const profile = typeof name === 'string' ? name.trim() : ''
 
@@ -135,7 +146,7 @@ export function createDesktopProfilePreferences(
       throw new Error(`Invalid profile name: ${profile}`)
     }
 
-    write({ ...read(true), profile: profile || null })
+    write({ ...withoutMigrationFlag(read(true)), profile: profile || null })
 
     return profile || null
   }
@@ -143,14 +154,14 @@ export function createDesktopProfilePreferences(
   function setDefault(value: unknown): DesktopProfileRoute {
     const route = requireDesktopProfileRoute(value)
     options.validateRoute?.(route)
-    write({ ...read(true), defaultRoute: route })
+    write({ ...withoutMigrationFlag(read(true)), defaultRoute: route })
     options.onDefaultChanged?.(route)
 
     return route
   }
 
   function clearDefault() {
-    write({ ...read(true), defaultRoute: null })
+    write({ ...withoutMigrationFlag(read(true)), defaultRoute: null })
     options.onDefaultChanged?.(null)
   }
 
