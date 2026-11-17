@@ -18,13 +18,52 @@ from urllib.parse import quote
 
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _PR = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)")
+_SCOPE = re.compile(r"[A-Za-z0-9_./-]+")
+
+
+def parse_pr_contract(value: str | None) -> dict | None:
+    """Split a PR contract into its URL and the checks that card owns.
+
+    A bare URL owns every repository-required check (the merge card).
+    ``<url>#force/ui-proof`` owns only that context. ``#merged`` also
+    requires the PR to be merged. ``#all`` is the bare-URL scope.
+    """
+    if not isinstance(value, str):
+        return None
+    url, sep, frag = value.partition("#")
+    if not _PR.fullmatch(url):
+        return None
+    if not sep:
+        return {"url": url, "contexts": (), "scope_all": True, "require_merged": False}
+    contexts: list[str] = []
+    seen: set[str] = set()
+    scope_all = False
+    require_merged = False
+    for raw in frag.split(","):
+        token = raw.strip()
+        if not token or not _SCOPE.fullmatch(token) or token in seen:
+            return None
+        seen.add(token)
+        if token == "all":
+            scope_all = True
+        elif token == "merged":
+            require_merged = True
+        else:
+            contexts.append(token)
+    if not contexts and not scope_all:
+        scope_all = True
+    return {"url": url, "contexts": tuple(contexts), "scope_all": scope_all,
+            "require_merged": require_merged}
 
 
 def validate_contract(value: str | None) -> str:
     if value is None or value == "local-only":
         return "local-only"
-    if not isinstance(value, str) or not (_REPO.fullmatch(value) or _PR.fullmatch(value)):
-        raise ValueError("completion_contract must be local-only, OWNER/REPO, or an exact GitHub PR URL")
+    if not isinstance(value, str) or not (_REPO.fullmatch(value) or parse_pr_contract(value)):
+        raise ValueError(
+            "completion_contract must be local-only, OWNER/REPO, an exact GitHub PR URL, "
+            "or that URL plus #context[,merged]"
+        )
     return value
 
 
@@ -123,10 +162,21 @@ def collect_acceptance(contract: str, published_pr: str | None,
                            "Use kanban_block if human input is needed; receipts remain on the task event log."}
     try:
         profile_home = _assignee_profile_home(assignee)
-        declared = _PR.fullmatch(contract)
-        url = contract if declared else published_pr
-        match = _PR.fullmatch(url or "")
-        if not match or (not declared and match[1] != contract) or (declared and published_pr and published_pr != contract):
+        scope = parse_pr_contract(contract)
+        if scope:
+            if published_pr and published_pr != scope["url"]:
+                receipt["detail"] = "Supply metadata.published_pr matching the persisted completion contract."
+                return receipt
+            url, match = scope["url"], _PR.fullmatch(scope["url"])
+        else:
+            declared = _PR.fullmatch(contract)
+            url = contract if declared else published_pr
+            match = _PR.fullmatch(url or "")
+            scope = {"contexts": (), "scope_all": True, "require_merged": False}
+            if not match or (not declared and match[1] != contract) or (declared and published_pr and published_pr != contract):
+                receipt["detail"] = "Supply metadata.published_pr matching the persisted completion contract."
+                return receipt
+        if match is None:
             receipt["detail"] = "Supply metadata.published_pr matching the persisted completion contract."
             return receipt
         repo, number = match[1], int(match[2])
@@ -151,6 +201,7 @@ def collect_acceptance(contract: str, published_pr: str | None,
                 if rule["type"] == "required_status_checks":
                     required.update((r["context"], r.get("integration_id"))
                                     for r in rule["parameters"]["required_status_checks"])
+        required = _owned_required(required, scope)
         receipt["required"] = [{"context": c, "app_id": a} for c, a in sorted(required, key=str)]
         if not required:
             receipt["detail"] = "No repository-required checks are configured; explicitly use a local-only contract for non-CI tasks."
@@ -186,6 +237,9 @@ def collect_acceptance(contract: str, published_pr: str | None,
         if current["head"]["sha"] != sha or current["base"]["ref"] != branch or (current["state"] == "closed" and not current.get("merged")):
             receipt.update(classification="stale", detail="PR head/base changed while collecting evidence; retry.")
             return receipt
+        if scope["require_merged"] and not current.get("merged"):
+            outcomes.append("missing")
+            receipt["checks"].append({"name": "merged", "classification": "missing", "head_sha": sha})
         receipt["classification"] = next((x for x in outcomes if x != "success"), "missing" if not outcomes else "success")
         receipt["ok"] = receipt["classification"] == "success"
         return receipt
@@ -207,3 +261,21 @@ def _classify(check: dict, sha: str, outcome: str | None, is_run: bool) -> str:
     if is_run and check.get("status") != "completed":
         return "pending"
     return {"success": "success", "failure": "failure", "error": "infra", "pending": "pending"}.get(outcome, "infra")
+
+
+def _owned_required(required: set, scope: dict) -> set:
+    """Keep only the checks this card owns.
+
+    A bare URL (``scope_all``) still waits on every repository-required
+    check. A fragment waits on the named contexts only, so a proof card
+    cannot deadlock on statuses its children have not posted yet.
+    """
+    if scope["scope_all"]:
+        chosen = set(required)
+        known = {name for name, _app in required}
+        for name in scope["contexts"]:
+            if name not in known:
+                chosen.add((name, None))
+        return chosen
+    by_name = {name: app for name, app in required}
+    return {(name, by_name.get(name)) for name in scope["contexts"]}
