@@ -19,8 +19,9 @@ import { _electron, type ElectronApplication, expect, type Page } from '@playwri
 
 import { resolveElectronBinary } from '../electron-binary'
 
-import { isSandboxProcess, procfsCensus, type ProcInfo, readProc, sandboxProcessesOf, treeKill } from './process-census'
+import { isSandboxProcess, procfsCensus, type ProcInfo, readProc, reapOrphanSandboxProcesses, sandboxProcessesOf, treeKill } from './process-census'
 import { pathUnder, windowsProcessHomes } from './process-environment'
+import { bindSandboxLifetime } from './sandbox-lifetime'
 
 export type { ProcInfo } from './process-census'
 
@@ -69,6 +70,14 @@ export function createCoreSandbox(label: string): CoreSandbox {
     mode: 0o755
   })
 
+  // Record this dir and hold a kill-on-close job before anything launches.
+  // A hard-killed worker never reaches cleanup(); the job still takes the
+  // sandbox gateway with it. Then sweep leftovers whose owner is already dead
+  // (a previous custom-root run), never this still-live owner.
+  bindSandboxLifetime(root)
+  reapOnWorkerExit(root, hermesHome)
+  reapOrphanSandboxProcesses()
+
   return {
     root,
     bin,
@@ -85,6 +94,24 @@ export function createCoreSandbox(label: string): CoreSandbox {
       }
     }
   }
+}
+
+const exitRoots: Array<{ root: string; hermesHome: string }> = []
+let exitHooked = false
+
+function reapOnWorkerExit(root: string, hermesHome: string): void {
+  exitRoots.push({ root, hermesHome })
+
+  if (exitHooked) {
+    return
+  }
+
+  exitHooked = true
+  process.on('exit', () => {
+    for (const item of exitRoots) {
+      stopSandboxGatewayDaemons(item.root, item.hermesHome)
+    }
+  })
 }
 
 function sleepSync(ms: number): void {
@@ -268,6 +295,11 @@ export function coreAppEnv(sandbox: CoreSandbox, extra: Record<string, string> =
     HERMES_DESKTOP_CDP_PORT: 'off',
     // Agent default: hide BrowserWindows (set HERMES_DESKTOP_E2E_HIDDEN=0 to watch).
     HERMES_DESKTOP_E2E_HIDDEN: process.env.HERMES_DESKTOP_E2E_HIDDEN === '0' ? '0' : '1',
+    // Tells the gateway spawn not to break away and not to inherit the worker's
+    // HERMES_GATEWAY_DETACHED / HERMES_SUPERVISED_CHILD. Those two are already
+    // stripped by the HERMES_* loop above; the marker is what keeps the Python
+    // side from putting them back.
+    HERMES_E2E_SANDBOX: '1',
     // A partial-clone (blob:none) dev checkout turns some backend git read into
     // a lazy `git fetch origin` over the network, which outlived quit by >60 s
     // (reported as a finding). CI checkouts are not partial; keep dev runs

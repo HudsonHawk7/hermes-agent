@@ -6,7 +6,11 @@ from pathlib import Path
 import subprocess
 import sys
 
-from hermes_cli._subprocess_compat import windows_detach_popen_kwargs, _WINDOWS_GATEWAY_BREAKAWAY_ENV
+from hermes_cli._subprocess_compat import (
+    windows_detach_flags_without_breakaway,
+    windows_detach_popen_kwargs,
+    _WINDOWS_GATEWAY_BREAKAWAY_ENV,
+)
 from hermes_cli.gateway_runtime_service import RuntimeStartError, remaining
 
 
@@ -64,8 +68,19 @@ def spawn_unmanaged_gateway(profile_home: Path, *, deadline: float, idle_exit: b
         if not overlay:
             raise RuntimeStartError("windows_interpreter_unavailable")
         env.update(overlay)
-        env[_WINDOWS_GATEWAY_BREAKAWAY_ENV] = "1"
-    env.update(HERMES_HOME=str(home), HERMES_GATEWAY_DETACHED="1", PYTHONIOENCODING="utf-8")
+    # A desktop e2e worker carries HERMES_GATEWAY_DETACHED and HERMES_SUPERVISED_CHILD
+    # from the kanban job. Putting those back, or breaking away, is how a sandbox
+    # gateway outlived a hard-killed Playwright worker (call demo, custom core root).
+    e2e_sandbox = env.get("HERMES_E2E_SANDBOX") == "1"
+    if e2e_sandbox:
+        env.pop("HERMES_GATEWAY_DETACHED", None)
+        env.pop("HERMES_SUPERVISED_CHILD", None)
+        env.pop(_WINDOWS_GATEWAY_BREAKAWAY_ENV, None)
+    else:
+        if sys.platform == "win32":
+            env[_WINDOWS_GATEWAY_BREAKAWAY_ENV] = "1"
+        env["HERMES_GATEWAY_DETACHED"] = "1"
+    env.update(HERMES_HOME=str(home), PYTHONIOENCODING="utf-8")
     # Profile selection is the explicit home, not the invoking client's display
     # name. Launch-only approval/context/config flags ride the launching session's frozen
     # policy, not the shared daemon or every later session.
@@ -78,11 +93,19 @@ def spawn_unmanaged_gateway(profile_home: Path, *, deadline: float, idle_exit: b
     try:
         with (logs / "gateway-stdio.log").open("ab", buffering=0) as output:
             remaining(deadline)
+            popen_kwargs: dict = (
+                {"creationflags": windows_detach_flags_without_breakaway()}
+                if e2e_sandbox and sys.platform == "win32"
+                else windows_detach_popen_kwargs()
+            )
             return subprocess.Popen(command, cwd=root, env=env, close_fds=True,
                                     stdin=subprocess.DEVNULL, stdout=output, stderr=output,
-                                    **windows_detach_popen_kwargs())
+                                    **popen_kwargs)
     except OSError as exc:
-        reason = "windows_breakaway_unavailable" if sys.platform == "win32" else "spawn_failed"
+        reason = (
+            "spawn_failed" if e2e_sandbox or sys.platform != "win32"
+            else "windows_breakaway_unavailable"
+        )
         raise RuntimeStartError(reason) from exc
 
 
