@@ -1083,6 +1083,15 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str], *, host: b
             respawn_cwd = ""
             respawn_env_overlay = {}
 
+    respawn_env_overlay = dict(respawn_env_overlay or {})
+    e2e_sandbox = os.environ.get("HERMES_E2E_SANDBOX") == "1"
+    if e2e_sandbox:
+        # The worker's detach flags must not ride the watcher or the gateway it
+        # respawns. Breakaway would leave that child outside the e2e kill-on-close job.
+        respawn_env_overlay.pop("HERMES_GATEWAY_DETACHED", None)
+        respawn_env_overlay.pop("HERMES_SUPERVISED_CHILD", None)
+        respawn_env_overlay["HERMES_E2E_SANDBOX"] = "1"
+
     # cwd/env overlay are embedded as JSON literals in the watcher source (no extra argv plumbing).
     watcher = textwrap.dedent(
         """
@@ -1137,19 +1146,27 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str], *, host: b
         _base_env = {{**os.environ, **_respawn_env_overlay}}
         try:
             if sys.platform == "win32":
-                try:
-                    _popen_kwargs["creationflags"] = windows_detach_flags()
-                    # Stamp the breakaway state exactly like gateway_windows._spawn_detached so the
-                    # respawned gateway's exit-diag / lifecycle records show whether it escaped the
-                    # parent Job Object (a job-teardown kill is otherwise indistinguishable).
-                    _popen_kwargs["env"] = {{**_base_env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: "1"}}
-                    subprocess.Popen(cmd, **_popen_kwargs)
-                except OSError:
-                    # CREATE_BREAKAWAY_FROM_JOB is rejected with ERROR_ACCESS_DENIED when the parent's
-                    # job object refuses breakaway; retry without it (mirrors _spawn_detached).
+                _e2e = _respawn_env_overlay.get("HERMES_E2E_SANDBOX") == "1" or os.environ.get("HERMES_E2E_SANDBOX") == "1"
+                if _e2e:
+                    _base_env.pop("HERMES_GATEWAY_DETACHED", None)
+                    _base_env.pop("HERMES_SUPERVISED_CHILD", None)
                     _popen_kwargs["creationflags"] = windows_detach_flags_without_breakaway()
-                    _popen_kwargs["env"] = {{**_base_env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: "0"}}
+                    _popen_kwargs["env"] = _base_env
                     subprocess.Popen(cmd, **_popen_kwargs)
+                else:
+                    try:
+                        _popen_kwargs["creationflags"] = windows_detach_flags()
+                        # Stamp the breakaway state exactly like gateway_windows._spawn_detached so the
+                        # respawned gateway's exit-diag / lifecycle records show whether it escaped the
+                        # parent Job Object (a job-teardown kill is otherwise indistinguishable).
+                        _popen_kwargs["env"] = {{**_base_env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: "1"}}
+                        subprocess.Popen(cmd, **_popen_kwargs)
+                    except OSError:
+                        # CREATE_BREAKAWAY_FROM_JOB is rejected with ERROR_ACCESS_DENIED when the parent's
+                        # job object refuses breakaway; retry without it (mirrors _spawn_detached).
+                        _popen_kwargs["creationflags"] = windows_detach_flags_without_breakaway()
+                        _popen_kwargs["env"] = {{**_base_env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: "0"}}
+                        subprocess.Popen(cmd, **_popen_kwargs)
             else:
                 if _respawn_env_overlay:
                     _popen_kwargs["env"] = _base_env
@@ -1175,9 +1192,18 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str], *, host: b
     ) else None
     popen_env = {"env": watcher_env} if watcher_env is not None else {}
     # Same detach for the watcher itself, so closing the terminal doesn't kill it.
+    # A desktop e2e sandbox must NOT break away: the kill-on-close job is what
+    # takes the watcher (and the gateway it would respawn) with a hard-killed worker.
+    watcher_detach: dict = (
+        {"creationflags": windows_detach_flags_without_breakaway()}
+        if e2e_sandbox and sys.platform == "win32"
+        else windows_detach_popen_kwargs()
+    )
     try:
-        subprocess.Popen(watcher_argv, **devnull, **popen_env, **windows_detach_popen_kwargs())
+        subprocess.Popen(watcher_argv, **devnull, **popen_env, **watcher_detach)
     except OSError:
+        if e2e_sandbox:
+            return False
         # Parent job object rejected CREATE_BREAKAWAY_FROM_JOB; retry without it (Windows only —
         # ``start_new_session=True`` cannot raise OSError on POSIX).
         fallback_kwargs: dict = (

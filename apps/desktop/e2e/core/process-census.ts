@@ -19,6 +19,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 
 import { pathUnder, samePath, windowsProcessHomes } from './process-environment'
+import { recordedDeadOwnerRoots, rootContainsProtectedHome } from './sandbox-lifetime'
 
 export interface ProcInfo {
   pid: number
@@ -110,6 +111,18 @@ function environmentHomes(all: ProcInfo[]): Map<number, string> {
   return windowsProcessHomes(environmentCandidates(all))
 }
 
+/**
+ * A real companion home: `profiles\\<name>`, not that profile's `cache\\scratch`.
+ * A sweep must never signal it, even when a recorded root is a parent of it.
+ */
+export function isRealProfileHome(hermesHome: string): boolean {
+  if (/[\\/]cache[\\/]scratch([\\/]|$)/i.test(hermesHome)) {
+    return false
+  }
+
+  return path.basename(path.dirname(path.resolve(hermesHome))).toLowerCase() === 'profiles'
+}
+
 /** The live install's own home — the one gateway a sweep must never signal. */
 export function isLiveHermesHome(hermesHome: string): boolean {
   const localAppData = process.env.LOCALAPPDATA
@@ -128,7 +141,7 @@ export function isLiveHermesHome(hermesHome: string): boolean {
  * sandboxes however dead their parent is: `profiles\probe` is how a companion legitimately runs.
  */
 export function isSandboxHome(hermesHome: string, roots: string[]): boolean {
-  if (isLiveHermesHome(hermesHome)) {
+  if (isLiveHermesHome(hermesHome) || isRealProfileHome(hermesHome)) {
     return false
   }
 
@@ -317,6 +330,15 @@ export function defaultSandboxReapRoots(): string[] {
     roots.add(path.resolve(os.tmpdir()))
   } catch {
     // ignore
+  }
+
+  // A custom HERMES_E2E_CORE_ROOT (call-demo scratch) is not under tmp. The
+  // worker records its own sandbox dir. Only dead owners are swept, so a demo
+  // that is still running — its gateway's parent already dead — is left alone.
+  for (const recorded of recordedDeadOwnerRoots()) {
+    if (!rootContainsProtectedHome(recorded)) {
+      roots.add(path.resolve(recorded))
+    }
   }
 
   return [...roots]
