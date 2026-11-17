@@ -566,9 +566,25 @@ def test_infrastructure_spawn_refusal_never_charges_the_card(
     real dispatcher accounting, ``consecutive_failures`` stays put, the breaker
     never parks the card as a bare ``blocked``, the run is tagged
     ``infrastructure`` and the guard spaces the retries. A control spawn
-    failure on the same card still counts."""
+    failure on the same card still counts.
+
+    Windows-host mechanism: ``restart_safe_gateway_child_argv`` returns
+    ``in_process`` immediately when ``_IS_LINUX`` is false (no systemd scopes
+    on Windows; production Windows gateways correctly spawn without a scope).
+    The refusal path under test is Linux-topology only, so pin ``_IS_LINUX``
+    True here — still the real probe + real ``_degrade()`` raise — rather than
+    skipping the card or charging a fake ``AssertionError`` as a card failure.
+    """
     from tools import process_registry
 
+    # Topology under test is Linux systemd-user-bus refusal (#114720). Without
+    # this pin, Windows short-circuits to in_process before _degrade() and the
+    # spawn stub's trailing AssertionError is charged as a normal card failure.
+    monkeypatch.setattr(process_registry, "_IS_LINUX", True)
+    # The degrade detail string interpolates os.getuid(); Windows has no getuid.
+    # Provide a stand-in so the real RestartSafeScopeUnavailable path runs.
+    if not hasattr(os, "getuid"):
+        monkeypatch.setattr(os, "getuid", lambda: 1000, raising=False)
     monkeypatch.setattr(process_registry, "_is_supervised_gateway_process", lambda: True)
     monkeypatch.setenv("INVOCATION_ID", "managed-gateway")
     monkeypatch.setattr(process_registry, "_systemd_run_user_scope_available", lambda: False)
@@ -808,8 +824,12 @@ def test_worktree_workspace_explicit_target_materializes_linked_worktree(kanban_
         capture_output=True,
         text=True,
     ).stdout
-    assert f"worktree {target}" in listed
-    assert f"branch refs/heads/{branch}" in listed
+    # Git porcelain on Windows prints forward-slash paths; pathlib str() uses
+    # backslashes. Normalize both sides so the materialize check is platform-neutral.
+    listed_norm = listed.replace("\\", "/")
+    target_norm = str(target).replace("\\", "/")
+    assert f"worktree {target_norm}" in listed_norm
+    assert f"branch refs/heads/{branch}" in listed_norm
 
 
 # ---------------------------------------------------------------------------
