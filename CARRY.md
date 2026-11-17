@@ -87,6 +87,7 @@ print('recipes_root:', cfg.get('scene_builder', {}).get('recipes_root'))
 | 7ab10820be8 | raise a compression cap that sits under the fixed prompt | A cap at or below the unreclaimable prompt no longer compacts every turn. The session trigger sits above that floor, the chat notice shows once per session, and the prune trigger has the same guard. Card t_7bd9b9ce. Upstream not opened. Not installed. |
 | 59aeea37023 | a remembered desktop profile survives a bare boot | remember() and the default setters drop _migrated, and a well-formed active-profile.json is not re-scored. A profile.yaml desktop_startup false is never auto-picked. Windows process checks use CIM. Card t_5efef963. Not installed. |
 
+| 7e92a31c306 | one package that will not load does not keep the rest dark | A twin test seeds two marker'd packages, makes enablePackageDesktopHalf throw for one, and asserts the other still reaches loaded with the could-not-enable log line naming the failing package. Without the per-package catch the sweep aborts. Card t_f71da6f6. Not installed. |
 Add new rows here before pushing a carry. Upstream the individual fix as a normal PR from a short-lived branch off origin/main when appropriate.
 
 ## Automation
