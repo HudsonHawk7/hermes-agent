@@ -191,7 +191,8 @@ echo "▶ pre-compiling bytecode cache"
 "$PYTHON" -m compileall -q -j 0 -- $(git ls-files '*.py') >/dev/null 2>&1 || true
 
 echo "▶ launching test runner"
-exec env -i \
+set +e
+env -i \
   PATH="$PATH" \
   HOME="$HOME" \
   ${WIN_ENV[@]+"${WIN_ENV[@]}"} \
@@ -207,3 +208,10 @@ exec env -i \
   ${EXTRA_PYTHONPATH:+PYTHONPATH="$EXTRA_PYTHONPATH"} \
   ${EXTRA_PYTEST_PLUGINS:+PYTEST_PLUGINS="$EXTRA_PYTEST_PLUGINS"} \
   "$PYTHON" "$SCRIPT_DIR/run_tests_parallel.py" "$@"
+status=$?
+set -e
+# Drop the ~400MB test-environment after a green run (GM: no durable test files on C:).
+if [ "$status" -eq 0 ]; then
+  "$PYTHON" "$SCRIPT_DIR/drop_testenv_after.py" "$REPO_ROOT" 2>/dev/null || true
+fi
+exit "$status"

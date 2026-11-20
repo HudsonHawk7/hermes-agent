@@ -406,6 +406,11 @@ def cmd_install(args) -> int:
 
         record_activation_inputs(activation_inputs_dir(repo_root()), input_mtimes, repo_root(),
                                  test_environment=test_environment is not None)
+        # Bound installs/: live gateway checkout + newest other; drop the rest.
+        from pm.install_states import reclaim_install_states
+        reclaimed = reclaim_install_states()
+        if reclaimed:
+            print(f"  reclaimed {len(reclaimed)} old install state dir(s)", flush=True)
     return 1 if failed else 0
 
 
@@ -523,10 +528,10 @@ def cmd_gc(args) -> int:
     generations = collect_generations(repo_root())
     runtimes = collect_runtime_generations(install_state_dir(repo_root()) / "pm-runtime")
     from pm.environments import installs_root
-    from pm.install_states import collect_orphan_install_states
-    orphans = collect_orphan_install_states(installs_root())
+    from pm.install_states import reclaim_install_states
+    reclaimed = reclaim_install_states(installs_root())
     print(f"gc: removed {removed}, kept {kept}; removed {len(generations)} dependency generations, "
-          f"{len(runtimes)} PM runtime generations, {len(orphans)} install state dir(s) of deleted checkouts")
+          f"{len(runtimes)} PM runtime generations, {len(reclaimed)} install state dir(s)")
     return 0
 
 

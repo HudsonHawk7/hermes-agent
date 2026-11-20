@@ -1176,6 +1176,8 @@ def _reclaim_orphan_install_states() -> None:
         from pm.environments import installs_root
         from pm.install_states import collect_orphan_install_states
 
+        # Startup/worktree maintenance: orphans only. Live+newest retention runs after a
+        # successful pm install and hermes pm gc (see reclaim_install_states).
         reclaimed = collect_orphan_install_states(installs_root())
         if reclaimed:
             logger.info("Reclaimed %d dependency state dir(s) of deleted checkouts", len(reclaimed))
