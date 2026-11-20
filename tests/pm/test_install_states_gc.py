@@ -10,7 +10,15 @@ import pm.environments
 import pytest
 from hermes_cli.worktree_ops import _prune_stale_worktrees
 from pm.filesystem import lock_fd
-from pm.install_states import collect_orphan_install_states, orphan_install_states
+from pathlib import Path
+
+import pm.install_states
+from pm.install_states import (
+    collect_orphan_install_states,
+    orphan_install_states,
+    prune_install_states,
+    retain_install_state_names,
+)
 
 
 def _state(installs, key, project_root):
@@ -83,3 +91,55 @@ def test_partly_removed_orphan_keeps_its_record_until_retried(tmp_path):
     finally:
         stuck.chmod(0o700)
     assert collect_orphan_install_states(installs) == [state] and not state.exists()
+
+
+def test_retention_keeps_live_and_newest_only(tmp_path, monkeypatch):
+    """After prune, live install survives even when older than others; only newest other kept."""
+    import time
+
+    home = tmp_path / "home"
+    installs = home / "installs"
+    live_root = home / "hermes-agent"
+    live_root.mkdir(parents=True)
+    (live_root / "hermes_cli").mkdir()
+    # Live install is intentionally oldest so retention must protect it by identity, not mtime.
+    live = _state(installs, "livekey00000001", live_root)
+    old = _state(installs, "oldkey000000002", tmp_path / "wt-old")
+    mid = _state(installs, "midkey000000003", tmp_path / "wt-mid")
+    new = _state(installs, "newkey000000004", tmp_path / "wt-new")
+    base = time.time() - 400
+    for state, offset in ((live, 0), (old, 100), (mid, 200), (new, 300)):
+        os.utime(state, (base + offset, base + offset))
+
+    keep = retain_install_state_names(installs, keep_newest=1, live_names={"livekey00000001"})
+    assert keep == {"livekey00000001", "newkey000000004"}
+
+    # live_install_state_names uses install_key(live_root); pin it to our live key.
+    monkeypatch.setattr(
+        pm.environments,
+        "install_key",
+        lambda root: "livekey00000001" if Path(root).resolve() == live_root.resolve() else "x",
+    )
+    removed = prune_install_states(installs, keep_newest=1)
+    assert live.is_dir(), "prune must never delete the live install"
+    assert new.is_dir(), "newest non-live must be kept"
+    assert not old.exists() and not mid.exists()
+    assert sorted(p.name for p in removed) == ["midkey000000003", "oldkey000000002"]
+
+
+def test_retention_never_deletes_held_non_live(tmp_path, monkeypatch):
+    installs = tmp_path / "home" / "installs"
+    live = _state(installs, "livekey00000001", tmp_path / "home" / "hermes-agent")
+    (tmp_path / "home" / "hermes-agent" / "hermes_cli").mkdir(parents=True, exist_ok=True)
+    held = _state(installs, "heldkey00000002", tmp_path / "held-checkout")
+    spare = _state(installs, "sparekey0000003", tmp_path / "spare-checkout")
+    monkeypatch.setattr(pm.install_states, "live_install_state_names", lambda installs: {"livekey00000001"})
+    fd = os.open(held / ".install.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    assert lock_fd(fd, wait=False)
+    try:
+        removed = prune_install_states(installs, keep_newest=0)
+        assert live.is_dir() and held.is_dir()
+        assert not spare.exists()
+        assert [p.name for p in removed] == ["sparekey0000003"]
+    finally:
+        os.close(fd)
