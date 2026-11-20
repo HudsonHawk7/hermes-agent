@@ -14,7 +14,8 @@ PM runtime, hundreds of MB each). Two reclaim paths keep that tree bounded:
 
 2. **Retention** — after a successful install, keep the install the running gateway uses
    plus the newest one other state dir, and delete the rest. Worktrees rebuild on next use.
-   Held locks/leases still fail closed.
+   Held locks/leases still fail closed. When live cannot be detected, retention is skipped
+   (orphans-only) so mtime keep-newest alone cannot delete a missed live install.
 
 Removal still fails closed on anything a live process could hold: the install lock, or a
 dependency / PM runtime generation lease.
@@ -192,10 +193,16 @@ def retain_install_state_names(
     keep_newest: int = DEFAULT_KEEP_NEWEST,
     live_names: set[str] | None = None,
 ) -> set[str]:
-    """Names to keep under *installs*: every live name plus up to *keep_newest* other newest dirs."""
+    """Names to keep under *installs*: every live name plus up to *keep_newest* other newest dirs.
+
+    Fail closed when live is unknown: return every state dir name so mtime-only retention
+    cannot delete a live install the detector missed.
+    """
     if not installs.is_dir():
         return set()
     live = set(live_names) if live_names is not None else live_install_state_names(installs)
+    if not live:
+        return {state.name for state in installs.iterdir() if state.is_dir()}
     keep = set(live)
     others = sorted(
         (state for state in installs.iterdir() if state.is_dir() and state.name not in live),
@@ -215,11 +222,20 @@ def prune_install_states(
     """Orphans first, then drop unheld state dirs outside live + newest retention.
 
     Returns every state dir that was fully removed. Never deletes a live or held install.
+    When live detection returns empty, retention is skipped (orphans-only) so a missed
+    live install cannot be deleted by mtime keep-newest alone.
     """
     removed = collect_orphan_install_states(installs)
     if not installs.is_dir():
         return removed
-    keep = retain_install_state_names(installs, keep_newest=keep_newest)
+    live = live_install_state_names(installs)
+    if not live:
+        logger.warning(
+            "install retention skipped: live install could not be detected under %s; orphans-only",
+            installs,
+        )
+        return removed
+    keep = retain_install_state_names(installs, keep_newest=keep_newest, live_names=live)
     for state in sorted(installs.iterdir(), key=lambda p: p.name):
         if not state.is_dir() or state.name in keep:
             continue
@@ -233,7 +249,7 @@ def prune_install_states(
 
 
 def reclaim_install_states(installs: Path | None = None) -> list[Path]:
-    """Public entry used after a successful install and from startup/gc maintenance."""
+    """Public entry after a successful full install / pm gc. Startup still uses orphans-only."""
     if installs is None:
         from pm.environments import installs_root
 

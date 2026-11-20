@@ -143,3 +143,27 @@ def test_retention_never_deletes_held_non_live(tmp_path, monkeypatch):
         assert [p.name for p in removed] == ["sparekey0000003"]
     finally:
         os.close(fd)
+
+
+def test_retention_fail_closed_when_live_unknown(tmp_path, monkeypatch):
+    """Empty live detection must not mtime-prune; all non-orphan dirs survive (AC3)."""
+    import time
+
+    home = tmp_path / "home"
+    installs = home / "installs"
+    # No gateway.lock, no home/hermes-agent — live_install_state_names would be empty.
+    # Checkouts still exist so they are not orphans.
+    a = _state(installs, "aaaold000000001", tmp_path / "checkout-a")
+    b = _state(installs, "bbbmid000000002", tmp_path / "checkout-b")
+    c = _state(installs, "cccnew000000003", tmp_path / "checkout-c")
+    base = time.time() - 300
+    for state, offset in ((a, 0), (b, 100), (c, 200)):
+        os.utime(state, (base + offset, base + offset))
+
+    monkeypatch.setattr(pm.install_states, "live_install_state_names", lambda installs: set())
+    keep = retain_install_state_names(installs, keep_newest=1, live_names=set())
+    assert keep == {"aaaold000000001", "bbbmid000000002", "cccnew000000003"}
+
+    removed = prune_install_states(installs, keep_newest=1)
+    assert a.is_dir() and b.is_dir() and c.is_dir(), "fail-closed: non-orphans must all survive empty live"
+    assert removed == []
