@@ -87,6 +87,8 @@ print('recipes_root:', cfg.get('scene_builder', {}).get('recipes_root'))
 | 7ab10820be8 | raise a compression cap that sits under the fixed prompt | A cap at or below the unreclaimable prompt no longer compacts every turn. The session trigger sits above that floor, the chat notice shows once per session, and the prune trigger has the same guard. Card t_7bd9b9ce. Upstream not opened. Not installed. |
 | 59aeea37023 | a remembered desktop profile survives a bare boot | remember() and the default setters drop _migrated, and a well-formed active-profile.json is not re-scored. A profile.yaml desktop_startup false is never auto-picked. Windows process checks use CIM. Card t_5efef963. Not installed. |
 
+| 1e750cc190d | bound installs/ to live plus newest after install | After a successful pm install (and pm gc), keep the live gateway install plus the newest other state dir; drop the rest. Held locks still fail closed. Startup worktree maintenance stays orphan-only. Green run_tests drops test-environment; HERMES_TESTENV_ROOT can move it off C after a free-space check. Card t_58836784. Not installed. |
+
 Add new rows here before pushing a carry. Upstream the individual fix as a normal PR from a short-lived branch off origin/main when appropriate.
 
 ## Automation
