@@ -51,3 +51,35 @@ def test_memory_alias_persists_with_content_precedence(tmp_path, monkeypatch):
                                              "new_text": "Household owns a coupe."}])
     assert result["success"], result
     assert sink.writes[-1] == ("replace", "user", "Household owns a coupe.")
+
+
+def test_broken_operations_json_string_returns_tool_error(tmp_path, monkeypatch):
+    """A broken operations JSON string must not crash the tool round.
+
+    The agent path (inline executor) coerces that string into a one-item list.
+    The handler used to call .get on the string, so the turn died with no tool_result.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    # The agent has the memory schema registered before coerce runs. Without it,
+    # coerce leaves the broken string alone and the list guard hides the crash.
+    import tools.memory_tool
+    store = MemoryStore(memory_char_limit=500, user_char_limit=300)
+    agent = SimpleNamespace(_memory_store=store, _memory_manager=None)
+    ctx = InlineToolContext(effective_task_id="task-1", tool_call_id="call-broken")
+    # Missing comma: the same parse failure the live log named ("Expecting ',' delimiter").
+    broken = '[{"action": "add" "content": "User prefers dark mode"}]'
+
+    result = INLINE_TOOL_EXECUTORS["memory"](
+        agent,
+        {"target": "memory", "operations": broken},
+        ctx,
+    )
+
+    payload = json.loads(result)
+    assert payload["success"] is False, payload
+    error = payload["error"]
+    assert "operations" in error
+    assert "list of objects" in error
+    assert "action" in error and "content" in error and "old_text" in error
+    assert store.memory_entries == []
+    assert store.user_entries == []

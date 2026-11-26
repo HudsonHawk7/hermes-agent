@@ -556,6 +556,12 @@ class MemoryStore:
             return target_error
         if not operations:
             return _error("operations list is empty.", "invalid_args")
+        for index, op in enumerate(operations, 1):
+            if not isinstance(op, dict):
+                return _error(
+                    f"Operation {index} is not an object. operations must be a list of objects with action, content, and old_text.",
+                    "invalid_args",
+                )
         ops = [op or {} for op in operations]
         # Scan every add/replace content BEFORE touching disk -- one poisoned op rejects the batch.
         for i, op in enumerate(ops):
