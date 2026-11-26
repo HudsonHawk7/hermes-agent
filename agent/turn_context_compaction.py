@@ -132,13 +132,21 @@ def run_turn_start_compaction(
     active_system_prompt: Optional[str], conversation_history: Optional[list[dict[str, Any]]],
     current_turn_user_idx: int, user_message: Any, effective_task_id: str,
 ) -> CompactionOutcome:
-    """Schedule idle compaction (runs after the reply), then preflight (or the uncompressed guard)."""
+    """Compact the conversation so the next model call fits.
+
+    ``conversation_history`` is the mutable list the turn is still writing into.
+    A background review on a local chat stays on the current model and is cancelled
+    on switch so a second big model is not loaded.
+    """
     out = CompactionOutcome(
         messages=messages, active_system_prompt=active_system_prompt,
         conversation_history=conversation_history, current_turn_user_idx=current_turn_user_idx,
     )
     _idle_compaction(agent, out, system_message, user_message, effective_task_id)
     _preflight_compression(agent, out, system_message, user_message, effective_task_id)
+    from agent.turn_proactive_prune import turn_start_cold_prune
+
+    turn_start_cold_prune(agent, out, effective_task_id)
     return out
 
 

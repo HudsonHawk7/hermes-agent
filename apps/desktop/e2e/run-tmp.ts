@@ -7,6 +7,11 @@
  * `playwright-tracing-*` dirs). Workers and the apps they launch inherit
  * TMPDIR, so everything lands here; a SIGKILLed run leaves one dir, not dozens.
  *
+ * The root also names the run's backends (`HERMES_E2E_RUN_TMP` in their
+ * environment): the exit hook stops them before removing it, and the next
+ * runner stops the ones a killed run left (./run-tmp-reaper). Canonical, so a
+ * backend's resolved HERMES_HOME still lies under it behind a symlinked tmpdir.
+ *
  * Config modules load in the runner and again in each worker; only the first
  * (runner) load creates the root.
  *
@@ -18,66 +23,36 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { reapOrphanSandboxProcesses } from './core/process-census'
+import { reapAbandonedRuns, reapRunBackends, recordRunOwner } from './run-tmp-reaper'
 
-// Prefer a local-disk temp root. Playwright's network/trace copy on Windows
-// ENOENTs when TMPDIR lives on a network/subst volume (S:\ForceAgents\…),
-// while the orphan reap still scans ForceAgents paths via defaultSandboxReapRoots.
 function resolveRunTmpParent(): string {
-  const preferred = [
-    process.env.HERMES_E2E_CORE_ROOT,
-    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Temp', 'hermes-e2e') : '',
-    process.env.TMP,
-    process.env.TEMP,
-    os.tmpdir(),
-    'S:/ForceAgents/hera/tmp',
-    'S:\\ForceAgents\\hera\\tmp',
-  ]
-
-  for (const candidate of preferred) {
-    if (!candidate) {
-      continue
-    }
-
-    try {
-      fs.mkdirSync(candidate, { recursive: true })
-
-      return candidate
-    } catch {
-      // try next
-    }
-  }
-
-  return os.tmpdir()
+  const named = process.env.HERMES_E2E_CORE_ROOT
+  if (named) return named
+  const local = process.env.LOCALAPPDATA
+  if (local) return path.join(local, 'Temp', 'hermes-e2e')
+  return process.env.TMP || process.env.TEMP || os.tmpdir()
 }
 
-if (!process.env.HERMES_E2E_RUN_TMP) {
-  // Prior runs (dead parent, sandbox under pw-*/hermes-e2e) must not pile up.
-  try {
-    const killed = reapOrphanSandboxProcesses()
-
-    if (killed.length > 0) {
-      console.error(`[hermes-desktop-e2e] reaped orphan sandbox pids at run start: ${killed.join(', ')}`)
-    }
-  } catch (error) {
-    console.error('[hermes-desktop-e2e] orphan reap at run start failed:', error)
-  }
-
-  const root = fs.mkdtempSync(path.join(resolveRunTmpParent(), 'pw-'))
+export async function prepareRunTmp(): Promise<string> {
+  reapOrphanSandboxProcesses()
+  reapAbandonedRuns()
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(resolveRunTmpParent(), 'pw-')))
+  recordRunOwner(root)
   process.env.HERMES_E2E_RUN_TMP = root
   process.env.TMPDIR = root
   process.env.TEMP = root
   process.env.TMP = root
   process.on('exit', () => {
     try {
-      reapOrphanSandboxProcesses([root, ...((process.env.HERMES_E2E_CORE_ROOT ? [process.env.HERMES_E2E_CORE_ROOT] : []))])
+      reapOrphanSandboxProcesses([root, ...(process.env.HERMES_E2E_CORE_ROOT ? [process.env.HERMES_E2E_CORE_ROOT] : [])])
     } catch {
-      // best-effort
+      // a dead sandbox must not hide the temp cleanup
     }
-
+    reapRunBackends(candidate => candidate === root)
     try {
       fs.rmSync(root, { recursive: true, force: true })
     } catch {
-      // Windows may still hold a handle briefly; leave the dir rather than throw on exit.
+      // Windows can still hold a handle for a moment
     }
   })
 }
