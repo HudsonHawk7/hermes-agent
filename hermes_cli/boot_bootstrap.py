@@ -19,7 +19,6 @@ from pm.environments import install_state_dir
 import json
 import logging
 import os
-import subprocess
 import time
 from pathlib import Path
 
@@ -43,25 +42,26 @@ def read_git_head(root: Path) -> str | None:
     wholesale. The managed git comes first, a PATH git second; with
     neither, the answer is None and boot carries on — fail-open.
 
-    Cost: one ~10ms subprocess. Only checkouts pay it — a sealed tree
-    reads its stamp and never gets here — and it happens once per boot.
+    Cost: one ~10ms probe. Only checkouts pay it — a sealed tree reads its
+    stamp and never gets here — and it happens once per boot. It runs on
+    every dispatch (``maybe_run_boot_bootstrap``), so the probe is bounded:
+    ``subprocess.run``'s post-timeout ``communicate()`` is unbounded on
+    Windows once a surviving descendant holds the capture pipes, and a hung
+    git there would freeze boot instead of costing its timeout.
     """
     git = _git_binary()
     if git is None:
         return None
-    try:
-        out = subprocess.run(
-            [git, "-C", str(root), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
+    from hermes_cli._subprocess_compat import bounded_probe_run
+
+    out = bounded_probe_run(
+        [git, "-C", str(root), "rev-parse", "HEAD"],
+        timeout=10,
+        cwd=str(root),
+    )
+    if out is None or out.returncode != 0:
         return None
-    if out.returncode != 0:
-        return None
-    sha = out.stdout.strip()
+    sha = (out.stdout or "").strip()
     return sha if len(sha) >= 7 else None
 
 
