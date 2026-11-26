@@ -118,7 +118,9 @@ _STORE_ACTIONS = {
                                                 "(rest of the entry is kept)"))}
 
 
-def _batch_op_line(op: dict[str, Any]) -> str:
+def _batch_op_line(op: Any) -> str:
+    if not isinstance(op, dict):
+        return f"  - (not an object: {type(op).__name__})"
     op = op or {}
     act, content, old = op.get("action", "?"), op.get("content") or op.get("new_text") or "", op.get("old_text", "")
     if act == "remove":
@@ -173,7 +175,7 @@ _REPLACE_REMOVED = ("'replace' is not available; use 'patch'. old_text is the ex
 def destructive_ops(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """The replace/remove ops of a staged memory payload, single-op or batch shape."""
     ops = (payload.get("operations") or []) if payload.get("action") == "batch" else [payload]
-    return [op for op in ops if (op or {}).get("action") in _BG_DELETE_ACTIONS]
+    return [op for op in ops if isinstance(op, dict) and op.get("action") in _BG_DELETE_ACTIONS]
 
 
 def _background_delete_gate(store, action, operations, target="memory", content=None,
@@ -247,6 +249,19 @@ def _invalid(message: str) -> tuple[str, str]:
     return "rejected", tool_error(message, success=False)
 
 
+_OPS_SHAPE = "operations must be a list of objects with action, content, and old_text."
+
+
+def _operations_shape_error(operations: Any) -> str | None:
+    """None when every entry is an object; otherwise the error the model should read."""
+    if not isinstance(operations, list):
+        return _OPS_SHAPE
+    for index, op in enumerate(operations, 1):
+        if not isinstance(op, dict):
+            return f"operations[{index}] is not an object. {_OPS_SHAPE}"
+    return None
+
+
 def _memory_tool(action, target, content, old_text, new_text, operations, store) -> tuple[str, str]:
     """``(outcome, result_json)``: ``rejected`` when refused or held before touching the store."""
     # An omitted optional string can arrive as "" (#90468): let the new_text alias fill it.
@@ -256,8 +271,8 @@ def _memory_tool(action, target, content, old_text, new_text, operations, store)
     if target_error is not None:
         return "rejected", json.dumps(target_error)
     if operations:
-        if not isinstance(operations, list):
-            return _invalid("operations must be a list of {action, content?, old_text?} objects.")
+        if shape_error := _operations_shape_error(operations):
+            return _invalid(shape_error)
         if any(isinstance(op, dict) and op.get("action") == "replace" for op in operations):
             return _invalid(_REPLACE_REMOVED)
         denied = _background_delete_gate(store, action, operations, target)
