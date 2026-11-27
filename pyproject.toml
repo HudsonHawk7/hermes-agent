@@ -315,8 +315,6 @@ voice = [
   # cublas64_12.dll is not found or cannot be loaded" and the CPU fallback costs 6-8 s per
   # utterance. CUDA 12 major only — ctranslate2 4.8 links cublas64_12.dll.
   "nvidia-cublas-cu12==12.9.2.10; sys_platform == 'win32' and platform_machine == 'AMD64'",
-  "sounddevice==0.5.5",
-  "numpy==2.4.3",
   # faster-whisper 1.2.1 passes `metadata_errors` to av.open(), a kwarg PyAV 19
   # removed, so every local transcription dies with a TypeError (#135245). The fix
   # (SYSTRAN/faster-whisper#1495) is unreleased and faster-whisper declares only
