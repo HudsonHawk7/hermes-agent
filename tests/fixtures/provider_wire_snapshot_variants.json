@@ -574,6 +574,7 @@
   },
   "base_url": "http://127.0.0.1:8080/v1",
   "high": {
+   "max_tokens": 1024,
    "messages": [
     {
      "content": "You are a test agent.",
@@ -634,6 +635,7 @@
   },
   "model": "my-local-model",
   "off": {
+   "max_tokens": 1024,
    "messages": [
     {
      "content": "You are a test agent.",
@@ -694,6 +696,7 @@
   },
   "provider": "custom",
   "unset": {
+   "max_tokens": 1024,
    "messages": [
     {
      "content": "You are a test agent.",
