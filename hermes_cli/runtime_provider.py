@@ -1303,7 +1303,9 @@ def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_ke
     requested_provider = resolve_requested_provider(requested)
     from hermes_cli.left_core_migration import recover_for_provider
     recover_for_provider(requested_provider)
-    requested_provider = _heal_bare_custom_provider(requested_provider, config)
+    # A Desktop session can persist the bare billing class ``custom`` (see #144437 before the ladder:
+    # rungs 3-4 only match a configured identity, so an unhealed bare custom reaches OpenRouter).
+    requested_provider = _heal_bare_custom_provider(requested_provider, explicit_base_url, target_model)
     _raise_if_provider_disabled(requested_provider)
     # Same alias expansion the auxiliary client applies, so ``provider: openai`` means one thing on
     # every path (background review, curator, MoA slots, delegation) instead of "Unknown provider".
