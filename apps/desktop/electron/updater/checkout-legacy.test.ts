@@ -7,7 +7,7 @@ import { expect, it, vi } from 'vitest'
 import { type CheckoutStrategyDeps, createCheckoutStrategy } from './checkout'
 import { readSourceUpdate, type SourceUpdate } from './checkout-source'
 
-it('moves a checkout without a source probe to main, but surfaces a broken probe', async (): Promise<void> => {
+it('moves a checkout without a source probe to force/carry, but surfaces a broken probe', async (): Promise<void> => {
   const root: string = fs.mkdtempSync(path.join(os.tmpdir(), 'legacy-channel-'))
   const home: string = path.join(root, 'profile')
   const modulePath: string = path.join(root, 'hermes_cli', 'source_check.py')
@@ -56,8 +56,8 @@ it('moves a checkout without a source probe to main, but surfaces a broken probe
         fs.rmSync(modulePath)
       }
 
-      expect(await strategy.check()).toMatchObject({ supported: true, updateAvailable: true, branch: 'main' })
-      expect(await strategy.apply()).toMatchObject({ ok: true, manual: true, command: 'hermes update' })
+      expect(await strategy.check()).toMatchObject({ supported: true, updateAvailable: true, branch: 'force/carry' })
+      expect(await strategy.apply()).toMatchObject({ ok: true, manual: true, command: 'hermes update --branch force/carry' })
     }
 
     fs.writeFileSync(modulePath, 'def main():\n    raise RuntimeError("invalid channel configuration")\n')

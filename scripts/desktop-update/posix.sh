@@ -48,7 +48,7 @@
 set -u
 
 ORIGINAL_ARGS=("$@")
-INSTALL_ROOT="" BRANCH="main" CHANNEL="" DESKTOP_PID=0 RELAUNCH_TARGET=""
+INSTALL_ROOT="" BRANCH="force/carry" CHANNEL="" DESKTOP_PID=0 RELAUNCH_TARGET=""
 BRANCH_EXPLICIT=0
 RELAUNCH_CWD="" SANDBOX_FALLBACK=0 RELAUNCH_ARGS=()
 NO_GATEWAY=0
@@ -91,6 +91,10 @@ case "$DESKTOP_PID" in ''|*[!0-9]*) echo "--desktop-pid must be a pid" >&2; exit
 case "$MARKER_REFRESH_EVERY_S" in ''|0|*[!0-9]*) echo "--self-test-refresh-every must be a positive number of seconds" >&2; exit 64 ;; esac
 [ -z "$HANDOFF_RUN" ] || [[ "$HANDOFF_RUN" =~ ^[A-Za-z0-9._-]{1,128}$ ]] || { echo "--handoff-run must match [A-Za-z0-9._-]{1,128}" >&2; exit 64; }
 [ "$BRANCH_EXPLICIT" -eq 0 ] || [ -z "$CHANNEL" ] || { echo "--branch and --channel are mutually exclusive" >&2; exit 64; }
+# This fork must not check out upstream main, even if a caller still passes it.
+case "$BRANCH" in
+  main|master) BRANCH="force/carry" ;;
+esac
 TARGET_ARGS=(--branch "$BRANCH")
 [ -z "$CHANNEL" ] || TARGET_ARGS=(--channel "$CHANNEL")
 
