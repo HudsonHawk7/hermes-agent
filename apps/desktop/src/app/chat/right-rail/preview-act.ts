@@ -1021,8 +1021,6 @@ async function actWithChannels(
     return trip.kind === 'answered' ? trip.result : { error: UPLOAD_UNANSWERED, success: false }
   }
 
-  const input = activePreviewInput(owner)
-
   if (input && DRIVEN.indexOf(typed.kind) !== -1) {
     return driveAction(run, input, typed, signal)
   }

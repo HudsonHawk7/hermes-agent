@@ -1065,7 +1065,6 @@ async function scanOnce(desktop: NonNullable<Window['hermesDesktop']>, reloadKno
             await watchDiskPluginSource(desktop, known)
             await rememberPluginFingerprint(desktop, known)
           }
-          }
 
           continue
         }

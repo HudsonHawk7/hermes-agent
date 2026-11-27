@@ -779,7 +779,7 @@ export const PluginsTab = memo(function PluginsTab({
     const on = (!agent || agent.status === 'enabled') && (!desktop || desktop.status !== 'disabled')
 
     return (
-<span className="flex items-center gap-1.5">
+      <span className="flex items-center gap-1.5">
         {desktop && desktopHidden && (
           <Tip label={p.desktopHalfOffTip(pkg.name)}>
             <Button
@@ -794,12 +794,13 @@ export const PluginsTab = memo(function PluginsTab({
           </Tip>
         )}
         <CatalogSwitch
-        aria-label={pkg.name}
-        checked={on}
-        disabled={agent ? !agent.key || agentBusy(agent) : false}
-        onCheckedChange={setEnabled}
-        size="xs"
-      />
+          aria-label={pkg.name}
+          checked={on}
+          disabled={agent ? !agent.key || agentBusy(agent) : false}
+          onCheckedChange={setEnabled}
+          size="xs"
+        />
+      </span>
     )
   }
 
