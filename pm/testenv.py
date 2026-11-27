@@ -21,6 +21,14 @@ GROUPS = ("dev", "test")
 
 
 def testenv_root(project_root: Path) -> Path:
+    import os
+
+    # Optional off-C root (set after checking free space). Default stays under installs/.
+    override = (os.environ.get("HERMES_TESTENV_ROOT") or "").strip()
+    if override:
+        from pm.environments import install_key
+
+        return Path(override) / install_key(project_root) / NAME
     return install_state_dir(project_root) / NAME
 
 
@@ -43,3 +51,18 @@ def testenv_python(project_root: Path) -> Path | None:
 def parse_extras(value: str) -> list[str] | None:
     """An empty value selects default extras; commas and spaces separate overrides."""
     return value.replace(",", " ").split() or None
+
+
+def drop_testenv(project_root: Path) -> bool:
+    """Remove the test-environment tree for *project_root* after a green suite.
+
+    Keeps C: free of durable test venvs (GM no-dev-files-on-C). Returns True when
+    nothing remains under the testenv root.
+    """
+    import shutil
+
+    root = testenv_root(project_root)
+    if not root.exists():
+        return True
+    shutil.rmtree(root, ignore_errors=True)
+    return not root.exists()

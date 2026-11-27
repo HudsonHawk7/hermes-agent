@@ -89,6 +89,9 @@ print('recipes_root:', cfg.get('scene_builder', {}).get('recipes_root'))
 | 7ba601de7c4 | a broken memory operations string returns an error | A JSON-array string that cannot be parsed is no longer wrapped into a list and crashed with AttributeError. The tool returns an error naming operations as a list of objects with action, content, and old_text, before formatting or gating. Card t_d29ffc77. Upstream not opened. Not installed. |
 | 54787ed5597 | withhold a reply that names a picture which is not on this host | A final MEDIA path that is not a file is not delivered. One correction, then the honest line. Card t_747e0799. Upstream not opened. Not installed. |
 
+| 1e750cc190d | bound installs/ to live plus newest after install | After a successful pm install (and pm gc), keep the live gateway install plus the newest other state dir; drop the rest. Held locks still fail closed. Startup worktree maintenance stays orphan-only. Green run_tests drops test-environment; HERMES_TESTENV_ROOT can move it off C after a free-space check. Card t_58836784. Not installed. |
+| 9a842e9461a | empty live detection fails closed on install retention | When live install cannot be detected, skip mtime retention (orphans-only) and keep every state dir so a missed live install is never deleted. Warning logged. Test covers empty-live path. Card t_58836784. Not installed. |
+
 Add new rows here before pushing a carry. Upstream the individual fix as a normal PR from a short-lived branch off origin/main when appropriate.
 
 ## Automation
