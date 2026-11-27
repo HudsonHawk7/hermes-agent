@@ -19,15 +19,6 @@ DEFAULT_VERCEL_IMAGE = "vercel/sandbox/universal:latest"
 LEGACY_VERCEL_RUNTIME = "node24"  # the seeded pre-49 default, never a user choice
 
 
-def _aux(model: str, timeout: int) -> dict:
-    return {
-        "provider": "auto",
-        "model": model,
-        "base_url": "",
-        "api_key": "",
-        "timeout": timeout,
-        "extra_body": {},
-    }
 DEFAULT_CONFIG = {
     "model": "",
     "providers": {},
