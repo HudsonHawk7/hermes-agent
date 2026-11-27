@@ -91,6 +91,7 @@ print('recipes_root:', cfg.get('scene_builder', {}).get('recipes_root'))
 | 6e85c1ce737 | stop a killed oneshot client from leaving its turn running | A oneshot client that disconnects while it is the last viewer interrupts that turn. A desktop session keeps running so it can reattach. Card t_ef50b22c. Upstream not opened. Not installed. |
 | 6d81a9c6230 | add hermes sessions interrupt for a running turn | hermes sessions interrupt <session-id> resumes, then sends session.interrupt with that generation. It does not start a new turn. Card t_ef50b22c. Upstream not opened. Not installed. |
 | 1809e4d5dd7 | lift active_pr when a blocked author is promoted back to ready | A run that ended blocked, then a later promoted or promoted_manual event, is a resume of the named PR, not a duplicate. A crash or reclaim stays guarded. Card t_508ee6d7. Upstream not opened. Not installed. |
+| 93547304423 | desktop update never hands the checkout upstream main or master | A missing source probe, a detached HEAD and an explicit main or master land on force/carry; a real non-upstream branch is kept. The desktop-update scripts fall back to force/carry too. A set source channel is not rewritten. Card t_e909e0f1. Upstream not opened. Never upstream (fork-specific). Not installed. |
 
 Add new rows here before pushing a carry. Upstream the individual fix as a normal PR from a short-lived branch off origin/main when appropriate.
 

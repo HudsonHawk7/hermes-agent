@@ -56,10 +56,11 @@ describe('build stamp → update ownership', () => {
 })
 
 describe('buildManualUpdateCommand', () => {
-  it('bare command on main and detached HEAD', () => {
-    expect(buildManualUpdateCommand('main')).toBe('hermes update')
-    expect(buildManualUpdateCommand('HEAD')).toBe('hermes update')
-    expect(buildManualUpdateCommand(null)).toBe('hermes update')
+  it('pins force/carry when the checkout is upstream main, detached, or unknown', () => {
+    expect(buildManualUpdateCommand('main')).toBe('hermes update --branch force/carry')
+    expect(buildManualUpdateCommand('master')).toBe('hermes update --branch force/carry')
+    expect(buildManualUpdateCommand('HEAD')).toBe('hermes update --branch force/carry')
+    expect(buildManualUpdateCommand(null)).toBe('hermes update --branch force/carry')
   })
 
   it('branch-pinned for non-main checkouts', () => {

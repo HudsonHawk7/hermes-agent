@@ -61,7 +61,7 @@
 
 param(
     [string]$InstallRoot,
-    [string]$Branch = "main",
+    [string]$Branch = "force/carry",
     [ValidateSet("stable", "canary", "main")]
     [string]$Channel,
     [int]$DesktopPid = 0,
@@ -87,6 +87,10 @@ if ($MarkerOp -and -not $InstallRoot) {
 
 if ($PSBoundParameters.ContainsKey("Branch") -and $PSBoundParameters.ContainsKey("Channel")) {
     throw "-Branch and -Channel are mutually exclusive"
+}
+# This fork must not check out upstream main, even if a caller still passes it.
+if (-not $Channel -and ($Branch -eq "main" -or $Branch -eq "master")) {
+    $Branch = "force/carry"
 }
 $targetArgs = if ($Channel) { @("--channel", $Channel.ToLowerInvariant()) } else { @("--branch", $Branch) }
 
