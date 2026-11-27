@@ -298,6 +298,40 @@ def _is_fork(origin_url: Optional[str]) -> bool:
     return _norm(origin_url) not in {_norm(official) for official in OFFICIAL_REPO_URLS}
 
 
+# A force/carry checkout updates from our fork. ``hermes update`` fetches
+# origin, so origin must be this repo. The Nous remote, when one is added,
+# is named ``nous`` — never ``upstream``, which arms the local fork sync.
+FORK_ORIGIN_URLS = {
+    "https://github.com/HudsonHawk7/hermes-agent.git",
+    "git@github.com:HudsonHawk7/hermes-agent.git",
+    "https://github.com/HudsonHawk7/hermes-agent",
+    "git@github.com:HudsonHawk7/hermes-agent",
+}
+
+
+def carry_origin_refusal(origin_url: Optional[str], *, carry_checkout: bool) -> Optional[str]:
+    """Loud refusal when a carry checkout would fetch a non-fork origin.
+
+    Returns the message, or None when update may proceed. Official-repo
+    checkouts (no CARRY.md) are not refused.
+    """
+    if not carry_checkout:
+        return None
+
+    def _norm(url: str) -> str:
+        return url.rstrip("/").removesuffix(".git").lower()
+
+    if origin_url and _norm(origin_url) in {_norm(u) for u in FORK_ORIGIN_URLS}:
+        return None
+    shown = origin_url or "(no origin)"
+    return (
+        "✗ Refusing update: this checkout has CARRY.md, so origin must be "
+        "HudsonHawk7/hermes-agent.\n"
+        f"  hermes update fetches origin, and this origin is {shown}.\n"
+        "  Point origin at the fork. Name the Nous remote 'nous', never 'upstream'."
+    )
+
+
 def _has_upstream_remote(git_cmd: list[str], cwd: Path) -> bool:
     """Check if an 'upstream' remote already exists."""
     return _git_ok(git_cmd, ["remote", "get-url", "upstream"], cwd)
