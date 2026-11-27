@@ -2035,8 +2035,8 @@ def check_respawn_guard(
     (PR URL in a recent comment BY THE CARD'S OWN WORKER; re-spawning risks a
     duplicate PR — unless a handoff event followed the comment: the named
     profile must work on that PR, or a DELIBERATE re-queue followed it — a
-    dependency hand-back or an unblock, i.e. someone asked for the card to run
-    again. An automatic re-queue (crash, reclaim, timeout) still guards). The
+    dependency hand-back, an unblock, or a promote after a run that ended
+    ``blocked``. An automatic re-queue (crash, reclaim, timeout) still guards). The
     review lane skips the last two: they are
     the *inputs* to a review handoff. Stale / dead claim locks are NOT a guard reason — the reclaim
     passes own those.
@@ -2176,6 +2176,17 @@ def check_respawn_guard(
         if any(_rows_since(
                 conn, "task_events", task_id, newest_own,
                 "AND kind = 'unblocked'", strict=True)):
+            return None
+        # Exception 4 — a blocked author promoted back to ready. The worker
+        # parked itself and named the PR it will come back to, so a resume is
+        # not a duplicate implementation. ``recompute_ready`` writes
+        # ``promoted``; an operator promote writes ``promoted_manual``. Neither
+        # is a crash or a reclaim. The latest run must have ended ``blocked``:
+        # a crashed or reclaimed author has a different outcome and stays
+        # guarded, which is the duplicate-PR case this guard exists for.
+        if latest_outcome == "blocked" and any(_rows_since(
+                conn, "task_events", task_id, newest_own,
+                "AND kind IN ('promoted', 'promoted_manual')", strict=True)):
             return None
         return "active_pr"
 
