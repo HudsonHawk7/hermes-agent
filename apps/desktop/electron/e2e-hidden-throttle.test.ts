@@ -32,10 +32,14 @@ function makeTimers() {
 function makeWindow() {
   const calls: boolean[] = []
   let destroyed = false
+  let minimized = false
+  let visible = true
 
   return {
     calls,
     isDestroyed: () => destroyed,
+    isMinimized: () => minimized,
+    isVisible: () => visible,
     webContents: {
       isDestroyed: () => destroyed,
       setBackgroundThrottling(allowed: boolean) {

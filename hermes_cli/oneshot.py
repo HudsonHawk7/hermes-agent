@@ -7,8 +7,10 @@ this module keeps the pieces that path and the gateway's CLI turns reuse: the ex
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 

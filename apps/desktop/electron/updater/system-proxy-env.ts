@@ -125,14 +125,23 @@ function noProxyEnv(
 
   for (const key of NO_PROXY_KEYS) {
     env[key] = value
-    // On Windows a `No_Proxy` IS `NO_PROXY` to the child and to the relaunched app's restore, so
-    // it is saved like an exact match; marked as added, the restore would delete the user's value.
-    const own = userEnv[key] ?? (isWindows ? valuesAnyCase(userEnv, 'no_proxy')[0] : undefined)
+    // On Windows a `No_Proxy` IS `NO_PROXY` to the child, so it counts as the user's own value.
+    // Save it once, under the canonical `NO_PROXY` slot, so the relaunched app gets the user's
+    // variable back instead of a duplicate: the other case is marked as added and deleted.
+    const own = userEnv[key]
 
-    if (own === undefined) {
-      added.push(key)
-    } else {
+    if (own !== undefined) {
       env[`${SAVED_PREFIX}${key}`] = own
+    } else if (isWindows && key === NO_PROXY_KEYS[0]) {
+      const anyCase = valuesAnyCase(userEnv, 'no_proxy')[0]
+
+      if (anyCase === undefined) {
+        added.push(key)
+      } else {
+        env[`${SAVED_PREFIX}${key}`] = anyCase
+      }
+    } else {
+      added.push(key)
     }
   }
 
