@@ -1414,10 +1414,11 @@ const DESKTOP_MANAGED_SSH_RECOVERY_PATH = path.join(app.getPath('userData'), 'ma
 // Mirrors hermes_cli.profiles._PROFILE_ID_RE so we never hand the backend a
 // value its profile resolver would reject and exit on.
 const PROFILE_NAME_RE = DESKTOP_PROFILE_NAME_RE
-// Branch we track for self-update. The GUI work has merged to main, so this
-// tracks main. User can also override at runtime via
+// Branch this fork's Desktop tracks for self-update. Never upstream main:
+// that is what checked the live install out of our fork on 2026-11-23 and
+// 2026-11-26. A user can still pin a real non-upstream branch at runtime via
 // hermesDesktop.updates.setBranch().
-const DEFAULT_UPDATE_BRANCH = 'main'
+const DEFAULT_UPDATE_BRANCH = 'force/carry'
 // desktop.log lives under HERMES_HOME/logs/ so it sits next to agent.log,
 // errors.log, gateway.log produced by hermes_logging.setup_logging — one log
 // directory per user, regardless of which UI surface produced the line.
