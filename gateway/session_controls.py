@@ -1064,7 +1064,11 @@ class AuthorityConnection:
             return
         if any(other != subscription for other in live.subscribers):
             return
-        row = self.authority.db.get_session(session_id)
+        # This tree's authority keeps sessions on persistence, not the force/carry SessionDB (.db).
+        store = getattr(self.authority, "persistence", None)
+        sessions = getattr(store, "sessions", None)
+        record = sessions.get(session_id) if sessions is not None else None
+        row = record.as_session_row() if record is not None else None
         if not row or row.get('source') != 'oneshot':
             return
         ref = SessionRef(self.authority.profile_id, session_id)

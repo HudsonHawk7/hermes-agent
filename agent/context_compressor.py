@@ -3507,9 +3507,11 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
                 "model": self.model, "provider": self.provider, "base_url": self.base_url, "api_key": self.api_key,
                 "api_mode": self.api_mode,
             },
-                "messages": list(messages),
-                # No hard max_tokens by default. An opt-in wire cap is
-                # compression.summary_max_tokens, never self.max_tokens.
+            "messages": list(messages),
+            # call_llm writes the route it actually selected. The upstream rewrite dropped this carry line.
+            "route_info": _aux_route,
+            # No hard max_tokens by default. An opt-in wire cap is
+            # compression.summary_max_tokens, never self.max_tokens.
         }
         _summary_cap = self._coerce_max_tokens(getattr(self, "summary_max_tokens", None))
         if _summary_cap is not None:
