@@ -1343,3 +1343,129 @@ def test_respawn_context_carries_the_workers_own_pr_url(kanban_home: Path) -> No
 
     assert pr_url in ctx
 
+
+def _dispatch_ids(res):
+    spawned = [s[0] for s in res.spawned]
+    guarded = dict(res.respawn_guarded)
+    return spawned, guarded
+
+
+def test_active_pr_guard_lifts_when_a_blocked_author_is_promoted_back_to_ready(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parked author that is promoted back to ready must run again.
+
+    Recorded on t_ef50b22c: the author posted its PR URL, the run ended
+    ``blocked``, then the card was promoted back to ``ready``. The dispatcher
+    logged ``respawn_guarded {'reason': 'active_pr'}`` and never spawned.
+
+    ``unblocked`` and a later ``dependency_wait`` already lift. A promote does
+    not: ``recompute_ready`` writes ``promoted`` and an operator promote writes
+    ``promoted_manual``. This test uses the operator promote, so the only
+    re-queue event after the PR comment is ``promoted_manual``. A crashed or
+    reclaimed author is a different latest run and stays guarded.
+    """
+    import hermes_cli.config as cfgmod
+    import hermes_cli.profiles as profmod
+
+    monkeypatch.setattr(profmod, "profile_exists", lambda name: True)
+    monkeypatch.setattr(
+        cfgmod, "load_config", lambda *a, **k: {"kanban": {"review_dispatch": True}},
+    )
+    pr_comment = "Opened https://github.com/example/repo/pull/75 for review."
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="author waits on review", assignee="dev")
+        claimed = kb.claim_task(conn, tid)
+        assert claimed is not None
+        kb.add_comment(conn, tid, author="dev", body=pr_comment)
+        _backdate_comments(conn, tid, seconds=5)
+        assert kbd.check_respawn_guard(conn, tid) == "active_pr"
+
+        assert kb.block_task(
+            conn, tid, reason="waiting on review", kind="needs_input",
+            expected_run_id=claimed.current_run_id,
+        ) is True
+        run = _last_run(conn, tid)
+        assert run is not None and run["outcome"] == "blocked"
+        assert kb.promote_task(
+            conn, tid, actor="operator", reason="review passed",
+        ) == (True, None)
+        row = kb.get_task(conn, tid)
+        assert row is not None and row.status == "ready"
+        assert _events(conn, tid, "promoted_manual")
+        assert not _events(conn, tid, "unblocked")
+        assert not _events(conn, tid, "dependency_wait")
+
+        res = kbd.dispatch_once(conn, dry_run=True)
+        spawned, guarded = _dispatch_ids(res)
+        assert guarded.get(tid) is None, guarded
+        assert tid in spawned
+
+
+def test_active_pr_guard_lifts_when_promote_follows_a_same_second_dependency_wait(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``promoted`` itself must lift a blocked author, not only ``dependency_wait``.
+
+    A dependency hand-back strictly after the PR comment already lifts. A
+    same-second tie stays guarded (fail closed), and the later ``promoted``
+    event from ``recompute_ready`` is what puts the card back in the ready
+    lane. That promote is the event the dispatcher saw on t_ef50b22c, and it
+    does not lift today.
+    """
+    import hermes_cli.config as cfgmod
+    import hermes_cli.profiles as profmod
+
+    monkeypatch.setattr(profmod, "profile_exists", lambda name: True)
+    monkeypatch.setattr(
+        cfgmod, "load_config", lambda *a, **k: {"kanban": {"review_dispatch": True}},
+    )
+    pr_comment = "Opened https://github.com/example/repo/pull/75 for review."
+
+    with kbc.connect() as conn:
+        parent = kb.create_task(conn, title="review", assignee="reviewer")
+        tid = kb.create_task(conn, title="author waits on review", assignee="dev")
+        claimed = kb.claim_task(conn, tid)
+        assert claimed is not None
+        kb.add_comment(conn, tid, author="dev", body=pr_comment)
+        kb.link_tasks(conn, parent, tid, expected_child_run_id=claimed.current_run_id)
+        assert kb.block_task(
+            conn, tid, reason="waiting on review", kind="dependency",
+            expected_run_id=claimed.current_run_id,
+        ) is True
+        run = _last_run(conn, tid)
+        assert run is not None and run["outcome"] == "blocked"
+        # Tie the hand-back to the comment so the dependency_wait lift cannot
+        # fire, and put both before now so the promote that follows is the
+        # only later re-queue event. A same-second tie stays guarded.
+        with kb.write_txn(conn):
+            comment_ts = conn.execute(
+                "SELECT created_at FROM task_comments WHERE task_id = ? "
+                "ORDER BY id DESC LIMIT 1",
+                (tid,),
+            ).fetchone()[0]
+            tied = int(comment_ts) - 60
+            conn.execute(
+                "UPDATE task_comments SET created_at = ? WHERE task_id = ?",
+                (tied, tid),
+            )
+            conn.execute(
+                "UPDATE task_events SET created_at = ? "
+                "WHERE task_id = ? AND kind = 'dependency_wait'",
+                (tied, tid),
+            )
+        assert kbd.check_respawn_guard(conn, tid) == "active_pr"
+
+        assert kb.claim_task(conn, parent) is not None
+        assert kb.complete_task(conn, parent, summary="review passed") is True
+        kb.recompute_ready(conn)
+        row = kb.get_task(conn, tid)
+        assert row is not None and row.status == "ready"
+        assert _events(conn, tid, "promoted")
+
+        res = kbd.dispatch_once(conn, dry_run=True)
+        spawned, guarded = _dispatch_ids(res)
+        assert guarded.get(tid) is None, guarded
+        assert tid in spawned
+
