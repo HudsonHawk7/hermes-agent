@@ -1119,16 +1119,19 @@ def queue_missing_media_note(runner, session_key: str, paths: list) -> None:
     )
 
 
-def rewrite_missing_media_directives(text: str, session_key: str = "") -> tuple[str, list[str]]:
-    """Replace MEDIA tags whose files are not on this host with the chat notice.
+def missing_host_media_spans(text: str, session_key: str = "") -> list[tuple[int, int, str]]:
+    """Spans of MEDIA tags whose files are not on this host.
 
-    ``_validated_delivery_path`` still logs the Skipping WARNING. A file that exists
-    but is denied by policy is left alone. Tags inside code or quotes are not rewritten.
+    One scan for delivery rewrite and the agent-loop correction. Uses
+    ``MEDIA_TAG_CLEANUP_RE`` and ``_validated_delivery_path``. A URL or a
+    ``data:`` payload does not match the path pattern and is ignored. A file
+    that exists but is denied by policy is left alone. Tags inside code or
+    quotes are not scanned.
     """
     if not text or "MEDIA:" not in text.upper():
-        return text, []
+        return []
     scan = _mask_media_scan_text(text)
-    replacements: list[tuple[int, int, str]] = []
+    found: list[tuple[int, int, str]] = []
     for match in MEDIA_TAG_CLEANUP_RE.finditer(scan):
         raw = _normalize_media_tag_path(match.group("path"))
         if not raw:
@@ -1139,19 +1142,48 @@ def rewrite_missing_media_directives(text: str, session_key: str = "") -> tuple[
         reason = (dropped[0].get("reason") if dropped else "") or ""
         if reason != "not found on this host":
             continue
-        replacements.append((match.start(), match.end(), raw))
-    if not replacements:
+        found.append((match.start(), match.end(), raw))
+    return found
+
+
+def missing_host_media_paths(text: str, session_key: str = "") -> list[str]:
+    """Absolute MEDIA paths in ``text`` that are not files on this host."""
+    return [raw for _start, _end, raw in missing_host_media_spans(text, session_key)]
+
+
+def strip_missing_media_directives(text: str, session_key: str = "") -> tuple[str, list[str]]:
+    """Remove missing MEDIA tags. Does not insert the delivery notice."""
+    spans = missing_host_media_spans(text, session_key)
+    if not spans:
         return text, []
+    return _splice_media_spans(text, spans, ""), [raw for _start, _end, raw in spans]
+
+
+def rewrite_missing_media_directives(text: str, session_key: str = "") -> tuple[str, list[str]]:
+    """Replace MEDIA tags whose files are not on this host with the chat notice.
+
+    ``_validated_delivery_path`` still logs the Skipping WARNING. A file that exists
+    but is denied by policy is left alone. Tags inside code or quotes are not rewritten.
+    """
+    spans = missing_host_media_spans(text, session_key)
+    if not spans:
+        return text, []
+    return (
+        _splice_media_spans(text, spans, MISSING_MEDIA_NOTICE),
+        [raw for _start, _end, raw in spans],
+    )
+
+
+def _splice_media_spans(text: str, spans: list[tuple[int, int, str]], replacement: str) -> str:
     parts: list[str] = []
     cursor = 0
-    missing: list[str] = []
-    for start, end, raw in replacements:
+    for start, end, _raw in spans:
         parts.append(text[cursor:start])
-        parts.append(MISSING_MEDIA_NOTICE)
-        missing.append(raw)
+        if replacement:
+            parts.append(replacement)
         cursor = end
     parts.append(text[cursor:])
-    return re.sub(r"\n{3,}", "\n\n", "".join(parts)).strip(), missing
+    return re.sub(r"\n{3,}", "\n\n", "".join(parts)).strip()
 
 
 SUPPORTED_DOCUMENT_TYPES = {

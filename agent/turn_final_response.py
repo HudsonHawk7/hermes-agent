@@ -32,8 +32,39 @@ logger = logging.getLogger("agent.conversation_loop")
 # Ephemeral retry scaffolding rows popped before the final answer becomes durable.
 _EPHEMERAL_SCAFFOLDING_FLAGS = (
     "_thinking_prefill", "_empty_recovery_synthetic", "_empty_terminal_sentinel",
-    "_dropped_toolcall_nudge",
+    "_dropped_toolcall_nudge", "_missing_media_nudge",
 )
+
+# Delivered when a second reply still names a file that is not on this host.
+_HONEST_MISSING_MEDIA_LINE = "I couldn't attach those"
+
+
+def _missing_media_correction(paths: list[str]) -> str:
+    shown = "\n".join(f"- {path}" for path in paths)
+    return (
+        "These MEDIA files are not on this host:\n"
+        f"{shown}\n"
+        "Do not send MEDIA lines for files that do not exist. "
+        "Create them with your image or video generation tools, "
+        "or tell the user plainly that you could not."
+    )
+
+
+def _host_missing_media_paths(text: str) -> list[str]:
+    if not text or "MEDIA:" not in text.upper():
+        return []
+    from gateway.platforms.base import missing_host_media_paths
+    return missing_host_media_paths(text)
+
+
+def _honest_missing_media_text(text: str) -> str:
+    from gateway.platforms.base import strip_missing_media_directives
+    stripped, _paths = strip_missing_media_directives(text or "")
+    line = _HONEST_MISSING_MEDIA_LINE
+    body = (stripped or "").strip()
+    if line in body:
+        return body
+    return f"{body}\n\n{line}" if body else line
 
 
 @dataclass
@@ -356,6 +387,40 @@ def finish_text_response(
         agent._session_messages = messages
         final_response = None
         return _verdict("continue")
+
+    # A final reply that names a picture or video which is not on this host is
+    # not delivered. The model gets one correction, then one more chance. A
+    # second miss is sent with those directives removed and one honest line.
+    missing_media = _host_missing_media_paths(final_response or "")
+    if missing_media and getattr(agent, "_missing_media_continuations", 0) < 1:
+        agent._missing_media_continuations = 1
+        agent._missing_media_withheld = True
+        logger.info(
+            "withholding final reply: %d MEDIA path(s) not on this host — one correction",
+            len(missing_media),
+        )
+        final_msg["_missing_media_nudge"] = True
+        append_message(messages, final_msg)
+        append_message(messages, {
+            "role": "user",
+            "content": _missing_media_correction(missing_media),
+            "_missing_media_nudge": True,
+        })
+        agent._session_messages = messages
+        final_response = None
+        return _verdict("continue")
+    if missing_media:
+        agent._missing_media_pre_rewrite = final_response
+        final_response = _honest_missing_media_text(final_response or "")
+        if _promoted:
+            final_msg["api_content"] = final_response
+        else:
+            final_msg["content"] = final_response
+        agent._missing_media_rewrote_final = True
+        logger.info(
+            "second reply still names %d missing MEDIA path(s) — delivering the honest line",
+            len(missing_media),
+        )
 
     # Genuine turn end (no dropped-tool-call mismatch): clear stall budget.
     agent._dropped_toolcall_retries = 0

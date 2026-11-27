@@ -1046,6 +1046,7 @@ class AuthorityConnection:
             for session_id, subscription in list(self.subscriptions.items()):
                 live = self.authority.sessions.get(session_id)
                 if live is not None and subscription in live.subscribers:
+                    await self._interrupt_abandoned_oneshot(session_id, subscription)
                     await self.authority.detach(self.actor, subscription, orphaned=True)
             # Kept in the background by this client: losing it orphans them too, unless another viewer holds one.
             from gateway.session_viewer_close import arm_detached_orphan_close
@@ -1055,3 +1056,25 @@ class AuthorityConnection:
         unbind_native_transport(self.authority, self.actor)
         self.subscriptions.clear()
         self.authority.events.pop(self.actor.transport_id, None)
+
+    async def _interrupt_abandoned_oneshot(self, session_id, subscription):
+        """A killed oneshot client has nobody left to stop the turn. Desktop reattach is not oneshot."""
+        live = self.authority.sessions.get(session_id)
+        if live is None or subscription not in live.subscribers:
+            return
+        if any(other != subscription for other in live.subscribers):
+            return
+        row = self.authority.db.get_session(session_id)
+        if not row or row.get('source') != 'oneshot':
+            return
+        ref = SessionRef(self.authority.profile_id, session_id)
+        try:
+            handle = self.authority._handle(ref)
+        except RuntimeStoreError:
+            return
+        if handle.execution_state != 'running':
+            return
+        try:
+            await self.interrupt(ref, {'execution_generation': handle.execution_generation})
+        except RuntimeStoreError:
+            return

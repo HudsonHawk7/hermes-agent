@@ -803,6 +803,14 @@ def finalize_turn(
             turn_id=turn_id, original_user_message=original_user_message, messages=messages,
             memory_review_due=_should_review_memory, skill_review_due=_should_review_skills,
         )
+    # A withheld or rewritten missing-MEDIA reply must replace the streamed bubble.
+    if getattr(agent, "_missing_media_rewrote_final", False) or getattr(agent, "_missing_media_withheld", False):
+        _response_transformed = True
+        if _pre_transform_response is None:
+            _pre_transform_response = getattr(agent, "_missing_media_pre_rewrite", None)
+        agent._missing_media_rewrote_final = False
+        agent._missing_media_withheld = False
+        agent._missing_media_pre_rewrite = None
 
     # Context engine observation hook: the turn finished with the finalized transcript.
     # Fail-open. ``_last_turn_usage`` is the last response's canonical usage dict, or

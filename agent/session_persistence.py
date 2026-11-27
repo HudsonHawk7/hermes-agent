@@ -28,7 +28,6 @@ from session_rules.turns import _EPHEMERAL_SCAFFOLDING_FLAGS, _IMAGE_PART_TYPES
 
 
 logger = logging.getLogger("run_agent")  # origin module's name: log records / caplog filters unchanged
-
 # Reasoning/codex fields are role-gated (assistant-only) inside _insert_message_rows.
 _ROW_REASONING_KEYS = ("reasoning", "reasoning_content", "reasoning_details", "codex_reasoning_items", "codex_message_items")
 _PERSIST_AFTER_ADMISSION_INTERRUPT = "_persist_after_admission_interrupt"
