@@ -1213,6 +1213,7 @@ def _switch_branch_at_commit_point(git_cmd, branch, target_ref, *, pre, stash):
                 f"'{branch}' moved to {landed[:10]} during the switch; re-run `hermes update`"))
         if result.returncode == 0:
             interrupted_pull_marker(root).unlink(missing_ok=True)  # git exited 0: whole at *target*
+            _commit.restore_missing_tracked(root)  # a tracked carry file must still be on disk
             return result
         if not _commit.settle_failed_tree_move(root):
             _commit.owe_restore_of(root, pre)  # owed for what the next launch's restore lands on
