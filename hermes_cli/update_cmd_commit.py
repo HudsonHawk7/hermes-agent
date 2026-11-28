@@ -29,6 +29,7 @@ from hermes_cli._early_recovery import (
     RECOVERY_CLOSURE_MANIFEST,
     blob_id,
     _lock_identity,
+    head_tracks,
     interrupted_pull_marker,
     is_object_id,
     recovery_closure_dir,
@@ -368,10 +369,16 @@ def files_added_by(git_cmd, root: Path, pre: str, target: str | None) -> list[st
 
 
 def drop_added_files(root: Path, added: list[str]) -> bool:
-    """Every one is the move's own file: git refuses to move a checkout over an untracked file.
+    """Unlink files the current commit does not track.
 
-    False when one of them is still there (the caller keeps the marker; the restore retries)."""
+    A rollback's mixed reset leaves the release's added files untracked, and ``reset --hard``
+    never touches those. A path ``HEAD`` still has is left alone: the added-list from a detached
+    upstream checkout includes carry files, and unlinking one after HEAD is the carry commit
+    deletes tracked source (the private-pictures module).
+
+    False when an untracked one is still there (the caller keeps the marker; the restore retries)."""
     root = Path(root)
+    added = [rel for rel in added if not head_tracks(root, rel)]
     gone = True
     for rel in added:
         try:
@@ -385,6 +392,43 @@ def drop_added_files(root: Path, added: list[str]) -> bool:
         except OSError:
             pass
     return gone and not any(os.path.lexists(root / rel) for rel in added)
+
+
+def restore_missing_tracked(root: Path) -> int:
+    """Put back tracked files the worktree is missing. Returns how many came back.
+
+    A checkout that returned 0 can still lack a carry file the previous tree did not have.
+    The update must not finish with that file gone.
+    """
+    root = Path(root)
+    listed = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-d", "-z"],
+        capture_output=True,
+        check=False,
+    )
+    if listed.returncode != 0:
+        return 0
+    missing = [p for p in listed.stdout.decode("utf-8", "replace").split("\0") if p]
+    if not missing:
+        return 0
+    restored = subprocess.run(
+        ["git", "-C", str(root), "checkout", "HEAD", "--pathspec-from-file=-", "--pathspec-file-nul"],
+        input="\0".join(missing).encode("utf-8"),
+        capture_output=True,
+        check=False,
+    )
+    if restored.returncode != 0:
+        return 0
+    still = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-d", "-z"],
+        capture_output=True,
+        check=False,
+    )
+    left = {p for p in still.stdout.decode("utf-8", "replace").split("\0") if p} if still.returncode == 0 else set(missing)
+    brought = [p for p in missing if p not in left]
+    if brought:
+        print(f"→ Restored {len(brought)} tracked file(s) the checkout was missing.", file=sys.stderr)
+    return len(brought)
 
 
 def tree_whole_at(git_cmd, root: Path, sha: str) -> bool:

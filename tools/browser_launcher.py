@@ -861,8 +861,8 @@ def _shared_profiles_root() -> Path:
     """Launcher state of persistent (shared) profiles, per OS user rather than per HERMES_HOME: two homes pinning
     one ``browser.user_data_dir`` drive its one Chromium, so they must see one launch record, one lease set and
     one lock. The host rendezvous root the gateway's own cross-profile locks use."""
-    from gateway.status import _get_lock_dir
-    return _get_lock_dir() / "browser-shared-profiles"
+    from gateway.status import machine_lock_dir
+    return machine_lock_dir() / "browser-shared-profiles"
 
 
 def _profile_digest(user_data_dir: str) -> str:

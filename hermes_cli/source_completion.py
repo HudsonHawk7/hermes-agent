@@ -136,6 +136,9 @@ def _complete_locked(
         expose_pm_git(root)
     except Exception as exc:
         print(f"⚠ Could not provide git for the source completion: {exc}", file=sys.stderr)
+    from hermes_cli.update_cmd_commit import restore_missing_tracked
+
+    restore_missing_tracked(root)  # never finish an update with a tracked file gone
     owed: list[tuple[str, str]] = []
 
     def step(name: str, run) -> None:

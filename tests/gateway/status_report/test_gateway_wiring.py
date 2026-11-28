@@ -148,7 +148,7 @@ def _start_the_status_watcher(monkeypatch, runner: GatewayRunner, receiver: Rece
 
 
 def _sender_locks() -> list:
-    return list(gateway_status._get_lock_dir().glob("*.lock"))
+    return list(gateway_status.machine_lock_dir().glob("*.lock"))
 
 
 def _reporter_threads() -> list[str]:
