@@ -2119,7 +2119,7 @@ def _load_config_cache_hit(path_key: str, cache_sig: Any) -> Optional[dict[str, 
 
 
 def _apply_gm_gate(config: dict[str, Any]) -> dict[str, Any]:
-    """Skip gated profile models. The key is never defaulted; a missing key is a no-op."""
+    """Skip gated profile models. A missing key uses the root Hermes home list."""
     try:
         from hermes_cli.gm_gated_models import apply_profile_model_gate
 
