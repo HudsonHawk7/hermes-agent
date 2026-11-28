@@ -98,6 +98,7 @@ print('recipes_root:', cfg.get('scene_builder', {}).get('recipes_root'))
 | 262bac30b0e | never delete a tracked file during checkout cleanup | An added-list from a detached upstream checkout includes carry files HEAD already tracks. drop_added_files and the interrupted-pull restore leave those paths alone, and a successful move restores a tracked file the worktree is missing. Card t_3a59eb71. Upstream not opened. Never upstream (fork-specific). Not installed. |
 | 4a70132c49c | a profile with no gate list uses the root models.gm_gated | A profile process reads the root Hermes home list unless that profile set the key. An unreadable or malformed root list fails closed and is logged. The list is not copied into profile files. Card t_3800ce1f. Upstream not opened. Not installed. |
 
+| 7e92a31c306 | one package that will not load does not keep the rest dark | A twin test seeds two marker'd packages, makes enablePackageDesktopHalf throw for one, and asserts the other still reaches loaded with the could-not-enable log line naming the failing package. Without the per-package catch the sweep aborts. Card t_f71da6f6. Not installed. |
 Add new rows here before pushing a carry. Upstream the individual fix as a normal PR from a short-lived branch off origin/main when appropriate.
 
 ## Automation

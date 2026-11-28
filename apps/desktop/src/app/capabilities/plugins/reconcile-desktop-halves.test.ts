@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { $pluginDecisions, $pluginRecords } from '@/contrib/plugins-store'
 import { discoverRuntimePlugins } from '@/contrib/runtime-loader'
 import type { HermesReadDirResult } from '@/global'
-import type * as HermesModule from '@/hermes'
 import { $activeProfile, $profiles } from '@/store/profile'
 import { $connection } from '@/store/session'
 
@@ -11,10 +10,30 @@ import { reconcileAgentEnabledDesktopHalves, resetDesktopHalfReconcileState } fr
 
 const getStatus = vi.fn(async () => ({ hermes_home: '/remote/box/.hermes' }))
 
+/** Per-test seam over enablePackageDesktopHalf so one package can refuse while
+ *  the rest still run through the real loader path. */
+const { enablePackageDesktopHalf } = vi.hoisted(() => ({
+  enablePackageDesktopHalf: vi.fn()
+}))
+
 vi.mock('@/hermes', async importActual => ({
-  ...(await importActual<typeof HermesModule>()),
+  ...(await importActual()),
   getStatus: () => getStatus()
 }))
+
+vi.mock('@/contrib/plugins-store', async importActual => {
+  const actual = await importActual()
+
+  enablePackageDesktopHalf.mockImplementation(
+    (packageName, opts) => actual.enablePackageDesktopHalf(packageName, opts)
+  )
+
+  return {
+    ...actual,
+    enablePackageDesktopHalf: (packageName, opts) => enablePackageDesktopHalf(packageName, opts)
+  }
+})
+
 
 const desktopPluginsRoot = vi.fn<() => Promise<string>>()
 const readDir = vi.fn<(path: string) => Promise<HermesReadDirResult>>()
@@ -25,33 +44,63 @@ const register = vi.fn()
 
 const root = '/local/.hermes/desktop-plugins'
 
-/** One unified package on disk: its desktop half copied into the app root with
- *  the marker that makes it opt-in, exactly as Electron stamps it. The folder
- *  is the package name the two halves join on. */
-function seedDiskPackage(folder: string, pluginId: string): void {
+/** One or more unified packages on disk: each desktop half copied into the app
+ *  root with the marker that makes it opt-in, exactly as Electron stamps it.
+ *  The folder is the package name the two halves join on. */
+function seedDiskPackages(...packages) {
   desktopPluginsRoot.mockResolvedValue(root)
+
   readDir.mockImplementation(async dir => {
     if (dir === root) {
-      return { entries: [{ isDirectory: true, name: folder, path: `${root}/${folder}` }] }
+      return {
+        entries: packages.map(({ folder }) => ({
+          isDirectory: true,
+          name: folder,
+          path: `${root}/${folder}`
+        }))
+      }
     }
 
-    if (dir === `${root}/${folder}`) {
-      return {
-        entries: [
-          { isDirectory: false, name: '.hermes-package.json', path: `${root}/${folder}/.hermes-package.json` },
-          { isDirectory: false, name: 'plugin.js', path: `${root}/${folder}/plugin.js` }
-        ]
+    for (const { folder } of packages) {
+      if (dir === `${root}/${folder}`) {
+        return {
+          entries: [
+            { isDirectory: false, name: '.hermes-package.json', path: `${root}/${folder}/.hermes-package.json` },
+            { isDirectory: false, name: 'plugin.js', path: `${root}/${folder}/plugin.js` }
+          ]
+        }
       }
     }
 
     return { entries: [] }
   })
-  readFileText.mockImplementation(async file =>
-    file.endsWith('.hermes-package.json')
-      ? { text: JSON.stringify({ package: folder, source: `/x/plugins/${folder}/desktop`, sourceMtimeMs: 1 }) }
-      : { text: `export default { id: ${JSON.stringify(pluginId)}, register: globalThis.__reconcileRegister }` }
-  )
-  watchPreviewFile.mockResolvedValue({ id: `w-${folder}` })
+  readFileText.mockImplementation(async file => {
+    for (const { folder, pluginId } of packages) {
+      if (file === `${root}/${folder}/.hermes-package.json`) {
+        return {
+          text: JSON.stringify({ package: folder, source: `/x/plugins/${folder}/desktop`, sourceMtimeMs: 1 })
+        }
+      }
+
+      if (file === `${root}/${folder}/plugin.js`) {
+        return {
+          text: `export default { id: ${JSON.stringify(pluginId)}, register: globalThis.__reconcileRegister }`
+        }
+      }
+    }
+
+    return { text: '' }
+  })
+  watchPreviewFile.mockImplementation(async path => {
+    const folder = packages.find(pkg => path.includes(`/${pkg.folder}/`))?.folder ?? packages[0]?.folder ?? 'pkg'
+
+    return { id: `w-${folder}` }
+  })
+}
+
+/** One unified package on disk (single-folder convenience wrapper). */
+function seedDiskPackage(folder, pluginId) {
+  seedDiskPackages({ folder, pluginId })
 }
 
 /** A backend answer for one profile: the agent halves it reports. */
@@ -71,6 +120,13 @@ beforeEach(() => {
   logLine.mockReset()
   register.mockReset()
   getStatus.mockClear()
+  enablePackageDesktopHalf.mockClear()
+
+  enablePackageDesktopHalf.mockImplementation(async (packageName, opts) => {
+    const actual = await vi.importActual('@/contrib/plugins-store')
+
+    return actual.enablePackageDesktopHalf(packageName, opts)
+  })
 
   $pluginRecords.set({})
   $pluginDecisions.set({})
@@ -244,5 +300,44 @@ describe('reconcileAgentEnabledDesktopHalves', () => {
 
     expect(done).toEqual([{ id: 'rescan-pane', packageName: 'rescan-pkg', profile: 'default' }])
     expect($pluginRecords.get()['rescan-pane'].status).toBe('loaded')
+  })
+
+  // Negative case first: without the per-package catch, one throw aborts the
+  // sweep and the good half stays dark. With the catch, the good half loads
+  // and the log names the failing package.
+  it('one package that will not load does not keep the rest dark', async () => {
+    seedDiskPackages(
+      { folder: 'broken-half', pluginId: 'broken-pane' },
+      { folder: 'good-half', pluginId: 'good-pane' }
+    )
+    await discoverRuntimePlugins()
+
+    expect($pluginRecords.get()['broken-pane']).toMatchObject({ packageName: 'broken-half', status: 'disabled' })
+    expect($pluginRecords.get()['good-pane']).toMatchObject({ packageName: 'good-half', status: 'disabled' })
+
+    const real = (await vi.importActual('@/contrib/plugins-store')).enablePackageDesktopHalf
+
+    enablePackageDesktopHalf.mockImplementation(async (packageName, opts) => {
+      if (packageName === 'broken-half') {
+        throw new Error('activate refused: missing entry')
+      }
+
+      return real(packageName, opts)
+    })
+
+    const request = agentList(
+      { name: 'broken-half', status: 'enabled' },
+      { name: 'good-half', status: 'enabled' }
+    )
+
+    const done = await reconcileAgentEnabledDesktopHalves(request as never)
+
+    expect(done).toEqual([{ id: 'good-pane', packageName: 'good-half', profile: 'default' }])
+    expect($pluginRecords.get()['good-pane'].status).toBe('loaded')
+    expect($pluginRecords.get()['broken-pane'].status).toBe('disabled')
+    expect(logLine).toHaveBeenCalledWith(
+      '[plugins] could not enable desktop half broken-half: activate refused: missing entry'
+    )
+    expect(logLine).toHaveBeenCalledWith('[plugins] enabled desktop half good-pane: agent half on in default')
   })
 })
