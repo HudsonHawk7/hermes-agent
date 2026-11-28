@@ -352,6 +352,11 @@ _SPECS = [
         _TASK_ID,
         _arg("reason", nargs="*", help="Reason/timing note (also appended as a comment)"),
         _bulk_ids("schedule"),
+        _arg("--wait-on", action="append", default=None,
+             help="Task id this park waits on. Adds a parent link when that task is on this board."),
+        _arg("--until-pr", action="append", default=None,
+             help="Wake when this PR is merged or closed. Form: owner/repo#number"),
+        _arg("--until", default=None, help="Wake at this ISO time"),
     ], help="Park one or more tasks in Scheduled (waiting on time, not human input)"),
     _cmd("unblock", [
         _reason("Optional reason/note — recorded as a comment before unblocking. Quote multi-word reasons."),
@@ -406,6 +411,11 @@ _SPECS = [
         # --help so nobody casually keeps the double-dispatcher pattern alive.
         _arg("--force", action="store_true", help=argparse.SUPPRESS),
     ], help="DEPRECATED — dispatcher now runs in the gateway. Use `hermes gateway start`."),
+    _cmd("wake-pass", [
+        _arg("--backfill", action="store_true", help="Turn park notes into wakes once"),
+        _arg("--daily", action="store_true", help="Print the daily parked list, one line each"),
+        _json_flag(),
+    ], help="Promote scheduled cards whose waits are met"),
     _cmd("watch", [
         _arg("--assignee", help="Only show events for tasks assigned to this profile"),
         _arg("--tenant", help="Only show events from tasks in this tenant"),

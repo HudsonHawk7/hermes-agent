@@ -132,13 +132,21 @@ def run_turn_start_compaction(
     active_system_prompt: Optional[str], conversation_history: Optional[list[dict[str, Any]]],
     current_turn_user_idx: int, user_message: Any, effective_task_id: str,
 ) -> CompactionOutcome:
-    """Schedule idle compaction (runs after the reply), then preflight (or the uncompressed guard)."""
+    """Compact the conversation so the next model call fits.
+
+    ``conversation_history`` is the mutable list the turn is still writing into.
+    A background review on a local chat stays on the current model and is cancelled
+    on switch so a second big model is not loaded.
+    """
     out = CompactionOutcome(
         messages=messages, active_system_prompt=active_system_prompt,
         conversation_history=conversation_history, current_turn_user_idx=current_turn_user_idx,
     )
     _idle_compaction(agent, out, system_message, user_message, effective_task_id)
     _preflight_compression(agent, out, system_message, user_message, effective_task_id)
+    from agent.turn_proactive_prune import turn_start_cold_prune
+
+    turn_start_cold_prune(agent, out, effective_task_id)
     return out
 
 
@@ -293,6 +301,11 @@ def _preflight_compression(
     _lift = getattr(_compressor, "lift_structural_backoff_if_grown", None)
     if callable(_lift):
         _lift(len(out.messages))
+    from agent.context_compressor_floor import note_fixed_prompt_floor
+    _floor_prompt = out.active_system_prompt
+    if _floor_prompt is None:
+        _floor_prompt = system_message if system_message is not None else getattr(agent, "system_prompt", "") or ""
+    note_fixed_prompt_floor(agent, _compressor, system_prompt=_floor_prompt)
     if _tc._review_fork_first_request_pending(agent) or not _tc._should_run_preflight_estimate(
         out.messages, _compressor.protect_first_n, _compressor.protect_last_n,
         _compressor.threshold_tokens,

@@ -3,159 +3,123 @@
 from __future__ import annotations
 
 import concurrent.futures
+import contextvars
+import logging
 import queue
 import threading
 
+logger = logging.getLogger(__name__)
 
-_SENTINEL = object()
+# A parked worker exits after this long without work, so a burst's threads do not outlive it by much.
+_IDLE_TIMEOUT_S = 60.0
 
 
-class _Work:
-    __slots__ = ("args", "fn", "fut", "kwargs")
+class _Worker:
+    __slots__ = ("inbox", "thread")
 
-    def __init__(self, fut, fn, args, kwargs):
-        self.fut = fut
-        self.fn = fn
-        self.args = args
-        self.kwargs = kwargs
+    def __init__(self) -> None:
+        self.thread: threading.Thread | None = None
+        self.inbox: queue.SimpleQueue = queue.SimpleQueue()
 
 
 class _UnboundedThreadExecutor(concurrent.futures.Executor):
-    """Unbounded turn pool: reuse workers, grow off the event-loop thread.
+    """Every submitted item starts at once on its own thread; no queue, no cap.
 
     ``ThreadPoolExecutor(max_workers=None)`` is NOT unbounded (it is ``min(32, cpu_count + 4)``),
-    which is the same silent queue at a larger number. Growing that pool still calls
-    ``Thread.start`` on the submitter. On the gateway that submitter is the event loop
-    (``asyncio.run_in_executor`` → ``Executor.submit``), and a stalled ``start()`` — Windows
-    commit exhaustion while a 17–23 GB model load held RAM — freezes liveness probes until
-    the watchdog exits 75.
+    which is the same silent queue at a larger number. An item goes to a parked (idle) worker when
+    one exists, otherwise to a new thread. Reuse matters because ``submit`` runs on the event loop
+    and ``Thread.start()`` waits there until the new thread gets the GIL: with many turns running,
+    every submit (the handoff watcher's 2 s idle gates included) froze the loop (#142061). Handing an
+    item to a parked worker is a queue put. A worker parked for ``idle_timeout`` exits.
 
-    No cap: a new turn must not queue behind others. Idle workers are reused so a later
-    turn does not need a new stack. New OS threads are started only on a dedicated spawner
-    thread; ``submit`` itself never calls ``Thread.start``. Exposes ``_threads`` and
-    ``_shutdown`` like ``ThreadPoolExecutor`` so ``_stop_pool`` / ``_shutdown_executor``
-    join and count its workers. Not ``tools.daemon_pool.DaemonThreadPoolExecutor(sys.maxsize)``:
-    that still grows on the caller.
+    A reused thread must look fresh to its next item: each item runs in an empty
+    ``contextvars.Context`` (what a new thread starts with), and ``reset_reused_thread_state`` drops
+    the thread-keyed state a turn leaves behind before the worker parks. A worker whose reset fails
+    is retired, never reused.
+
+    ``_threads`` holds the BUSY threads only, as before: ``_stop_pool`` / ``_shutdown_executor`` join
+    and count those. A parked worker holds no work; shutdown wakes it to exit.
     """
 
-    def __init__(self, thread_name_prefix: str = ""):
+    def __init__(self, thread_name_prefix: str = "", idle_timeout: float = _IDLE_TIMEOUT_S):
         self._prefix = thread_name_prefix
         self._threads: set = set()
+        self._idle: list[_Worker] = []
         self._shutdown = False
-        self._cancel_queued = False
         self._lock = threading.Lock()
         self._n = 0
-        self._idle = 0
-        self._work: queue.SimpleQueue = queue.SimpleQueue()
-        self._spawn: queue.SimpleQueue = queue.SimpleQueue()
-        spawner_name = f"{thread_name_prefix}-spawner" if thread_name_prefix else "unbounded-spawner"
-        self._spawner = threading.Thread(target=self._spawn_loop, name=spawner_name, daemon=True)
-        # One Thread.start at construction. Callers that construct on the loop pay this once;
-        # every later growth is on this spawner, never on submit().
-        self._spawner.start()
-        self._threads.add(self._spawner)
+        self._idle_timeout = idle_timeout
 
     def submit(self, fn, /, *args, **kwargs):
         fut: concurrent.futures.Future = concurrent.futures.Future()
-        work = _Work(fut, fn, args, kwargs)
-        # Must not call Thread.start, and must not wait on a lock the spawner holds across
-        # start(): either would stall the gateway event loop the way 11/05 did.
+        item = (fut, fn, args, kwargs)
+        # One critical section for check + hand-off/start + register (as ThreadPoolExecutor.submit does), so a
+        # concurrent shutdown() either refuses this item or sees its thread; never a live, uncounted one.
         with self._lock:
             if self._shutdown:
                 raise RuntimeError("cannot schedule new futures after shutdown")
-            if self._idle > 0:
-                self._idle -= 1
-                self._work.put(work)
-            else:
-                self._n += 1
-                self._spawn.put((work, self._n))
+            if self._idle:
+                worker = self._idle.pop()  # LIFO: the warmest thread; the coldest time out
+                self._threads.add(worker.thread)
+                worker.inbox.put(item)
+                return fut
+            self._n += 1
+            worker = _Worker()
+            # health: allow HX012 -- a worker serves many items; each runs in a fresh empty Context, as a new thread would
+            t = threading.Thread(target=self._work, args=(worker, item), name=f"{self._prefix}_{self._n}", daemon=True)
+            worker.thread = t
+            # Start BEFORE registering: at the OS thread limit start() raises, and an unstarted thread
+            # left in _threads would make shutdown's join() raise and skip the quiesce decision.
+            t.start()
+            self._threads.add(t)
         return fut
 
-    def _run_work(self, work: _Work) -> None:
-        if not work.fut.set_running_or_notify_cancel():
-            return
+    def _work(self, worker: _Worker, item) -> None:
+        while item is not None:
+            fut, fn, args, kwargs = item
+            del item
+            if fut.set_running_or_notify_cancel():
+                try:
+                    fut.set_result(contextvars.Context().run(fn, *args, **kwargs))
+                except BaseException as exc:  # health: allow BLE001 -- delivered to the item's future, as ThreadPoolExecutor does
+                    fut.set_exception(exc)
+            del fut, fn, args, kwargs  # a parked worker must not pin the last item's arguments
+            item = self._park(worker)
+
+    def _park(self, worker: _Worker):
+        """Reset this thread, then wait for its next item; None means exit."""
+        from gateway.turn_thread_reset import reset_reused_thread_state
+
         try:
-            work.fut.set_result(work.fn(*work.args, **work.kwargs))
-        except BaseException as exc:
-            work.fut.set_exception(exc)
-
-    def _worker(self, first: _Work) -> None:
-        work = first
+            reset_reused_thread_state()
+            reusable = True
+        except Exception:
+            logger.warning("turn worker state reset failed; retiring the thread", exc_info=True)
+            reusable = False
+        # Taking the lock also waits for submit() to finish registering this thread.
+        with self._lock:
+            self._threads.discard(worker.thread)
+            if self._shutdown or not reusable:
+                return None
+            self._idle.append(worker)
         try:
-            while work is not _SENTINEL:
-                self._run_work(work)
-                with self._lock:
-                    if self._shutdown and self._cancel_queued:
-                        return
-                    self._idle += 1
-                work = self._work.get()
-        finally:
+            return worker.inbox.get(timeout=self._idle_timeout)
+        except queue.Empty:
             with self._lock:
-                self._threads.discard(threading.current_thread())
-
-    def _fail(self, work: _Work, exc: BaseException) -> None:
-        if not work.fut.done():
-            work.fut.set_exception(exc)
-
-    def _spawn_loop(self) -> None:
-        while True:
-            item = self._spawn.get()
-            if item is _SENTINEL:
-                while True:
-                    try:
-                        extra = self._spawn.get_nowait()
-                    except queue.Empty:
-                        break
-                    if extra is not _SENTINEL:
-                        extra_work, _n = extra
-                        self._fail(
-                            extra_work,
-                            RuntimeError("cannot schedule new futures after shutdown"),
-                        )
-                return
-            work, n = item
-            with self._lock:
-                cancel = self._shutdown and self._cancel_queued
-            if cancel:
-                self._fail(work, RuntimeError("cannot schedule new futures after shutdown"))
-                continue
-            t = threading.Thread(
-                target=self._worker,
-                args=(work,),
-                name=f"{self._prefix}_{n}",
-                daemon=True,
-            )
-            try:
-                # Off the event loop. At the OS thread limit this raises; the Future
-                # carries it and nothing unstarted is left in _threads for shutdown to join.
-                t.start()
-            except BaseException as exc:
-                self._fail(work, exc)
-                continue
-            with self._lock:
-                self._threads.add(t)
+                if worker in self._idle:
+                    self._idle.remove(worker)
+                    return None
+            # submit() claimed this worker as the timeout fired: its item is already on the way.
+            return worker.inbox.get()
 
     def shutdown(self, wait: bool = True, *, cancel_futures: bool = False):
+        # cancel_futures is accepted for API parity only: there is no queue, so nothing is pending.
         with self._lock:
             self._shutdown = True
-            if cancel_futures:
-                self._cancel_queued = True
-            idle = self._idle
-        if cancel_futures:
-            while True:
-                try:
-                    item = self._work.get_nowait()
-                except queue.Empty:
-                    break
-                if item is not _SENTINEL:
-                    item.fut.cancel()
-        self._spawn.put(_SENTINEL)
-        # Wake idle workers (a few extra pills cover the increment-then-get race).
-        for _ in range(idle + 32):
-            self._work.put(_SENTINEL)
+            threads = list(self._threads)
+            idle, self._idle = self._idle, []
+        for worker in idle:
+            worker.inbox.put(None)
         if wait:
-            self._spawner.join()
-            with self._lock:
-                threads = [t for t in self._threads if t is not threading.current_thread()]
             for t in threads:
                 t.join()

@@ -118,7 +118,9 @@ _STORE_ACTIONS = {
                                                 "(rest of the entry is kept)"))}
 
 
-def _batch_op_line(op: dict[str, Any]) -> str:
+def _batch_op_line(op: Any) -> str:
+    if not isinstance(op, dict):
+        return f"  - (not an object: {type(op).__name__})"
     op = op or {}
     act, content, old = op.get("action", "?"), op.get("content") or op.get("new_text") or "", op.get("old_text", "")
     if act == "remove":
@@ -173,7 +175,7 @@ _REPLACE_REMOVED = ("'replace' is not available; use 'patch'. old_text is the ex
 def destructive_ops(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """The replace/remove ops of a staged memory payload, single-op or batch shape."""
     ops = (payload.get("operations") or []) if payload.get("action") == "batch" else [payload]
-    return [op for op in ops if (op or {}).get("action") in _BG_DELETE_ACTIONS]
+    return [op for op in ops if isinstance(op, dict) and op.get("action") in _BG_DELETE_ACTIONS]
 
 
 def _background_delete_gate(store, action, operations, target="memory", content=None,
@@ -247,6 +249,19 @@ def _invalid(message: str) -> tuple[str, str]:
     return "rejected", tool_error(message, success=False)
 
 
+_OPS_SHAPE = "operations must be a list of objects with action, content, and old_text."
+
+
+def _operations_shape_error(operations: Any) -> str | None:
+    """None when every entry is an object; otherwise the error the model should read."""
+    if not isinstance(operations, list):
+        return _OPS_SHAPE
+    for index, op in enumerate(operations, 1):
+        if not isinstance(op, dict):
+            return f"operations[{index}] is not an object. {_OPS_SHAPE}"
+    return None
+
+
 def _memory_tool(action, target, content, old_text, new_text, operations, store) -> tuple[str, str]:
     """``(outcome, result_json)``: ``rejected`` when refused or held before touching the store."""
     # An omitted optional string can arrive as "" (#90468): let the new_text alias fill it.
@@ -256,8 +271,8 @@ def _memory_tool(action, target, content, old_text, new_text, operations, store)
     if target_error is not None:
         return "rejected", json.dumps(target_error)
     if operations:
-        if not isinstance(operations, list):
-            return _invalid("operations must be a list of {action, content?, old_text?} objects.")
+        if shape_error := _operations_shape_error(operations):
+            return _invalid(shape_error)
         if any(isinstance(op, dict) and op.get("action") == "replace" for op in operations):
             return _invalid(_REPLACE_REMOVED)
         denied = _background_delete_gate(store, action, operations, target)
@@ -268,14 +283,14 @@ def _memory_tool(action, target, content, old_text, new_text, operations, store)
         if gate_result is not None:
             return "rejected", gate_result
         return _applied(store.apply_batch(target, operations))
-    # Reject calls that provide neither action (single-op) nor operations
-    # (batch).  Without this guard the dispatch falls through to the generic
+    # Reject calls with neither operations[] nor the legacy top-level action.
+    # Without this guard the dispatch falls through to the generic
     # "Unknown action 'None'" error, which gives the model no signal about
     # *why* the call was malformed and can trigger repeated retries. (#64291)
     if not action and not operations:
         return _invalid(
-            "Missing required parameter: provide 'action' (add/patch/remove) "
-            "or 'operations' (batch list). Got neither."
+            "Missing required parameter: 'operations', a list of {action: add/patch/remove, "
+            "content?, old_text?} changes; a single change is a one-item list."
         )
     if action == "replace":
         return _invalid(_REPLACE_REMOVED)
@@ -380,8 +395,7 @@ MEMORY_SCHEMA = {
         "checked only on the FINAL result — so a single call can remove/patch stale entries "
         "to free room AND add new ones, even when an add alone would overflow. The response "
         "reports current/limit chars and confirms completion; one batch call finishes the "
-        "update, so don't repeat it. Use the bare action/content/old_text fields only for a "
-        "single lone change.\n\n"
+        "update, so don't repeat it.\n\n"
         "WHEN: only for facts that apply to EVERY session regardless of task: who the user "
         "is, stable environment facts, standing conventions with no task home. Anything "
         "learned while doing a task (procedures, pitfalls, and the user's preferences and "
@@ -396,52 +410,45 @@ MEMORY_SCHEMA = {
         "completed-work logs, temporary TODO state (use session_search for those). Reusable "
         "procedures belong in a skill, not memory."
     ),
+    # Each field is advertised once, inside operations[]. The handler still ACCEPTS the
+    # top-level single-op shape (action/content/old_text) and the new_text alias: models
+    # drift and older transcripts replay them.
     "parameters": {
         "type": "object",
         "properties": {
-            "action": {
-                "type": "string",
-                "enum": ["add", "patch", "remove"],
-                "description": "The action to perform (single-op shape). Omit when using 'operations'."
-            },
             "target": {
                 "type": "string",
                 "enum": ["memory", "user"],
                 "description": "Which memory store: 'memory' for personal notes, 'user' for user profile."
             },
-            "content": {
-                "type": "string",
-                "description": "Required for 'add' and 'patch'. For 'add', the new entry. For 'patch', the text that replaces old_text; the rest of the entry is kept. Alias: 'new_text'."
-            },
-            "old_text": {
-                "type": "string",
-                "description": "REQUIRED for 'patch' and 'remove': text from one entry. 'patch' replaces exactly this span (it must occur once in the entry); 'remove' deletes the whole entry. Omit for 'add'."
-            },
-            "new_text": {
-                "type": "string",
-                "description": "Alias for 'content'. If both are set, 'content' wins."
-            },
             "operations": {
                 "type": "array",
                 "description": (
-                    "Batch shape: a list of operations applied atomically in one call "
-                    "against the final char budget. Preferred when making multiple changes "
-                    "or consolidating to make room. Each item is {action, content?, old_text?}."
+                    "Changes applied atomically in one call against the final char budget; "
+                    "a single change is a one-item list."
                 ),
                 "items": {
                     "type": "object",
                     "properties": {
                         "action": {"type": "string", "enum": ["add", "patch", "remove"]},
-                        "content": {"type": "string", "description": "Required for add and patch, as 'content' above."},
-                        "new_text": {"type": "string", "description": "Alias for 'content' in a batch op."},
-                        "old_text": {"type": "string", "description": "As 'old_text' above."},
+                        "content": {
+                            "type": "string",
+                            "description": ("Required for 'add' and 'patch'. For 'add', the new entry. For 'patch', "
+                                            "the text that replaces old_text; the rest of the entry is kept."),
+                        },
+                        "old_text": {
+                            "type": "string",
+                            "description": ("REQUIRED for 'patch' and 'remove': text from one entry. 'patch' replaces "
+                                            "exactly this span (it must occur once in the entry); 'remove' deletes the "
+                                            "whole entry. Omit for 'add'."),
+                        },
                     },
                     "required": ["action"],
                     "additionalProperties": False,
                 },
             },
         },
-        "required": ["target"],
+        "required": ["target", "operations"],
     },
 }
 
@@ -482,4 +489,6 @@ registry.register(
         **{k: args.get(k) for k in ("content", "old_text", "new_text", "operations")}),
     check_fn=check_memory_requirements,
     emoji="🧠",
+    # Flat single-op shape from old transcripts; memory_tool words its own missing-field errors.
+    compat_args=("action", "content", "old_text", "new_text"), self_checked_args=("target", "operations"),
     dynamic_schema_overrides=_build_memory_schema_overrides)

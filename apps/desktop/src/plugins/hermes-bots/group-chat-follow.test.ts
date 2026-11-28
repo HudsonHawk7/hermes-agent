@@ -86,7 +86,9 @@ describe('observeGroupChatLogResize', () => {
       FakeResizeObserver as unknown as typeof ResizeObserver
     )
 
-    expect(observed).toEqual([content])
+    // Composer growth and a streaming reply resize the viewport, not only the
+    // log content. Both must be observed or the room stops on an older line.
+    expect(observed).toEqual([content, viewport])
     expect(callback).toBeTruthy()
 
     // Streaming / late image while stuck → follow.

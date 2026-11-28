@@ -393,40 +393,48 @@ def consume_oauth_heal_notices() -> list[str]:
     return notes
 
 
-def _oauth_identity(entry: dict[str, Any]) -> Optional[str]:
-    """Stable account identity for an OAuth row when the token carries one.
+def _oauth_stamps(
+        entry: dict[str, Any]) -> tuple[Optional[float], Optional[float], Optional[float]]:
+    """(JWT iat, local issue stamp, expires) epoch seconds of an OAuth pair."""
+    from agent.credential_pool_timestamps import _parse_absolute_timestamp
+    claims = _decode_jwt_claims(entry.get("access_token"))
 
-    Codex / xAI access tokens are JWTs with ``sub`` / ``email`` / ``chatgpt_account_id`` claims;
-    Anthropic ``sk-ant-oat`` tokens carry none (None → lineage rests on id / token material).
+    def first(*values: Any) -> Optional[float]:
+        return next((ts for ts in map(_parse_absolute_timestamp, values) if ts), None)
+    return (first(claims.get("iat")), first(entry.get("last_refresh"), entry.get("obtained_at")),
+            first(claims.get("exp"), entry.get("expires_at_ms"), entry.get("expires_at")))
+
+
+def _sign(x: Optional[float], y: Optional[float]) -> Optional[int]:
+    """Order of two stamps when both are known, else None."""
+    return None if x is None or y is None else (x > y) - (x < y)
+
+
+def oauth_pair_order(a: dict[str, Any], b: dict[str, Any]) -> Optional[int]:
+    """1 when *a* holds the later-issued OAuth pair than *b*, -1 the earlier, 0 tied, None unstamped.
+
+    ISSUE time decides: a rotation always issues later, but not always later-expiring (the Portal
+    sets access TTLs per client and per issue), so expiry only orders pairs lacking an issue stamp
+    on either side. Equal whole-second ``iat`` claims (two rotations in one second) fall to the
+    sub-second local issue stamp, and stay a tie without one. A side with no stamp at all is older.
     """
-    from hermes_cli.auth import _nonempty_str
-    if not isinstance(entry, dict):
+    (ia, la, ea), (ib, lb, eb) = _oauth_stamps(a), _oauth_stamps(b)
+    if ia is not None and ib is not None:
+        return _sign(ia, ib) or _sign(la, lb) or 0
+    issued = _sign(ia or la, ib or lb)
+    if issued is not None:
+        return issued
+    if _sign(ea, eb):
+        return _sign(ea, eb)
+    sa, sb = (ia, la, ea), (ib, lb, eb)
+    a_any, b_any = any(v is not None for v in sa), any(v is not None for v in sb)
+    if not a_any and not b_any:
         return None
-    for token in (entry.get("access_token"), entry.get("id_token")):
-        claims = _decode_jwt_claims(token)
-        if not claims:
-            continue
-        nested = claims.get("https://api.openai.com/auth")
-        account = nested.get("chatgpt_account_id") if isinstance(nested, dict) else None
-        for value in (account, claims.get("sub"), claims.get("email")):
-            if _nonempty_str(value):
-                return value.strip()
-    return None
+    return 0 if a_any == b_any else (1 if a_any else -1)
 
 
-def _oauth_freshness(entry: dict[str, Any]) -> float:
-    """Best-effort 'how recently was this pair issued' score (epoch seconds).
-
-    A rotation always issues a later-expiring access token, so ``expires_at`` ordering identifies
-    the live copy; ``last_refresh`` and the JWT ``exp`` claim are fallbacks.
-    """
-    from agent.credential_pool import _parse_absolute_timestamp
-    stamps = [entry.get(k) for k in ("expires_at_ms", "expires_at", "last_refresh")]
-    best = max((ts for ts in map(_parse_absolute_timestamp, stamps) if ts), default=0.0)
-    if best == 0.0:
-        exp = _decode_jwt_claims(entry.get("access_token")).get("exp")
-        best = _parse_absolute_timestamp(exp) or 0.0
-    return best
+def _oauth_fresher(candidate: dict[str, Any], target: dict[str, Any]) -> bool:
+    return oauth_pair_order(candidate, target) == 1
 
 
 def _find_root_counterpart(
@@ -504,6 +512,40 @@ def heal_forked_single_use_oauth_grants(provider_id: str) -> Optional[dict[str, 
         return None
 
 
+def _heal_empty_provider_stub(
+    profile_store: dict[str, Any], root_store: dict[str, Any], provider_id: str,
+) -> Optional[bool]:
+    """Strip a profile ``providers.<id>`` block that carries no credential material.
+
+    The 10/19 xAI refresh failure left many named profiles with
+    ``tokens: {}`` + ``last_auth_error`` (and an empty pool list). That stub is not a
+    grant, but ``_load_provider_state_with_source`` used to treat any dict as a hit and
+    shadow the shared root forever. When root still holds a real grant (providers block
+    or pool row), drop the empty stub so the profile borrows root again. Returns False
+    when the stub was stripped (nothing to adopt), else None.
+    """
+    from hermes_cli.auth import _provider_block_has_credential_material
+
+    p_providers = profile_store.get("providers")
+    if not isinstance(p_providers, dict):
+        return None
+    p_block = p_providers.get(provider_id)
+    if not isinstance(p_block, dict) or _provider_block_has_credential_material(p_block):
+        return None
+    r_providers = root_store.get("providers") if isinstance(root_store, dict) else None
+    r_block = r_providers.get(provider_id) if isinstance(r_providers, dict) else None
+    root_has_grant = (
+        isinstance(r_block, dict) and _provider_block_has_credential_material(r_block)
+    )
+    if not root_has_grant:
+        _r_pool, r_rows = _pool_rows(root_store, provider_id)
+        root_has_grant = any(_is_forkable_pool_row(provider_id, row) for row in r_rows)
+    if not root_has_grant:
+        return None
+    del p_providers[provider_id]
+    return False
+
+
 def _heal_forked_provider_block(
     profile_store: dict[str, Any], root_store: dict[str, Any], provider_id: str,
     lineage_proven: bool = False) -> Optional[bool]:
@@ -517,6 +559,11 @@ def _heal_forked_provider_block(
     Returns None when nothing matched, False when the profile copy was dropped (root already
     newest), True when the profile copy was fresher and was adopted into root.
     """
+    # Empty last_auth_error stubs first: they are not grants and must not block the fork path.
+    stub = _heal_empty_provider_stub(profile_store, root_store, provider_id)
+    if stub is not None:
+        return stub
+
     p_providers, r_providers = profile_store.get("providers"), root_store.get("providers")
     if not (isinstance(p_providers, dict) and isinstance(r_providers, dict)):
         return None
@@ -537,7 +584,7 @@ def _heal_forked_provider_block(
         for key in ("access_token", "refresh_token")
     ):
         return None
-    adopted = _oauth_freshness(p_flat) > _oauth_freshness(r_flat)
+    adopted = _oauth_fresher(p_flat, r_flat)
     if adopted:
         r_providers[provider_id] = dict(p_block)
     del p_providers[provider_id]
@@ -577,7 +624,7 @@ def owned_profile_reads_root_state(
 def _adopt_if_fresher(
     target: dict[str, Any], candidate: dict[str, Any]) -> Optional[dict[str, Any]]:
     """*target* carrying *candidate*'s pair when the candidate rotated later, else None."""
-    fresher = _oauth_freshness(candidate) > _oauth_freshness(target)
+    fresher = _oauth_fresher(candidate, target)
     return _adopt_oauth_material(target, candidate) if fresher else None
 
 
@@ -695,11 +742,10 @@ class _HealPass:
         if pkce_idx is None:
             return
         pkce_row = self.r_rows[pkce_idx]
-        row_fresh = _oauth_freshness(pkce_row)
-        single_fresh = _oauth_freshness(self.root_singleton_row)
-        if row_fresh > single_fresh:
+        order = oauth_pair_order(pkce_row, self.root_singleton_row)
+        if order == 1:
             self.root_singleton_row = _adopt_oauth_material(self.root_singleton_row, pkce_row)
-        elif single_fresh > row_fresh:
+        elif order == -1:
             self.r_rows[pkce_idx] = _adopt_oauth_material(pkce_row, self.root_singleton_row)
             self.root_changed = True
 

@@ -3,6 +3,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import * as path from 'node:path'
 
+import { bindReleaseHolderConsent } from '../release-holder-consent'
 import {
   claimBridgeMarker,
   describeSkippedPrewrite,
@@ -106,10 +107,22 @@ const WITHDRAW_RETRY_MS = 250
  * for non-main (bare `hermes update` would silently switch the install
  * off-branch).
  */
+const FORK_UPDATE_BRANCH = 'force/carry'
+const UPSTREAM_GIT_BRANCHES = new Set(['main', 'master'])
+
+/**
+ * This fork's Desktop must never hand the checkout script upstream main or
+ * master. That is what checked out NousResearch/hermes-agent main on
+ * 2026-11-23 and 2026-11-26. A real non-upstream branch is kept. A missing
+ * probe, a detached HEAD, and an explicit main all land on force/carry.
+ */
+export function forkUpdateBranch(branch: string | null | undefined, fallback: string = FORK_UPDATE_BRANCH): string {
+  const chosen = branch && branch !== 'HEAD' ? branch : fallback
+  return UPSTREAM_GIT_BRANCHES.has(chosen) ? FORK_UPDATE_BRANCH : chosen
+}
+
 export function buildManualUpdateCommand(currentBranch: string | null | undefined): string {
-  return currentBranch && currentBranch !== 'HEAD' && currentBranch !== 'main'
-    ? `hermes update --branch ${currentBranch}`
-    : 'hermes update'
+  return `hermes update --branch ${forkUpdateBranch(currentBranch)}`
 }
 
 /**
@@ -135,6 +148,33 @@ export function readStampedCommit(root: string): string | null {
  */
 export interface CheckoutStrategy extends UpdaterStrategy {
   check(opts?: { force?: boolean; setChannel?: 'main' | 'stable' }): Promise<UpdaterStatusWire>
+}
+
+/**
+ * The Windows script hand-off's environment. Its `hermes update` runs under the run the
+ * close-holder consent is bound to: an id this Desktop inherited from the hand-off that
+ * relaunched it names the previous run, under which that consent never matches (#101789).
+ * Async and awaiting the shared env builder, which becomes async when it resolves the system
+ * proxy (#144894): either merge order keeps this binding with no change here.
+ */
+async function windowsHandoffEnvironment(
+  updateRoot: string,
+  hermesHome: string,
+  updateStartedAt: number,
+  runId: string | null
+): Promise<NodeJS.ProcessEnv> {
+  const env: NodeJS.ProcessEnv = {
+    ...(await sourceUpdateEnvironment(updateRoot, hermesHome)),
+    HERMES_UPDATE_STARTED_AT: String(updateStartedAt)
+  }
+
+  delete env.HERMES_UPDATE_CORRELATION_ID
+
+  if (runId) {
+    env.HERMES_UPDATE_CORRELATION_ID = runId
+  }
+
+  return env
 }
 
 export function createCheckoutStrategy(deps: CheckoutStrategyDeps): CheckoutStrategy {
@@ -304,14 +344,17 @@ export function createCheckoutStrategy(deps: CheckoutStrategyDeps): CheckoutStra
   async function check(opts: { force?: boolean; setChannel?: 'main' | 'stable' } = {}): Promise<UpdaterStatusWire> {
     const root: string = deps.resolveUpdateRoot()
 
-    // A checkout without the source probe predates source channels, so it can
-    // only be on the git line: move it to main. Its update pulls the probe in.
+    // A checkout without the source probe predates source channels. On this
+    // fork that still must not mean upstream main.
     const status: UpdaterStatusWire = (await deps.readSourceUpdate(root, opts)) ?? {
       supported: true,
       updateAvailable: true,
       behind: null,
       branch: deps.defaultUpdateBranch,
       hermesRoot: root
+    }
+    if (!status.channel) {
+      status.branch = forkUpdateBranch(status.branch, deps.defaultUpdateBranch)
     }
 
     status.mechanism = mechanism
@@ -339,7 +382,7 @@ export function createCheckoutStrategy(deps: CheckoutStrategyDeps): CheckoutStra
     const child = spawnUpdaterProcess(updater, updaterArgs, {
       cwd: deps.hermesHome,
       env: {
-        ...sourceUpdateEnvironment(updateRoot, deps.hermesHome)
+        ...(await sourceUpdateEnvironment(updateRoot, deps.hermesHome, deps.rememberLog))
       },
       detached: true,
       stdio: 'ignore'
@@ -415,7 +458,7 @@ export function createCheckoutStrategy(deps: CheckoutStrategyDeps): CheckoutStra
       return { ok: false, error: status.error ?? status.reason, message: status.message }
     }
 
-    const branch: string = status.branch ?? deps.defaultUpdateBranch
+    const branch: string = forkUpdateBranch(status.branch, deps.defaultUpdateBranch)
     const targetArgs: string[] = status.channel ? ['--channel', status.channel] : ['--branch', branch]
     const targetLabel: string = status.channel ?? branch
 
@@ -555,6 +598,7 @@ export function createCheckoutStrategy(deps: CheckoutStrategyDeps): CheckoutStra
       }
 
       plan = planned.plan
+      bindReleaseHolderConsent(updateRoot, plan.runId, deps.rememberLog)
 
       // A bare detached+hidden powershell spawn silently dies before -File
       // processing (console-subsystem init failure — see
@@ -587,10 +631,7 @@ export function createCheckoutStrategy(deps: CheckoutStrategyDeps): CheckoutStra
 
       child = spawnUpdaterProcess(wrapped.command, wrapped.args, {
         cwd: deps.hermesHome,
-        env: {
-          ...sourceUpdateEnvironment(updateRoot, deps.hermesHome),
-          HERMES_UPDATE_STARTED_AT: String(updateStartedAt)
-        },
+        env: await windowsHandoffEnvironment(updateRoot, deps.hermesHome, updateStartedAt, plan.runId),
         // Never `true` here: DETACHED_PROCESS leaves the wrapper console-less, so
         // `start /b` hands PowerShell a new VISIBLE console whose QuickEdit
         // selection can freeze the hand-off before relaunch (#103222).
@@ -727,7 +768,7 @@ export function createCheckoutStrategy(deps: CheckoutStrategyDeps): CheckoutStra
     const child = spawnUpdaterProcess(handoff.command, args, {
       cwd: deps.hermesHome,
       env: {
-        ...sourceUpdateEnvironment(updateRoot, deps.hermesHome),
+        ...(await sourceUpdateEnvironment(updateRoot, deps.hermesHome, deps.rememberLog)),
         HERMES_UPDATE_STARTED_AT: String(updateStartedAt)
       },
       detached: true,

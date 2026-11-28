@@ -11,6 +11,10 @@
 
 import type { ProfileSessionPreview } from '@hermes/plugin-sdk'
 
+import type { GroupEngine } from './group-engine'
+import type { PicturesBackLedgerEntry } from './group-picture-back'
+import type { GroupPictureSettings } from './group-picture-settings'
+
 /**
  * The compact age suffixes the sidebar's session rows render ("now", "m", "h",
  * "d"). Structural rather than an import of core's `Translations`, which the
@@ -104,6 +108,10 @@ export interface RosterRow {
   /** An offline twin of a selected bot, kept visible so the row doesn't vanish. */
   ghost?: boolean
   handle?: string
+  /** A default row whose source also has a real (pre-reservation) `hermes`
+   *  profile: that profile keeps @hermes and this row answers to @default.
+   *  Set by `claimDefaultHandles`. */
+  hermesHandleTaken?: boolean
   has_avatar?: boolean
   /** The connection's backend identity (/api/status `install_id`) when the
    *  roster source has seen it — stable across Desktops, unlike `connectionId`
@@ -120,6 +128,9 @@ export interface RosterRow {
   sourceReachable?: boolean | null
   sourceScoped?: boolean
   targetProfile?: string
+  /** Its source lists this profile but does not serve it (the Webapp's gateway
+   *  lists every installed profile and reaches only those it serves). */
+  unserved?: boolean
   /** Nullable: the gateway sends `null` for a profile with no configured role,
    *  and the create form threads its own optional title through the same shape. */
   title?: null | string
@@ -143,6 +154,7 @@ export type GroupMember = Pick<
   | 'display_name'
   | 'ghost'
   | 'handle'
+  | 'hermesHandleTaken'
   | 'installId'
   | 'name'
   | 'previous_names'
@@ -194,6 +206,8 @@ export interface GroupMessage {
    * on the desktop stage path) — never assumed from model name alone.
    */
   vision?: GroupVisionReceipt
+  /** Set when a pictures-back turn still had no image after the one retry. */
+  noPicture?: boolean
 }
 
 /** Per-member outcome for user-attached images on the turn they answered. */
@@ -221,6 +235,9 @@ export interface GroupChat {
   holdDetection?: boolean
   /** Bumped to abandon in-flight member turns from a previous round. */
   epoch?: number
+  /** Execution ownership survives membership changes. Gateway records capture
+   *  their connection, profile and room id; older records are resolved on open. */
+  engine?: GroupEngine
   /** Room-entry ids consumed while a member was held, replayed into that
    *  member's next visible turn. Keyed by the durable member key. */
   heldMessages?: Record<string, string[]>
@@ -251,6 +268,10 @@ export interface GroupChat {
   rosterOrder?: number
   /** "Pin to top" on the room row (`group-pin.ts`); the outer band of the room order. */
   pinned?: boolean
+  /** Per-room picture settings. Missing means Off, privacy ON. */
+  pictures?: GroupPictureSettings
+  /** Per-girl picture-back count. Keyed by the durable member key. */
+  picturesBackLedger?: Record<string, PicturesBackLedgerEntry>
   /** Which user-made sidebar section this group chat is filed under
    *  (`user-sections.ts`). Like a bot's `sectionId` it is membership on the
    *  item, but a group's only durable identity is its room record, so the
@@ -264,6 +285,10 @@ export interface GroupChat {
    *  the map, and the turn engine indexes it unguarded. */
   watermarks: Record<string, number>
 }
+
+export type RuntimeGroupChatKey = 'epoch' | 'running' | 'tombstone'
+
+export type DurableGroupChat = { [K in Exclude<keyof GroupChat, RuntimeGroupChatKey>]: GroupChat[K] }
 
 /**
  * One sub-question of a batch clarify, straight off the wire. `choices` and

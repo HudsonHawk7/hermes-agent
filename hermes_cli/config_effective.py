@@ -20,13 +20,15 @@ from typing import Any, Dict, Optional, Tuple
 
 from hermes_cli import config as _config
 from hermes_cli import managed_scope
+from hermes_cli.config_backend import read_config_doc
 from hermes_cli.config_read_errors import _warn_config_parse_failure
-from utils import fast_safe_load
 
 # path -> raw user mapping from the last successful parse in this process; served (through the
 # normal pipeline) when the file is later found mid-edit as broken YAML.
 _LAST_GOOD_USER_RAW: dict[str, dict[str, Any]] = {}
-# path -> (*user_signature, *managed_signature, effective, env_snapshot); see utils.file_signature.
+# path -> (*user_signature, *managed_signature, pre-gate effective, env_snapshot,
+# root_is_mapping, served). see utils.file_signature. The pre-gate copy stays so a later
+# GM Yes can keep a model without a second warning on every cache hit.
 _EFFECTIVE_CACHE: dict[str, tuple[Any, ...]] = {}
 
 
@@ -92,11 +94,20 @@ def _yes_restores(pre: Any) -> bool:
     """True when a GM Yes may now keep a model this copy would have skipped."""
     if not isinstance(pre, dict):
         return False
-    from hermes_cli.gm_gated_models import _profile_keeps, model_is_gated
+    from hermes_cli.gm_gated_models import (
+        _config_names_gate,
+        _patterns_from_root_when_unset,
+        _profile_keeps,
+        model_is_gated,
+        patterns_from_config,
+    )
 
     for name, provider in _profile_model_names(pre):
         try:
-            if model_is_gated(name, provider=provider, config=pre) and _profile_keeps(None, "profile", name):
+            gate_config = pre if _config_names_gate(pre) else _patterns_from_root_when_unset(pre)
+            if model_is_gated(
+                name, provider=provider, patterns=patterns_from_config(gate_config)
+            ) and _profile_keeps(None, "profile", name):
                 return True
         except Exception:
             return True
@@ -128,13 +139,15 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
     here, so ``{}`` sentinels and presence-sensitive bridges keep working. An absent file is an
     empty user layer (the managed layer still applies). Returns a fresh deepcopy.
 
-    Broken YAML: ``fail_closed=True`` raises the parse error (for callers that keep their own
-    last-good state); otherwise the last successfully parsed user file — in-process first, then
+    Broken YAML: ``fail_closed=True`` raises the parse error, including a non-mapping YAML root
+    (for callers that keep their own last-good state); otherwise the last successfully parsed
+    user file — in-process first, then
     the newest ``backups/config/*.good.*`` copy — is served through the same pipeline, so a
     mid-edit torn write never silently drops user overrides (same contract as ``load_config``).
     A gated model is skipped on every return unless the GM answered Yes. The cache
     keeps the pre-gate copy so that Yes can restore it without a second warning
-    on every cache hit. A disk backup with no list does not keep an unproven model."""
+    on every cache hit. A disk backup with no list does not keep an unproven model.
+    """
     from agent.safe_worker_policy import worker_config_snapshot
 
     # A frozen-policy worker is detached from the profile's files: the owner-supplied
@@ -148,10 +161,18 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
     with _config._CONFIG_LOCK:
         user_sig, cache_sig = _config._load_config_cache_sig(config_path)
         cached = _EFFECTIVE_CACHE.get(path_key)
-        if cached is not None and cache_sig is not None and cached[:8] == cache_sig:
-            if all(_config._env_ref_lookup(k) == v for k, v in cached[9].items()):
-                pre = cached[8]
-                served = cached[10] if len(cached) > 10 else None
+        n = len(cache_sig) if cache_sig is not None else 0
+        if cached is not None and cache_sig is not None and cached[:n] == cache_sig and len(cached) >= n + 4:
+            if all(_config._env_ref_lookup(k) == v for k, v in cached[n + 1].items()):
+                if fail_closed and cached[n + 2] is not True:
+                    # A previous non-strict read may have erased an invalid YAML root.
+                    loaded = read_config_doc(config_path)
+                    if loaded is not None and not isinstance(loaded, dict):
+                        raise TypeError("config.yaml root is not a mapping")
+                    cached = (*cached[:n + 2], True, cached[n + 3])
+                    _EFFECTIVE_CACHE[path_key] = cached
+                pre = cached[n]
+                served = cached[n + 3]
                 if isinstance(served, dict) and not _yes_restores(pre):
                     return copy.deepcopy(served)
                 return _serve_profile_config(pre, recovered_from=None)
@@ -159,22 +180,25 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
         raw: dict[str, Any] = {}
         recovered = False
         recovered_from: str | None = None
-        raw_hit = _config._RAW_CONFIG_CACHE.get(path_key)
-        if user_sig is not None and raw_hit is not None and raw_hit[:4] == user_sig:
-            raw = copy.deepcopy(raw_hit[4])  # one parse per process, shared with read_raw_config()
+        root_is_mapping: Optional[bool] = True if user_sig is None else None
+        raw_hit = _config._raw_config_cache_hit(path_key, user_sig) if user_sig is not None else None
+        if raw_hit is not None:
+            raw = copy.deepcopy(raw_hit)  # one parse per process, shared with read_raw_config()
             _LAST_GOOD_USER_RAW.setdefault(path_key, copy.deepcopy(raw))
         elif user_sig is not None:
             try:
-                with open(config_path, encoding="utf-8-sig") as f:
-                    loaded = fast_safe_load(f)
+                loaded = read_config_doc(config_path)
             except Exception as exc:
                 if fail_closed:
                     raise
                 raw, recovered_from = _recover_user_raw(config_path, path_key, exc)
                 recovered = True
             else:
+                root_is_mapping = loaded is None or isinstance(loaded, dict)
+                if fail_closed and not root_is_mapping:
+                    raise TypeError("config.yaml root is not a mapping")
                 raw = loaded if isinstance(loaded, dict) else {}
-                _config._RAW_CONFIG_CACHE[path_key] = (*user_sig, copy.deepcopy(raw))
+                _config._raw_config_cache_store(path_key, user_sig, copy.deepcopy(raw))
                 _LAST_GOOD_USER_RAW[path_key] = copy.deepcopy(raw)
                 # Same copy load_config keeps: a fresh process recovers from it (see _recover_user_raw).
                 # Only for the ACTIVE home — a read of another profile's file (doctor, TUI cwd lookup)
@@ -182,6 +206,13 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
                 if config_path == _config.get_config_path():
                     from hermes_cli.config_backups import backup_config
                     backup_config(config_path, "good")
+
+        if fail_closed and root_is_mapping is None:
+            # Raw-config cache hits contain only normalized dicts, not the root shape.
+            loaded = read_config_doc(config_path)
+            if loaded is not None and not isinstance(loaded, dict):
+                raise TypeError("config.yaml root is not a mapping")
+            root_is_mapping = True
 
         env_snapshot = _config._env_ref_snapshot(raw)
         managed = managed_scope.load_managed_config()
@@ -191,12 +222,13 @@ def load_user_config_effective(config_path: Optional[Path] = None, *, fail_close
         served = _serve_profile_config(effective, recovered_from=recovered_from)
         # A recovered result is never cached under the corrupt file's signature: a later
         # ``fail_closed`` caller must still see the parse error, not a cache hit.
-        # Index 8 stays the pre-gate copy so a later GM Yes can keep the model.
+        # Index n stays the pre-gate copy so a later GM Yes can keep the model.
         if cache_sig is not None and not recovered:
             _EFFECTIVE_CACHE[path_key] = (
                 *cache_sig,
                 copy.deepcopy(effective),
                 env_snapshot,
+                root_is_mapping,
                 copy.deepcopy(served),
             )
         else:

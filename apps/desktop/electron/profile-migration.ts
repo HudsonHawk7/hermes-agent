@@ -164,12 +164,68 @@ export function scoreStateDb(dbPath: string, now: number, stat: MigrationDeps['s
   return recencyWeight * sizeWeight
 }
 
+/** True when profile.yaml sets top-level desktop_startup to a false value.
+ *  A missing file or a missing key means the profile may be auto-picked.
+ *  The profile name is never special.
+ */
+export function profileOptsOutOfDesktopStartup(yaml: string): boolean {
+  for (const raw of yaml.split(/\r?\n/)) {
+    if (/^\s/.test(raw) || raw.trim() === '' || raw.trim().startsWith('#')) {
+      continue
+    }
+
+    const match = raw.match(/^desktop_startup\s*:\s*(.*?)\s*(?:#.*)?$/)
+
+    if (!match) {
+      continue
+    }
+
+    const value = match[1].trim().replace(/^['"]|['"]$/g, '').toLowerCase()
+
+    return value === 'false' || value === 'no' || value === 'off' || value === '0'
+  }
+
+  return false
+}
+
+function profileYamlPath(
+  name: string,
+  deps: Pick<MigrationDeps, 'hermesHome' | 'profilesRoot'>
+): string | null {
+  if (!deps.hermesHome || !deps.profilesRoot) {
+    return null
+  }
+
+  if (name === 'default') {
+    return `${deps.hermesHome}/profile.yaml`
+  }
+
+  return `${deps.profilesRoot}/${name}/profile.yaml`
+}
+
+function autoStartEligible(name: string, deps: MigrationDeps): boolean {
+  const yamlPath = profileYamlPath(name, deps)
+
+  if (!yamlPath || !deps.existsSync(yamlPath)) {
+    return true
+  }
+
+  try {
+    const text = deps.readFileSync(yamlPath, 'utf8')
+
+    return !profileOptsOutOfDesktopStartup(typeof text === 'string' ? text : '')
+  } catch {
+    return true
+  }
+}
+
 /**
  * Pure decision logic. Returns null when nothing migratable was found.
- * - legacy non-null → always prefer (no _migrated flag, user-chosen)
- * - running.length === 1 → prefer that profile (no flag, gateway-owned)
- * - state.db heuristic → set _migrated=true (auto-detected)
- * - best === 'default' → suppress write (single-profile fallback)
+ * - legacy non-null is an explicit choice and wins
+ * - one eligible running gateway wins
+ * - otherwise the state.db heuristic wins, and that write is marked _migrated
+ * - a profile.yaml desktop_startup false is never an auto-pick
+ * - best === 'default' suppresses the write
  */
 export function decideMigration(
   legacyActive: string | null | undefined,
@@ -182,14 +238,16 @@ export function decideMigration(
     return { profile: legacyActive }
   }
 
-  if (running.length === 1) {
-    return { profile: running[0] }
+  const eligibleRunning = running.filter(name => autoStartEligible(name, deps))
+
+  if (eligibleRunning.length === 1) {
+    return { profile: eligibleRunning[0] }
   }
 
   let best: string | null = null
   let maxScore = -Infinity
 
-  for (const name of candidates) {
+  for (const name of candidates.filter(name => autoStartEligible(name, deps))) {
     const s = score(profileStateDbPath(name, deps.hermesHome, deps.profilesRoot))
 
     if (s == null) {
@@ -234,8 +292,8 @@ export function withDefaultCandidate(named: string[]): string[] {
 
 /**
  * Read an existing active-profile.json. Returns null when missing/malformed.
- * `_migrated: true` means the first-boot heuristic wrote it (safe to re-score).
- * Absence of that flag is a user/CLI choice and must not be overwritten.
+ * A well-formed file is a pick. `_migrated` is recorded for readers, but a
+ * boot must not re-score the file because of it.
  */
 export function readExistingPreference(
   desktopProfileConfigPath: string,
@@ -263,17 +321,15 @@ export function readExistingPreference(
 }
 
 /**
- * First-boot seed, plus repair of heuristic-owned files (`_migrated: true`).
- * User-selected files (no `_migrated`) are never overwritten. When a repaired
- * heuristic would now pick default, write `{ profile: null }` so Desktop drops
- * `--profile` instead of pinning `default`.
+ * Seed active-profile.json only when it is missing or malformed.
+ * A well-formed file is a pick, flag or not, and is never re-scored.
+ * Pinning default is worse than writing nothing.
  */
 export function migrateActiveProfileIfMissing(desktopProfileConfigPath: string, deps: MigrationDeps): boolean {
   const exists: boolean = deps.existsSync(desktopProfileConfigPath)
-
   const existing = exists ? readExistingPreference(desktopProfileConfigPath, deps.readFileSync) : null
 
-  if (exists && (!existing || !existing.migrated)) {
+  if (existing) {
     return false
   }
 
@@ -287,20 +343,7 @@ export function migrateActiveProfileIfMissing(desktopProfileConfigPath: string, 
     scoreStateDb(dbPath, deps.now(), deps.statSync)
   )
 
-  // Same as the heuristic rung: pinning `default` into active-profile.json
-  // launches `hermes --profile default` and is worse than writing nothing
-  // (legacy sticky / implicit default). Covers a lone default gateway.pid.
   if (!decision || decision.profile === 'default') {
-    if (existing?.migrated) {
-      deps.writeJson(desktopProfileConfigPath, { profile: null })
-
-      return true
-    }
-
-    return false
-  }
-
-  if (existing?.migrated && existing.profile === decision.profile) {
     return false
   }
 

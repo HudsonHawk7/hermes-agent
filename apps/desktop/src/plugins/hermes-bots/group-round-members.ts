@@ -13,6 +13,13 @@ import {
 import type { GroupChatRoom } from './group-chat'
 import { groupMemberAuthor, groupMemberKey } from './group-membership'
 import {
+  nextPictureBackPrompt,
+  type PicturesBackLedgerEntry,
+  replyHasPicture,
+  settlePicturesBack
+} from './group-picture-back'
+import { normalizeGroupPictureSettings } from './group-picture-settings'
+import {
   buildGroupChatTurnPrompt,
   formatGroupDeltaLines,
   GROUP_ADDRESSED_NUDGE_SUFFIX,
@@ -144,7 +151,46 @@ function prepareGroupRoundMember(context: GroupRoundMemberContext, member: Group
   // the transcript's [attached image: …] marker.
   const deltaImages = visibleDelta.flatMap((e: GroupMessage) => (Array.isArray(e.images) ? e.images : []))
 
-  return { room, memberKey, markKey, prompt, deltaImages, heldIds }
+  // A user entry this turn is about to see for the first time: whatever the
+  // member already posted was written without it, so it answers nothing here.
+  const seesNewUserEntry = visibleDelta.some((entry: GroupMessage) => entry.from?.kind === 'user')
+
+  return { room, memberKey, markKey, prompt, deltaImages, heldIds, seesNewUserEntry }
+}
+
+/** True while the user's explicit address to `member` is unanswered in this
+ *  thread: this turn is the first to see a user entry, or the member has not
+ *  posted since the latest one. Position alone is not enough, because a turn
+ *  that started before a follow-up can land after it. */
+function memberOwesAnswer(
+  context: GroupRoundMemberContext,
+  member: GroupMember,
+  log: GroupMessage[],
+  seesNewUserEntry: boolean
+): boolean {
+  return Boolean(context.addressedKeys?.has(groupMemberKey(member))) &&
+    (seesNewUserEntry || !answeredSinceLastUser(log, member, context.thread))
+}
+
+/** True when `member` has a room entry in `thread` after the latest user entry there. */
+function answeredSinceLastUser(log: GroupMessage[], member: GroupMember, thread: string): boolean {
+  for (let i = log.length - 1; i >= 0; i--) {
+    const entry = log[i]
+
+    if (groupThreadOf(entry) !== thread) {
+      continue
+    }
+
+    if (entry.from?.kind === 'user') {
+      return false
+    }
+
+    if (authoredByMember(entry, member)) {
+      return true
+    }
+  }
+
+  return false
 }
 
 /** Each invocation owns its descriptor, so an old completion cannot clear a newer turn. */
@@ -166,6 +212,20 @@ async function runVisibleMemberTurn(
   }
 }
 
+function markLatestMemberNoPicture(group: string) {
+  updateGroupChat(
+    group,
+    (room: GroupChatRoom) => {
+      const last = room.log.at(-1)
+
+      if (last && last.from.kind === 'member') {last.noPicture = true}
+
+      return room
+    },
+    { sync: false }
+  )
+}
+
 export async function runGroupRoundMember(
   context: GroupRoundMemberContext,
   member: GroupMember
@@ -182,13 +242,27 @@ export async function runGroupRoundMember(
     return false
   }
 
-  const { room, memberKey, markKey, prompt, deltaImages, heldIds } = prepared
+  const { room, memberKey, markKey, prompt, deltaImages, heldIds, seesNewUserEntry } = prepared
   const anchorId = room.log.at(-1)?.id ?? null
+  // Owed only until the member answers: after its reply to the user's address,
+  // a pass on a teammate's reply is ordinary consensus, not noncompliance.
+  const owesAnswer = memberOwesAnswer(context, member, room.log, seesNewUserEntry)
   let reply: null | string = null
   let accepted = false
 
+  const pictureAsk = nextPictureBackPrompt(
+    prompt,
+    normalizeGroupPictureSettings(room.pictures),
+    room.picturesBackLedger?.[memberKey],
+    (deltaImages || []).some(img => !img.kind || img.kind === 'image')
+  )
+
+  const turnPrompt = pictureAsk.prompt
+  let pictureLedger: PicturesBackLedgerEntry | undefined = room.picturesBackLedger?.[memberKey]
+  let pictureBadge = false
+
   try {
-    reply = await runVisibleMemberTurn(context, member, prompt, deltaImages)
+    reply = await runVisibleMemberTurn(context, member, turnPrompt, deltaImages)
 
     // #129443: the participation rules ("reply only with something new,
     // else (pass)") let a directly addressed member pass just because a
@@ -200,8 +274,20 @@ export async function runGroupRoundMember(
     // `isCurrent()` (not the bare binding): a superseded drive's pass is
     // discarded by the epoch check right below anyway, so nudging it would
     // burn a model call whose result can never be committed.
-    if (context.isCurrent() && reply !== null && isGroupPassText(reply) && context.addressedKeys?.has(memberKey)) {
-      reply = await runVisibleMemberTurn(context, member, `${prompt}${GROUP_ADDRESSED_NUDGE_SUFFIX}`, deltaImages)
+    if (context.isCurrent() && reply !== null && isGroupPassText(reply) && owesAnswer) {
+      reply = await runVisibleMemberTurn(context, member, `${turnPrompt}${GROUP_ADDRESSED_NUDGE_SUFFIX}`, deltaImages)
+    }
+
+    if (context.isCurrent() && reply !== null) {
+      let settled = settlePicturesBack(pictureLedger, pictureAsk.owed, replyHasPicture(reply))
+
+      if (settled.askAgain) {
+        reply = await runVisibleMemberTurn(context, member, turnPrompt, deltaImages)
+        settled = settlePicturesBack(settled.entry, true, replyHasPicture(reply))
+      }
+
+      pictureLedger = settled.entry
+      pictureBadge = settled.badge
     }
 
     accepted = true
@@ -303,6 +389,10 @@ export async function runGroupRoundMember(
         }
       }
 
+      if (pictureLedger) {
+        r.picturesBackLedger = { ...(r.picturesBackLedger || {}), [memberKey]: pictureLedger }
+      }
+
       return r
     })
   }
@@ -318,11 +408,17 @@ export async function runGroupRoundMember(
       undefined,
       takeMemberTurnVision(memberKey)
     )
+
+    if (pictureBadge) {markLatestMemberNoPicture(context.group)}
+  } else if (pictureBadge) {
+    appendGroupChatEntry(context.group, groupMemberAuthor(member), 'no picture', thread)
+    markLatestMemberNoPicture(context.group)
+    takeMemberTurnVision(memberKey)
   } else {
     // Pass / timeout / failed: drain so the next turn cannot inherit this receipt.
     takeMemberTurnVision(memberKey)
 
-    if (reply !== null && context.isCurrent() && context.addressedKeys?.has(memberKey)) {
+    if (reply !== null && context.isCurrent() && owesAnswer) {
       // #129443: the nudge was passed on too. Record the noncompliance where
       // the user looks (activity row + roster badge) instead of letting the
       // user's explicit address settle as ordinary quiet consensus. Only a

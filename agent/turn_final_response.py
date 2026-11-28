@@ -9,13 +9,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from agent.message_metadata import append_message
 from agent.reasoning_promotion import answer_in_reasoning_capability
 from agent.repetition_guard import STOP_PATH_MIN_CHARS, is_runaway_repetition
+from agent.stream_delivery import publish_held_final_row
 from agent.turn_failure_copy import stamp_failure
-from agent.turn_empty_response import recover_empty_response
+from agent.turn_empty_response import (
+    housekeeping_reply_line, recover_empty_response, take_housekeeping_reply_line,
+)
 from agent.turn_stop_gates import apply_stop_gates
 from agent.turn_truncation import partial_result, repetition_copy
 
@@ -29,8 +32,39 @@ logger = logging.getLogger("agent.conversation_loop")
 # Ephemeral retry scaffolding rows popped before the final answer becomes durable.
 _EPHEMERAL_SCAFFOLDING_FLAGS = (
     "_thinking_prefill", "_empty_recovery_synthetic", "_empty_terminal_sentinel",
-    "_dropped_toolcall_nudge",
+    "_dropped_toolcall_nudge", "_missing_media_nudge",
 )
+
+# Delivered when a second reply still names a file that is not on this host.
+_HONEST_MISSING_MEDIA_LINE = "I couldn't attach those"
+
+
+def _missing_media_correction(paths: list[str]) -> str:
+    shown = "\n".join(f"- {path}" for path in paths)
+    return (
+        "These MEDIA files are not on this host:\n"
+        f"{shown}\n"
+        "Do not send MEDIA lines for files that do not exist. "
+        "Create them with your image or video generation tools, "
+        "or tell the user plainly that you could not."
+    )
+
+
+def _host_missing_media_paths(text: str) -> list[str]:
+    if not text or "MEDIA:" not in text.upper():
+        return []
+    from gateway.platforms.base import missing_host_media_paths
+    return missing_host_media_paths(text)
+
+
+def _honest_missing_media_text(text: str) -> str:
+    from gateway.platforms.base import strip_missing_media_directives
+    stripped, _paths = strip_missing_media_directives(text or "")
+    line = _HONEST_MISSING_MEDIA_LINE
+    body = (stripped or "").strip()
+    if line in body:
+        return body
+    return f"{body}\n\n{line}" if body else line
 
 
 @dataclass
@@ -53,6 +87,53 @@ class FinalResponseVerdict:
     result: Optional[dict[str, Any]] = None
 
 
+def _bare_marker_after_reply(agent: Any, final_response: Any, *, truncated_parts: Any = None,
+                             promoted: Any = None) -> bool:
+    """End this turn on the reply written beside a housekeeping round instead of its bare marker:
+    only when the host says a marker may not stay silent (``_silence_marker_needs_reply``), for a
+    complete uninterrupted response, and only when a real (non-marker) reply line exists."""
+    from gateway.response_filters import is_intentional_silence_response
+
+    if (getattr(agent, "_silence_marker_needs_reply", False) is not True or truncated_parts or promoted
+            or getattr(agent, "_interrupt_requested", False)):
+        return False
+    reply = housekeeping_reply_line(agent)
+    return (bool(reply) and not is_intentional_silence_response(reply)
+            and is_intentional_silence_response(agent._strip_think_blocks(final_response or "").strip()))
+
+
+def _recover_marker_reply(
+    agent: Any, final_response: Any, verdict: Callable[[str], FinalResponseVerdict], *,
+    truncated_parts: Any, promoted: Any,
+) -> Optional[FinalResponseVerdict]:
+    """Select a completed housekeeping reply before output transforms and persistence.
+
+    Keep the caller's loop state, changing only the chosen final and its exit reason.
+    Other hosts and permitted silence continue through normal text handling.
+    """
+    if not _bare_marker_after_reply(agent, final_response, truncated_parts=truncated_parts, promoted=promoted):
+        return None
+    result = verdict("break")
+    result.final_response = take_housekeeping_reply_line(agent)
+    result._turn_exit_reason = "fallback_prior_turn_content"
+    logger.info("Silence marker after a written reply: using that reply as the final response")
+    return result
+
+
+def _absorb_continuation_fragments(final_response: Any, parts: Any, messages: Any) -> tuple[Any, bool]:
+    """Stitch length-continuation fragments in front of the closing piece; True when there were
+    any. The continuation recovered, so the fragment rows stay in the transcript, unflagged."""
+    if not parts:
+        return final_response, False
+    from agent.conversation_loop import _join_truncated_parts
+
+    for frag in messages:
+        if isinstance(frag, dict):
+            frag.pop("_length_continuation_fragment", None)
+            frag.pop("_length_continuation_nudge", None)
+    return _join_truncated_parts([*parts, (final_response, False)]), True
+
+
 def finish_text_response(
     agent: Any, *, assistant_message: Any, response: Any, finish_reason: Any, messages: Any,
     api_messages: Any, conversation_history: Any, api_call_count: Any, user_message: Any,
@@ -68,7 +149,6 @@ def finish_text_response(
     stop gates accept it."""
     from agent.conversation_loop import (
         _CODEX_ACK_CONTINUATION_NUDGE, _DEGENERATE_FINAL_NUDGE, _DROPPED_TOOLCALL_NUDGE_CONTENT,
-        _join_truncated_parts
     )
 
     def _verdict(action: str, result: Optional[dict[str, Any]] = None) -> FinalResponseVerdict:
@@ -141,18 +221,15 @@ def finish_text_response(
         active_system_prompt = _ev.active_system_prompt
         _preflight_compression_blocked = _ev.preflight_compression_blocked
         api_call_count = _ev.api_call_count
-        if _ev.action == "return":
-            return _verdict("return", _ev.result)
-        if _ev.action == "break":
-            return _verdict("break")
-        return _verdict("continue")
+        return _verdict(_ev.action, _ev.result)
 
     agent._empty_content_retries = 0
     agent._thinking_prefill_retries = 0
-    # Surface the one-shot fallback switch notice before dropping the retry buffer so a
-    # provider/model switch stays visible on success.
-    agent._emit_pending_fallback_notice()
     agent._clear_status_buffer()
+
+    if marker_verdict := _recover_marker_reply(
+            agent, final_response, _verdict, truncated_parts=truncated_response_parts, promoted=_promoted):
+        return marker_verdict
 
     # Defensive: repair malformed role-alternation before API call. Catches cases where the history got
     # wedged into a ``tool → user`` or ``user → user`` tail (e.g. after empty- response scaffolding was
@@ -250,15 +327,9 @@ def finish_text_response(
 
     codex_ack_continuations = 0
 
-    if truncated_response_parts:
-        final_response = _join_truncated_parts([*truncated_response_parts, (final_response, False)])
-        truncated_response_parts = []
-        length_continue_retries = 0
-        # The continuation recovered, so the fragments stay in the transcript.
-        for _frag in messages:
-            if isinstance(_frag, dict):
-                _frag.pop("_length_continuation_fragment", None)
-                _frag.pop("_length_continuation_nudge", None)
+    final_response, _joined = _absorb_continuation_fragments(final_response, truncated_response_parts, messages)
+    if _joined:
+        truncated_response_parts, length_continue_retries = [], 0
 
     final_response = agent._strip_think_blocks(final_response).strip()
 
@@ -286,7 +357,7 @@ def finish_text_response(
         # real reply; ``build_api_messages`` substitutes ``api_content`` on the wire.
         final_msg["api_content"] = final_response
 
-    # Dropped tool-call recovery (copilot/Claude): finish_reason="tool_calls" with empty
+    # Dropped tool-call recovery (seen with Claude via gateways): finish_reason="tool_calls" with empty
     # tool_calls would end the turn unstarted; re-prompt (max 3 CONSECUTIVE stalls).
     if (
         finish_reason == "tool_calls"
@@ -316,6 +387,40 @@ def finish_text_response(
         agent._session_messages = messages
         final_response = None
         return _verdict("continue")
+
+    # A final reply that names a picture or video which is not on this host is
+    # not delivered. The model gets one correction, then one more chance. A
+    # second miss is sent with those directives removed and one honest line.
+    missing_media = _host_missing_media_paths(final_response or "")
+    if missing_media and getattr(agent, "_missing_media_continuations", 0) < 1:
+        agent._missing_media_continuations = 1
+        agent._missing_media_withheld = True
+        logger.info(
+            "withholding final reply: %d MEDIA path(s) not on this host — one correction",
+            len(missing_media),
+        )
+        final_msg["_missing_media_nudge"] = True
+        append_message(messages, final_msg)
+        append_message(messages, {
+            "role": "user",
+            "content": _missing_media_correction(missing_media),
+            "_missing_media_nudge": True,
+        })
+        agent._session_messages = messages
+        final_response = None
+        return _verdict("continue")
+    if missing_media:
+        agent._missing_media_pre_rewrite = final_response
+        final_response = _honest_missing_media_text(final_response or "")
+        if _promoted:
+            final_msg["api_content"] = final_response
+        else:
+            final_msg["content"] = final_response
+        agent._missing_media_rewrote_final = True
+        logger.info(
+            "second reply still names %d missing MEDIA path(s) — delivering the honest line",
+            len(missing_media),
+        )
 
     # Genuine turn end (no dropped-tool-call mismatch): clear stall budget.
     agent._dropped_toolcall_retries = 0
@@ -356,6 +461,7 @@ def finish_text_response(
             final_msg["api_content"] = final_response
         else:
             final_msg["content"] = final_response
+    publish_held_final_row(agent, final_msg, final_response, _joined)
 
     append_message(messages, final_msg)
     # Make the answer durable before leaving the loop (_DB_PERSISTED_MARKER keeps

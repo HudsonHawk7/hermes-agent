@@ -51,6 +51,7 @@ class PromptSubmitParams(SessionParams):
     turn_author: JsonValue | None = Field(default=None, exclude=True, alias="_turn_author")
     hosted_terminal_callback: JsonValue | None = Field(
         default=None, exclude=True, alias="_hosted_terminal_callback")
+    hosted_images: JsonValue | None = Field(default=None, exclude=True, alias="_hosted_images")
 
 
 class PromptSubmitStatus(WireEnum):
@@ -125,12 +126,14 @@ method("image.attach", params=ImageAttachParams, result=AttachedImageResult,
 
 class ImageAttachBytesParams(SessionParams):
     """``content_base64`` (or the ``data`` alias) carries the bytes; ``filename`` / ``ext`` only hint
-    the extension — magic bytes decide."""
+    the extension — magic bytes decide. ``privacy`` is the group-chat flag (bool or ``true`` / ``false``);
+    the canonical dispatcher refuses an undeclared key before the handler."""
 
     content_base64: str | None = None
     data: str | None = None
     filename: str | None = None
     ext: str | None = None
+    privacy: bool | str | None = None
 
 
 method("image.attach_bytes", params=ImageAttachBytesParams, result=AttachedImageResult,
@@ -167,6 +170,14 @@ method("pdf.attach", params=PdfAttachParams, result=PdfAttachResult,
        doc="Render a PDF's pages to PNG and queue them as images for the next turn.")
 
 
+class StagedFileUpload(Params):
+    """Source identity returned by the browser upload route, checked against the live profile."""
+
+    install_id: str
+    path: str
+    profile_home: str
+
+
 class FileAttachParams(SessionParams):
     """``path`` when the file is gateway-visible, else ``data_url`` carries the bytes; ``name`` labels
     an uploaded file."""
@@ -174,6 +185,7 @@ class FileAttachParams(SessionParams):
     path: str | None = None
     data_url: str | None = None
     name: str | None = None
+    staged_upload: StagedFileUpload | None = None
 
 
 class FileAttachResult(Result):
@@ -321,11 +333,13 @@ method("approval.received", params=ApprovalReceivedParams, result=ApprovalReceiv
 
 class ApprovalRespondParams(SessionParams):
     """``choice`` is one of the offered ``approval`` choices (once / session / always / deny); ``all``
-    resolves every pending approval, ``request_id`` a specific one, neither the oldest."""
+    resolves every pending approval, ``request_id`` a specific one, neither the oldest. ``reason`` is
+    why the user denied an ``access`` or ``network`` card; command approvals ignore it."""
 
     choice: str | None = None  # default "deny"
     all: bool | None = None
     request_id: str | None = None
+    reason: str | None = None
 
 
 class ApprovalRespondResult(Result):

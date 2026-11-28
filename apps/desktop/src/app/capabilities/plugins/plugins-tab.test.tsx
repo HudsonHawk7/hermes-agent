@@ -429,6 +429,33 @@ describe('PluginsTab', () => {
       expect(screen.getByRole('switch', { name: 'Desktop: Meter' }).getAttribute('aria-checked')).toBe('true')
     )
     expect($pluginDecisions.get()['meter-ui']).toBe(true)
+    $pluginDecisions.set({})
+  })
+
+  it('shows a package switch Off while its desktop half is off, and one click turns both halves on', async () => {
+    publishPlugin(
+      { id: 'meter-ui', name: 'Meter', kind: 'disk', status: 'disabled', packageName: 'meter' },
+      { activate: () => patchPlugin('meter-ui', { status: 'loaded' }), deactivate: () => undefined }
+    )
+    $agentPlugins.set([{ description: '', key: 'meter', name: 'meter', source: 'git', status: 'enabled', version: '1' }])
+    requestGateway.mockImplementation((async (_method: string, params?: { action?: string }) =>
+      params?.action === 'toggle'
+        ? { ok: true, plugin: { key: 'meter', name: 'meter', status: 'enabled' } }
+        : { plugins: [] }) as never)
+
+    renderPlugins({ profile: null })
+
+    const card = screen.getByRole('switch', { name: 'Meter' })
+    expect(card.getAttribute('aria-checked')).toBe('false')
+
+    card.click()
+
+    await waitFor(() => expect(card.getAttribute('aria-checked')).toBe('true'))
+    expect(requestGateway).toHaveBeenCalledWith(
+      'plugins.manage',
+      expect.objectContaining({ action: 'toggle', key: 'meter', enable: true })
+    )
+    expect($pluginDecisions.get()['meter-ui']).toBe(true)
     requestGateway.mockImplementation(async () => ({ plugins: [] }))
     $pluginDecisions.set({})
   })
@@ -456,7 +483,28 @@ describe('PluginsTab', () => {
     )
     expect($pluginDecisions.get()['meter-ui']).toBe(false)
     expect(screen.getByRole('switch', { name: 'Desktop: Meter' }).getAttribute('aria-checked')).toBe('false')
-    requestGateway.mockImplementation(async () => ({ plugins: [] }))
+    $pluginDecisions.set({})
+  })
+
+  it('shows a "Desktop off" pill on the card when the agent half is on and the desktop half is off', async () => {
+    $pluginDecisions.set({})
+    publishPlugin(
+      { id: 'meter-ui', name: 'Meter', kind: 'disk', status: 'disabled', packageName: 'meter' },
+      { activate: () => patchPlugin('meter-ui', { status: 'loaded' }), deactivate: () => undefined }
+    )
+    $agentPlugins.set([
+      { description: '', key: 'meter', name: 'meter', source: 'git', status: 'enabled', version: '1' }
+    ])
+
+    renderPlugins({ profile: null })
+
+    // The card switch follows the agent half, which is on. Without the pill the
+    // row reads fully on while the pane is hidden and there is no way to see
+    // that from the card.
+    const pill = await screen.findByRole('button', { name: 'Desktop off: Meter' })
+    fireEvent.click(pill)
+    await waitFor(() => expect($pluginDecisions.get()['meter-ui']).toBe(true))
+    expect($pluginRecords.get()['meter-ui'].status).toBe('loaded')
     $pluginDecisions.set({})
   })
 

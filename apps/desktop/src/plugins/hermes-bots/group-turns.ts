@@ -6,7 +6,7 @@
  * Room-level sequencing lives in group-rounds.ts, which drives these.
  */
 
-import { APPROVAL_RESPOND_TIMEOUT_MS, host } from '@hermes/plugin-sdk'
+import { APPROVAL_RESPOND_TIMEOUT_MS, host, randomUuid } from '@hermes/plugin-sdk'
 
 import { noteBotAttention } from './data'
 import { groupFailureReason, recordGroupActivity } from './group-activity'
@@ -26,6 +26,7 @@ import {
   groupSessionOwner,
   hasThreadScopedGroupSession
 } from './group-membership'
+import { normalizeGroupPictureSettings } from './group-picture-settings'
 import {
   addFreshThreadRoomContext,
   formatFreshThreadRoomContext,
@@ -38,6 +39,7 @@ import {
   type GroupImageRoutingWire,
   stashMemberTurnVision
 } from './group-vision'
+import { retainRouteSocket } from './route-lease'
 import { botConnectionRoute, requestForBot } from './routing'
 import type { Attachment, GroupMember, GroupPrompt, GroupPromptQuestion, ProfileRoute } from './types'
 
@@ -383,13 +385,13 @@ export async function ensureGroupChatSession(
           }
         }
       } catch (error: any) {
-        if (!isGenuineMissingSessionError(error)) {
+        if (!isSessionAbsentError(error)) {
           const detail = error instanceof Error && error.message ? ` (${error.message})` : ''
           throw new Error(
             `Could not check ${member?.name || 'member'}'s group session${detail} — not starting a new one`
           )
         }
-        /* genuinely doesn't exist (4007 / not_found) — try next target / create */
+        /* genuinely doesn't exist — try the next target / fall through to create */
       }
     }
 
@@ -543,19 +545,22 @@ interface GatewayErrorLike {
   message?: unknown
 }
 
-/** True when the gateway says this target never existed, so group session bind
- *  may try the next target / fall through to session.create.
+/** "This session does not exist" from either backend: 4007 from a `hermes serve`
+ *  socket, a 4001 refusal whose reason is `not_found` from the gateway that owns
+ *  local sessions (gateway/session_controls.py). Only this answer may lead to
+ *  minting a fresh member session; every other failure fails closed. The
+ *  gateway also answers `not_found` for a row this caller may not read
+ *  (gateway/session_local_title.py folds permission_denied into it); treating
+ *  that as absent is safe, since such a row could not be resumed by this caller
+ *  anyway.
  *
- *  TUI path uses JSON-RPC 4007 ("session not found"). The live gateway authority
- *  maps RuntimeStoreError('not_found') to code 4001 with message/reason
- *  `not_found` (session_controls._refusal_data). IPC may also strip the code and
- *  leave only the bare message. All three mean "no such session" for bind. */
-export function isGenuineMissingSessionError(error: GatewayErrorLike | string | null | undefined): boolean {
+ *  Force: IPC and the realm boundary may strip the code and leave a bare
+ *  `not_found` string, message, or cause. Those are the same store miss. */
+export function isSessionAbsentError(error: GatewayErrorLike | string | null | undefined): boolean {
   if (!error) {
     return false
   }
 
-  // Across a realm boundary the rejection can be a bare string, not an object.
   if (typeof error === 'string') {
     return error.trim() === 'not_found'
   }
@@ -564,22 +569,28 @@ export function isGenuineMissingSessionError(error: GatewayErrorLike | string | 
     return true
   }
 
-  const reason = error.data && typeof error.data === 'object' ? (error.data as { reason?: unknown }).reason : undefined
-
+  const reason = error.data && typeof error.data === 'object' ? error.data.reason : undefined
   const message = typeof error.message === 'string' ? error.message.trim() : ''
 
-  // Live gateway: 4001 + reason/message not_found is the store miss (not a
-  // transport failure). Other 4001 reasons (invalid_params, session_busy, …)
-  // must stay fail-closed.
+  if (error.code === 4001 && (reason === 'not_found' || message === 'not_found')) {
+    return true
+  }
+
+  // Bare not_found without a code is still a store miss (IPC strips the code).
   if (reason === 'not_found' || message === 'not_found') {
     return true
   }
 
   if (error.cause && error.cause !== error && typeof error.cause === 'object') {
-    return isGenuineMissingSessionError(error.cause as GatewayErrorLike)
+    return isSessionAbsentError(error.cause as GatewayErrorLike)
   }
 
   return false
+}
+
+/** Force callers (group-compress, group-turns tests) keep this name. */
+export function isGenuineMissingSessionError(error: GatewayErrorLike | string | null | undefined): boolean {
+  return isSessionAbsentError(error)
 }
 
 /** 4001-class "the runtime session was reaped" failure. Distinct from 4007
@@ -605,26 +616,15 @@ export function isSessionGoneError(error: GatewayErrorLike | null | undefined): 
  *  closes mid-turn) get a no-op release. A failed acquire must not kill the
  *  turn — the catch-retry on submit still covers the race. */
 async function retainGroupTurnRoute(member: GroupMember): Promise<() => void> {
-  const noop = () => undefined
   let route: ProfileRoute | null = null
 
   try {
     route = botConnectionRoute(member)
   } catch {
-    return noop
+    return () => undefined
   }
 
-  if (!route || typeof host.retainProfile !== 'function') {
-    return noop
-  }
-
-  try {
-    const release = await host.retainProfile(route, { spawnPriority: 'foreground' })
-
-    return typeof release === 'function' ? release : noop
-  } catch {
-    return noop
-  }
+  return (route ? await retainRouteSocket(route, { spawnPriority: 'foreground' }) : null) ?? (() => undefined)
 }
 
 /** prompt.submit with one belt-and-braces retry: when the runtime session was
@@ -966,7 +966,12 @@ function groupTurnAttachmentSuffix(fileRefs: string[], failed: string[]) {
   return extras.join('\n\n')
 }
 
-async function stageGroupTurnAttachments(member: GroupMember, runtime: string, images?: Attachment[]) {
+async function stageGroupTurnAttachments(
+  member: GroupMember,
+  runtime: string,
+  images?: Attachment[],
+  privacy = true
+) {
   // Stage this delta's attachments into the member's session so the model
   // receives the actual payload with the prompt — the same attach RPCs the
   // 1:1 chat uses (they also work cross-connection, where the member's
@@ -1002,7 +1007,8 @@ async function stageGroupTurnAttachments(member: GroupMember, runtime: string, i
         await requestForBot(member, 'image.attach_bytes', {
           session_id: runtime,
           content_base64: img.data,
-          filename: label
+          filename: label,
+          privacy: privacy ? 'true' : 'false'
         })
       }
     } catch (error) {
@@ -1286,7 +1292,8 @@ async function runGroupChatMemberTurnLeased(
     // prompt lands after them.
     mirrorExternalGroupWrites(group, member, thread, snapshot?.messages)
 
-    const { failed, fileRefs } = await stageGroupTurnAttachments(member, runtime, images)
+    const privacyOn = normalizeGroupPictureSettings($groupChats.get()[group]?.pictures).privacyMode
+    const { failed, fileRefs } = await stageGroupTurnAttachments(member, runtime, images, privacyOn)
 
     if (!binding.isLive()) {
       return null
@@ -1313,7 +1320,7 @@ async function runGroupChatMemberTurnLeased(
     runtimeIds.add(liveRuntime)
 
     // A UUID, not a clock+random suffix: a marker persisted by a previous process must never equal a token this one mints.
-    const turn = `${liveRuntime}:${crypto.randomUUID()}`
+    const turn = `${liveRuntime}:${randomUuid()}`
     liveGroupTurns.add(turn)
     markGroupTurnInFlight(group, member, {
       before,
@@ -1422,7 +1429,7 @@ export async function harvestStrandedGroupReply(group: string, member: GroupMemb
     } catch (error: any) {
       // A session that genuinely no longer exists has nothing to harvest, and a marker that can
       // never resolve would keep the member out of every round; only unreachability keeps it.
-      if (error?.code === 4007) {
+      if (isSessionAbsentError(error)) {
         updateGroupChat(group, (r: GroupChatRoom) => {
           const next = {
             ...(r.stranded || {})

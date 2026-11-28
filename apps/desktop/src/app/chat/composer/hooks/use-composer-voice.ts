@@ -23,6 +23,7 @@ import { $sessionStates } from '@/store/session-states'
 import { clearVoiceConversation, publishVoiceConversation } from '@/store/voice-conversation'
 import { $voiceLiveStatus, refreshVoiceLiveStatus, selectedVoiceChatMode } from '@/store/voice-live'
 import { $autoSpeakReplies, $voiceStopPhrase, setAutoSpeakReplies } from '@/store/voice-prefs'
+import { retainVoiceStreamPaint } from '@/store/voice-stream-paint'
 import { resumeWakeAfterVoice } from '@/store/wake-word'
 
 import { pinFloatingComposerCapture } from '../floating-target'
@@ -94,6 +95,7 @@ export function useComposerVoice({
 
   useStore($pendingVoiceReplyId)
   const [voiceConversationActive, setVoiceConversationActive] = useState(false)
+  useEffect(() => (voiceConversationActive ? retainVoiceStreamPaint() : undefined), [voiceConversationActive])
   // Engine selection is latched at conversation START (a Settings change
   // applies to the next conversation, never mid-call).
   const [liveEngineActive, setLiveEngineActive] = useState(false)

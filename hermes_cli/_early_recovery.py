@@ -871,14 +871,13 @@ def _index_lock_holder(git_dir: Path, root: Path | None) -> str:
     return f"a running git ({held})" if isinstance(held, _Holder) else "a running git"
 
 
-def _release_dead_index_lock(git_dir: Path, root: Path | None = None, *, any_git: bool = False) -> bool:
-    """Drop a killed git's ``index.lock`` (it refuses every git command) once its owner is PROVEN gone.
+def _release_dead_lock(lock: Path, root: Path | None = None, *, any_git: bool = False) -> bool:
+    """Drop a killed git's ``lock`` (``index.lock`` refuses every git command) once its owner is PROVEN gone.
 
     False while a live git may hold it, or when this platform cannot prove it dead: the caller then
     keeps the interrupted-pull marker, so the next launch tries again instead of a rollback being lost.
     ``any_git``: every git working in ``root`` keeps it, readers included (:func:`_held_open`).
     """
-    lock = git_dir / "index.lock"
     deadline = time.monotonic() + 5
     while lock.exists():
         held = None if sys.platform == "win32" else _held_open(lock, root, any_git=any_git)
@@ -1135,7 +1134,7 @@ def _judge_index_lock(fields: dict[str, str], marker: Path, root: Path, *,
     # a live `git commit` in the editor holds it with its fd closed, which only Linux can still see.
     known_foreign = bool(fields.get("foreign_lock", "").strip()) and \
         fields["foreign_lock"].strip() == _lock_identity(lock)
-    index_free = foreign_lock or (not known_foreign and _release_dead_index_lock(git_dir, root))
+    index_free = foreign_lock or (not known_foreign and _release_dead_lock(lock, root))
     return foreign_lock, known_foreign, index_free
 
 
@@ -1280,7 +1279,7 @@ def _redo_rollback_head(git, git_dir: Path, root: Path, pre: str, mode: str, *, 
     git that exited in this very process (``after_failure``) a lock is never ours to judge.
     """
     lock = git_dir / "index.lock"
-    if lock.exists() and (after_failure or not _release_dead_index_lock(git_dir, root)):
+    if lock.exists() and (after_failure or not _release_dead_lock(lock, root)):
         return f"{_index_lock_holder(git_dir, root)} may still hold .git/index.lock"
     if mode == "detach":
         moved = git("update-ref", "--no-deref", "HEAD", pre)
@@ -1306,6 +1305,25 @@ def _rollback_verified(git, git_dir: Path, pre: str, owned: set[str] | None = No
     return status.returncode == 0 and not (changed if owned is None else changed & owned)
 
 
+def head_tracks(root: Path, rel: str) -> bool:
+    """True when ``HEAD``'s tree still has ``rel``.
+
+    Update cleanup may unlink a file the rolled-back commit does not have. It must not unlink a
+    path the current commit still tracks: a fork switch's added-list includes carry files the
+    detached upstream checkout lacked, and deleting those after HEAD is the carry commit removes
+    tracked source.
+    """
+    path = PurePosixPath(rel)
+    if not rel or path.is_absolute() or ".." in path.parts or ":" in rel or "\\" in rel:
+        return True
+    found = subprocess.run(
+        ["git", "-C", str(root), "cat-file", "-e", f"HEAD:{rel}"],
+        capture_output=True,
+        check=False,
+    )
+    return found.returncode == 0
+
+
 def _put_back_paths(git, root: Path, restore: list[str], added: list[str],
                     kept: set[str]) -> subprocess.CompletedProcess | None:
     """Return ``restore`` to HEAD and drop ``added``, renaming those in ``kept`` aside; the failed git run, or None."""
@@ -1314,6 +1332,7 @@ def _put_back_paths(git, root: Path, restore: list[str], added: list[str],
                   "--pathspec-file-nul", stdin="\0".join(restore))
         if run.returncode:
             return run
+    added = [rel for rel in added if not head_tracks(root, rel)]
     if added:
         run = git("rm", "-q", "--cached", "--ignore-unmatch", "--pathspec-from-file=-",
                   "--pathspec-file-nul", stdin="\0".join(added))

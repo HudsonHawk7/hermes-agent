@@ -29,6 +29,7 @@ from hermes_cli._early_recovery import (
     RECOVERY_CLOSURE_MANIFEST,
     blob_id,
     _lock_identity,
+    head_tracks,
     interrupted_pull_marker,
     is_object_id,
     recovery_closure_dir,
@@ -73,6 +74,54 @@ def _read_or_none(path: Path) -> Optional[bytes]:
         return None
 
 
+# Everything this process still imports once the tree has moved: the receipt finalize, the
+# shallow-checkout count after a branch switch, and the resume of the gateways it paused (systemd,
+# launchd, Windows; a bare replay's environment is built by the pause, a Windows restart builds its
+# own from the modules listed here). Loaded at the commit point,
+# while the tree is still the code this process runs; ``test_update_post_swap_imports`` drives each.
+POST_MOVE_MODULES = (
+    "agent.delegation_context",
+    "agent.provider_base",
+    "agent.provider_registry",
+    "agent.terminal_env_provider",
+    "agent.terminal_env_registry",
+    "gateway.bridged_env",
+    "gateway.config_loader",
+    "gateway.platform_registry",
+    "gateway.runtime_ownership",
+    "gateway.session_context",
+    "gateway.shutdown_forensics",
+    "gateway.status",
+    "hermes_cli.config_backups",
+    "hermes_cli.gateway",
+    "hermes_cli.gateway_runtime_start",
+    "hermes_cli.gateway_windows",
+    "hermes_cli.github_api",
+    "hermes_cli.plugins_session_env",
+    "hermes_cli.source_check",
+    "hermes_cli.update_cmd_fleet_unit_budget",
+    "hermes_cli.update_serve_obligations",
+    "pm.lock",
+    "tools.environments.local",
+)
+
+
+def load_post_move_modules() -> None:
+    """Import :data:`POST_MOVE_MODULES` now: after the move, a module not yet loaded is the new tree's."""
+    import importlib
+
+    for name in POST_MOVE_MODULES:
+        try:
+            importlib.import_module(name)
+        except Exception as exc:  # health: allow BLE001 -- protection, not a gate: the step that needs it reports it
+            logger.warning("Could not load %s before the checkout moves: %s", name, exc)
+
+
+def past_commit_point() -> bool:
+    """True once this run armed its commit point: the checkout may hold code this process never loaded."""
+    return _armed_snapshot is not None
+
+
 def arm_commit_obligations(root: Path, expected_sha: str) -> None:
     """Owe the completion tail and the fleet restart for ``expected_sha`` BEFORE the tree moves.
 
@@ -87,6 +136,8 @@ def arm_commit_obligations(root: Path, expected_sha: str) -> None:
     from hermes_cli.update_cmd_fleet import _write_fleet_restart_pending_marker
     from hermes_cli.venv_sync import arm_completion
 
+    if _armed_snapshot is None:  # a re-arm runs after a move: too late to load anything
+        load_post_move_modules()
     root = Path(root)
     if _owns_live_checkout(root):
         return
@@ -318,10 +369,16 @@ def files_added_by(git_cmd, root: Path, pre: str, target: str | None) -> list[st
 
 
 def drop_added_files(root: Path, added: list[str]) -> bool:
-    """Every one is the move's own file: git refuses to move a checkout over an untracked file.
+    """Unlink files the current commit does not track.
 
-    False when one of them is still there (the caller keeps the marker; the restore retries)."""
+    A rollback's mixed reset leaves the release's added files untracked, and ``reset --hard``
+    never touches those. A path ``HEAD`` still has is left alone: the added-list from a detached
+    upstream checkout includes carry files, and unlinking one after HEAD is the carry commit
+    deletes tracked source (the private-pictures module).
+
+    False when an untracked one is still there (the caller keeps the marker; the restore retries)."""
     root = Path(root)
+    added = [rel for rel in added if not head_tracks(root, rel)]
     gone = True
     for rel in added:
         try:
@@ -335,6 +392,43 @@ def drop_added_files(root: Path, added: list[str]) -> bool:
         except OSError:
             pass
     return gone and not any(os.path.lexists(root / rel) for rel in added)
+
+
+def restore_missing_tracked(root: Path) -> int:
+    """Put back tracked files the worktree is missing. Returns how many came back.
+
+    A checkout that returned 0 can still lack a carry file the previous tree did not have.
+    The update must not finish with that file gone.
+    """
+    root = Path(root)
+    listed = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-d", "-z"],
+        capture_output=True,
+        check=False,
+    )
+    if listed.returncode != 0:
+        return 0
+    missing = [p for p in listed.stdout.decode("utf-8", "replace").split("\0") if p]
+    if not missing:
+        return 0
+    restored = subprocess.run(
+        ["git", "-C", str(root), "checkout", "HEAD", "--pathspec-from-file=-", "--pathspec-file-nul"],
+        input="\0".join(missing).encode("utf-8"),
+        capture_output=True,
+        check=False,
+    )
+    if restored.returncode != 0:
+        return 0
+    still = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-d", "-z"],
+        capture_output=True,
+        check=False,
+    )
+    left = {p for p in still.stdout.decode("utf-8", "replace").split("\0") if p} if still.returncode == 0 else set(missing)
+    brought = [p for p in missing if p not in left]
+    if brought:
+        print(f"→ Restored {len(brought)} tracked file(s) the checkout was missing.", file=sys.stderr)
+    return len(brought)
 
 
 def tree_whole_at(git_cmd, root: Path, sha: str) -> bool:
@@ -363,18 +457,54 @@ def settle_failed_tree_move(root: Path) -> bool:
     return not marker.is_file()
 
 
-def _requires_python_spec(pyproject: bytes | str | None) -> str | None:
-    """The target's ``requires-python`` specifier, None when absent or unreadable."""
+def _pyproject_tables(pyproject: bytes | str | None) -> dict | None:
+    """The parsed pyproject ({} when there is none), None when it is not valid TOML."""
     if not pyproject:
-        return None
+        return {}
     import tomllib
 
     try:
-        text = pyproject.decode("utf-8") if isinstance(pyproject, bytes) else pyproject
-        spec = tomllib.loads(text)["project"]["requires-python"]
-    except (KeyError, TypeError, ValueError):  # TOMLDecodeError is a ValueError
+        return tomllib.loads(pyproject.decode("utf-8") if isinstance(pyproject, bytes) else pyproject)
+    except (UnicodeDecodeError, ValueError):  # TOMLDecodeError is a ValueError
         return None
+
+
+def _table(tables: dict | None, *keys: str) -> dict:
+    for key in keys:
+        tables = tables.get(key) if isinstance(tables, dict) else None
+    return tables if isinstance(tables, dict) else {}
+
+
+def _requires_python_spec(pyproject: bytes | str | None) -> str | None:
+    """The target's ``requires-python`` specifier, None when absent or unreadable."""
+    spec = _table(_pyproject_tables(pyproject), "project").get("requires-python")
     return spec if isinstance(spec, str) else None
+
+
+MISSING_STARTUP_FILE = "the tree lists this startup file in [tool.hermes] update-startup-files but it is missing or could not be read"
+INVALID_STARTUP_FILES = "pyproject.toml must be valid TOML whose [tool.hermes] update-startup-files is a list of file paths"
+
+
+def startup_files(pyproject: bytes | str | None, undeclared) -> tuple[tuple[str, ...], bool] | None:
+    """``(files, required)``: the startup files to compile in a tree, and whether each must exist.
+
+    A tree that declares ``[tool.hermes] update-startup-files`` is judged by its own list, so a move
+    that relocates a startup file edits that list and an update to it is judged by the new paths. A
+    declared file the tree lacks refuses the update. A tree that declares none (a release before the
+    declaration) is judged by ``undeclared`` with absent files skipped, so a rollback to it still works.
+    None: the pyproject is not valid TOML or declares a list that is not one, which refuses (never
+    the older-release fallback).
+    """
+    tables = _pyproject_tables(pyproject)
+    if tables is None:
+        return None
+    declared = _table(tables, "tool", "hermes")
+    if "update-startup-files" not in declared:
+        return tuple(undeclared), False
+    listed = declared["update-startup-files"]
+    if not isinstance(listed, list) or not all(isinstance(rel, str) and rel for rel in listed):
+        return None
+    return tuple(listed), True
 
 
 def _spec_admits(spec: str, version: str) -> bool:
@@ -390,19 +520,6 @@ def _spec_admits(spec: str, version: str) -> bool:
         return SpecifierSet(spec).contains(version, prereleases=True)
     except InvalidSpecifier:
         return True  # unknown: keep judging with this interpreter, never wave a file through
-
-
-def requires_other_python(pyproject: bytes | str | None) -> bool:
-    """True when a target's ``requires-python`` excludes the running interpreter.
-
-    Its startup modules may then use a newer Python's syntax that this interpreter's ``compile()``
-    cannot judge: ``startup_syntax_error`` asks an installed interpreter the target admits instead.
-    Unknown -> False: keep checking, so a real syntax error is never waved through on a guess.
-    """
-    import platform
-
-    spec = _requires_python_spec(pyproject)
-    return spec is not None and not _spec_admits(spec, platform.python_version())
 
 
 _PYTHON_VERSION = "import platform; print(platform.python_version())"
@@ -455,19 +572,23 @@ def _compile_here(sources: dict[str, bytes]) -> tuple[str, str] | None:
     return None
 
 
-def startup_syntax_error(sources: dict[str, bytes | None], pyproject: bytes | None) -> tuple[str, str] | None:
+def startup_syntax_error(sources: dict[str, bytes | None], pyproject: bytes | None, *,
+                         required: bool = False) -> tuple[str, str] | None:
     """``(path, error)`` for the first startup file that does not compile, else None.
 
     Judged by the interpreter that will run the target: this one when the target's
     ``requires-python`` admits it, else an installed interpreter it admits (review N15: a
     conflict-marker scan is not a syntax check). With none installed, this interpreter still
     judges: code it parses is code a newer Python parses, and a refusal names the Python to install
-    so the release can be judged by its own interpreter. ``None`` values (absent files) are skipped.
+    so the release can be judged by its own interpreter. ``None`` values (absent files) refuse when
+    ``required``, else are skipped.
     """
     import base64
     import json
     import platform
 
+    if required and (missing := next((rel for rel, data in sources.items() if data is None), None)):
+        return missing, MISSING_STARTUP_FILE
     present = {rel: data for rel, data in sources.items() if data is not None}
     spec = _requires_python_spec(pyproject)
     if spec is None or _spec_admits(spec, platform.python_version()):
@@ -517,31 +638,40 @@ def target_syntax_error(git_cmd, root: Path, target_ref: str, relpaths) -> tuple
 
     Read from the object store, never written to the tree: this runs BEFORE HEAD moves, so a broken
     release is refused with the install untouched (the post-pull rollback stays as the backstop).
-    ``startup_syntax_error`` judges it under the interpreter the target admits. A file absent at the
-    target (or unreadable) is skipped: the post-pull guard has the last word.
+    ``startup_syntax_error`` judges it under the interpreter the target admits. The files are the
+    ones the target declares (``startup_files``); ``relpaths`` judges a target that declares none.
     """
     try:
         files = read_target_files(git_cmd, root, target_ref, ["pyproject.toml", *relpaths])
+        pyproject = files.pop("pyproject.toml", None)
+        if (selection := startup_files(pyproject, relpaths)) is None:
+            return "pyproject.toml", INVALID_STARTUP_FILES
+        names, required = selection
+        if unread := [rel for rel in names if rel not in files]:
+            files.update(read_target_files(git_cmd, root, target_ref, unread))
     except subprocess.TimeoutExpired:
         # A blobless install (install.sh clones --filter=blob:none) lazily fetches each changed blob
-        # in its own round trip; on a slow link that outlasts the limit. Unread, like an absent file.
+        # in its own round trip; on a slow link that outlasts the limit.
         print("  ⚠ Syntax preflight skipped (slow object fetch); the post-update check still runs.")
         return None
-    pyproject = files.pop("pyproject.toml", None)
-    return startup_syntax_error(files, pyproject)
+    return startup_syntax_error({rel: files[rel] for rel in names}, pyproject, required=required)
 
 
 def tree_syntax_error(root: Path, relpaths) -> tuple[str, str] | None:
     """``startup_syntax_error`` for the files in the worktree at ``root`` (the post-move backstop)."""
     root = Path(root)
+    pyproject_path = root / "pyproject.toml"
+    pyproject = pyproject_path.read_bytes() if pyproject_path.is_file() else None
+    if (selection := startup_files(pyproject, relpaths)) is None:
+        return "pyproject.toml", INVALID_STARTUP_FILES
+    names, required = selection
     sources: dict[str, bytes | None] = {}
-    for rel in relpaths:
+    for rel in names:
         try:
             sources[rel] = (root / rel).read_bytes() if (root / rel).is_file() else None
         except OSError as exc:
             return str(rel), f"could not read: {exc}"
-    pyproject = root / "pyproject.toml"
-    return startup_syntax_error(sources, pyproject.read_bytes() if pyproject.is_file() else None)
+    return startup_syntax_error(sources, pyproject, required=required)
 
 
 def head_and_branch(git_cmd, root: Path) -> tuple[str, str]:

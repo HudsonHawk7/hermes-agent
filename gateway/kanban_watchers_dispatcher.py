@@ -8,7 +8,6 @@ the singleton lock and the health telemetry; everything that only needs the
 from __future__ import annotations
 
 import contextlib
-import os
 import sqlite3
 import time
 from dataclasses import asdict, dataclass
@@ -214,7 +213,12 @@ class _KanbanDispatcher:
                     conn.close()
 
     def tick_once(self) -> list[tuple[str, Optional[object]]]:
-        """Run one dispatch_once per board. Returns (slug, result) pairs."""
+        """One dispatcher tick: wake scheduled cards, then one pass per board."""
+        try:
+            from hermes_cli.kanban_wake_tick import wake_on_dispatch_tick
+            wake_on_dispatch_tick(apply=True)
+        except Exception:
+            logger.exception("kanban dispatcher: wake pass failed")
         return [(slug, self.tick_once_for_board(slug)) for slug in self._board_slugs()]
 
     def ready_nonempty(self) -> bool:
@@ -260,6 +264,7 @@ class _KanbanDispatcher:
         """
         try:
             from hermes_cli import kanban_decompose as _decomp
+            from hermes_cli.kanban_db import scoped_current_board
         except Exception as exc:  # pragma: no cover
             logger.warning("kanban auto-decompose: import failed (%s); skipping", exc)
             return 0
@@ -270,11 +275,10 @@ class _KanbanDispatcher:
             for slug in self._board_slugs():
                 if attempted >= auto_decompose_per_tick:
                     break
-                # Pin the board via env for the call: the decomposer connects
-                # with no board kwarg (same pattern as the dashboard specify endpoint).
-                prev_env = os.environ.get("HERMES_KANBAN_BOARD")
-                try:
-                    os.environ["HERMES_KANBAN_BOARD"] = slug
+                # The decomposer connects with no board kwarg. Pin the board for this context only: an
+                # env pin is process-wide, so for the whole aux-LLM call every gateway turn, kanban tool
+                # and spawned subprocess that names no board would resolve this one instead.
+                with scoped_current_board(slug):
                     try:
                         triage_ids = _decomp.list_triage_ids()
                     except Exception as exc:
@@ -285,11 +289,6 @@ class _KanbanDispatcher:
                             break
                         attempted += 1
                         successes += self._decompose_one(_decomp, slug, tid)
-                finally:
-                    if prev_env is None:
-                        os.environ.pop("HERMES_KANBAN_BOARD", None)
-                    else:
-                        os.environ["HERMES_KANBAN_BOARD"] = prev_env
         return successes
 
     @staticmethod

@@ -1086,14 +1086,95 @@ def _cmd_answer(args: argparse.Namespace) -> int:
 
 
 def _cmd_schedule(args: argparse.Namespace) -> int:
+    from hermes_cli import kanban_wake as kw
     reason = _joined_words(args.reason)
     author = _profile_author()
     ids = _bulk_ids(args)
-    suffix = f": {reason}" if reason else ""
+    try:
+        until_ts = kw.parse_until(args.until) if getattr(args, "until", None) else None
+        until_prs = [kw.parse_until_pr(item) for item in (getattr(args, "until_pr", None) or [])]
+    except ValueError as exc:
+        return _err(f"kanban schedule: {exc}")
+    wait_on = list(getattr(args, "wait_on", None) or [])
+    wake = _wake_label(wait_on, until_prs, until_ts)
+    suffix = f": {reason} ({wake})" if reason else f" ({wake})"
+
+    def op(conn, tid):
+        scheduled = kb.schedule_task(
+            conn, tid, reason=reason, expected_run_id=_worker_run_id_for(tid),
+        )
+        task = kb.get_task(conn, tid)
+        if not scheduled and (task is None or task.status != "scheduled"):
+            return False
+        if reason and scheduled:
+            kb.add_comment(conn, tid, author, f"SCHEDULED: {reason}")
+        kw.record_wakes(
+            conn, tid, wait_on=wait_on, until_prs=until_prs, until_ts=until_ts,
+        )
+        return True
+
     with kbc.connect_closing() as conn:
-        op = _commented(conn, reason, author, "SCHEDULED", lambda tid: kb.schedule_task(
-            conn, tid, reason=reason, expected_run_id=_worker_run_id_for(tid)))
-        return _bulk_apply(ids, op, lambda tid: f"Scheduled {tid}{suffix}", lambda tid: f"cannot schedule {tid}")
+        return _bulk_apply(
+            ids, lambda tid: op(conn, tid),
+            lambda tid: f"Scheduled {tid}{suffix}",
+            lambda tid: f"cannot schedule {tid}",
+        )
+
+
+def _wake_label(wait_on, until_prs, until_ts) -> str:
+    parts = [f"wait-on {item}" for item in wait_on]
+    parts += [f"until-pr {repo}#{number}" for repo, number in until_prs]
+    if until_ts is not None:
+        parts.append(f"until {until_ts}")
+    return ", ".join(parts) if parts else "wake=none"
+
+
+def _wake_dispatch_profiles() -> set[str] | None:
+    """Assignees this home's dispatcher will claim.
+
+    None means the key is absent, so any existing profile may run. A set,
+    including an empty one, is what the dispatcher will actually claim.
+    """
+    try:
+        from hermes_cli.profiles import normalize_profile_name
+    except Exception:
+        return set()
+    allowlist = kbd._dispatch_profile_allowlist(normalize_profile_name)
+    if allowlist is None:
+        return None
+    return set(allowlist)
+
+
+def _cmd_wake_pass(args: argparse.Namespace) -> int:
+    """Promote cards whose waits are met. Orchestrator only."""
+    if os.environ.get("HERMES_KANBAN_TASK"):
+        return _err("kanban wake-pass is orchestrator-only; the sweep runs it")
+    from hermes_cli import kanban_wake as kw
+    now = time.time()
+    with kbc.connect_closing() as conn:
+        if getattr(args, "backfill", False):
+            for line in kw.backfill_scheduled(conn):
+                print(line)
+        archived = kw.archive_merged_gates(conn, pr_status=kw.github_pr_status)
+        promoted = kw.promote_ready(
+            conn, now=now, pr_status=kw.github_pr_status,
+            dispatch_profiles=_wake_dispatch_profiles(),
+        )
+        if getattr(args, "daily", False):
+            for line in kw.daily_lines(conn, now=now):
+                print(line)
+    promoted_ids = promoted["promoted"]
+    print(
+        "wake-pass:"
+        f" promoted={len(promoted_ids)}"
+        f" archived={len(archived['archived'])}"
+        f" held={len(promoted['held'])}"
+    )
+    if promoted_ids:
+        print("promoted " + " ".join(promoted_ids))
+    if archived["archived"]:
+        print("archived " + " ".join(archived["archived"]))
+    return 0
 
 
 def _cmd_unblock(args: argparse.Namespace) -> int:
@@ -1232,6 +1313,23 @@ def _cmd_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def _caller_identity_for_target(platform: str, chat_id: str, thread_id, user_id, user_id_alt) -> tuple:
+    """``(user_id, user_id_alt)`` for a subscription, the calling gateway session's sender filled
+    in when the target IS that session's chat and no id was given. An agent running this command
+    from a group chat omits ``--user-id``; under ``group_sessions_per_user`` the wake would then key
+    a second, participant-less session (#147522). Another chat's (or topic's) subscription is
+    never stamped with the caller's identity."""
+    if user_id or user_id_alt:  # an explicit recipient is never paired with the caller's other id
+        return user_id, user_id_alt
+    from gateway.session_context import get_session_env
+    if (str(get_session_env("HERMES_SESSION_PLATFORM", "")).lower() != str(platform or "").lower()
+            or str(get_session_env("HERMES_SESSION_CHAT_ID", "")) != str(chat_id or "")
+            or str(get_session_env("HERMES_SESSION_THREAD_ID", "")) != str(thread_id or "")):
+        return user_id, user_id_alt
+    return (get_session_env("HERMES_SESSION_USER_ID", "") or None,
+            get_session_env("HERMES_SESSION_USER_ID_ALT", "") or None)
+
+
 def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
     delivery_metadata = {
         key: value
@@ -1241,19 +1339,22 @@ def _cmd_notify_subscribe(args: argparse.Namespace) -> int:
         )
         if value
     }
+    from hermes_cli.kanban_notify_thread import resolve_subscribe_thread
     with kbc.connect_closing() as conn:
         if kb.get_task(conn, args.task_id) is None:
             return _err(f"no such task: {args.task_id}")
+        thread_id = resolve_subscribe_thread(conn, args)
+        user_id, user_id_alt = _caller_identity_for_target(
+            args.platform, args.chat_id, thread_id, args.user_id, getattr(args, "user_id_alt", None))
         kbn.add_notify_sub(
             conn, task_id=args.task_id, platform=args.platform, chat_id=args.chat_id,
-            chat_type=args.chat_type, thread_id=args.thread_id, user_id=args.user_id,
-            user_id_alt=getattr(args, "user_id_alt", None),
+            chat_type=args.chat_type, thread_id=thread_id, user_id=user_id,
+            user_id_alt=user_id_alt,
             notifier_profile=args.notifier_profile or _profile_author(),
             delivery_mode=getattr(args, "delivery_mode", None),
             delivery_metadata=delivery_metadata or None,
         )
-    print(f"Subscribed {args.platform}:{args.chat_id}" + (f":{args.thread_id}" if args.thread_id else "")
-          + f" to {args.task_id}")
+    print(f"Subscribed {args.platform}:{args.chat_id}" + (f":{thread_id}" if thread_id else "") + f" to {args.task_id}")
     return 0
 
 
@@ -1279,9 +1380,10 @@ def _cmd_notify_list(args: argparse.Namespace) -> int:
 
 
 def _cmd_notify_unsubscribe(args: argparse.Namespace) -> int:
+    from hermes_cli.kanban_notify_thread import resolve_unsubscribe_thread
     with kbc.connect_closing() as conn:
         ok = kbn.remove_notify_sub(conn, task_id=args.task_id, platform=args.platform, chat_id=args.chat_id,
-                                  thread_id=args.thread_id)
+                                  thread_id=resolve_unsubscribe_thread(conn, args))
     return _ok_or_err(ok, "(no such subscription)", f"Unsubscribed from {args.task_id}")
 
 
@@ -1408,7 +1510,7 @@ _HANDLERS = {
     "attachments": _cmd_attachments, "attach-rm": _cmd_attach_rm,
     "complete": _cmd_complete, "edit": _cmd_edit, "block": _cmd_block,
     "ask": _cmd_ask, "answer": _cmd_answer,
-    "schedule": _cmd_schedule, "unblock": _cmd_unblock,
+    "schedule": _cmd_schedule, "unblock": _cmd_unblock, "wake-pass": _cmd_wake_pass,
     "request-review": _cmd_request_review, "request-changes": _cmd_request_changes,
     "reopen-review": _cmd_reopen_review, "promote": _cmd_promote,
     "archive": _cmd_archive, "tail": _cmd_tail, "dispatch": _cmd_dispatch,
