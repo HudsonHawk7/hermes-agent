@@ -5,7 +5,13 @@ that fast-forwards, packs, swaps, or restarts the live install. Builders do
 not run it against that install. Architect_ClaudeCode runs it after a
 JocastaNu PASS.
 
-Every side effect sits behind ``LiveUpdateIO``. Tests pass a fake. The real
+It opens the quiet window with ``hermes pause`` (in-flight work is left
+alone), then checks the board and the solara and aura logs. It lifts the
+pause on every exit. After the gateway is back it restores
+``gateway/privacy_images.py`` from HEAD when PR 82's cache-only sweep is not
+in this tree, because the older whole-home sweep deletes that file.
+
+Every side effect sits behind the io object. Tests pass a fake. The real
 adapter uses ``CREATE_NO_WINDOW`` and never opens a console. A kanban worker
 that targets the live install must pass ``--allow-live``.
 """
@@ -31,6 +37,10 @@ GIRLS = ("solara", "aura")
 QUIET_SECONDS = 60
 BOOT_BUDGET_SECONDS = 300
 HEALTH_BUDGET_SECONDS = 90
+# PR 82 fix. Until this commit is in the running tree, gateway boot walks the
+# whole home and deletes gateway/privacy_images.py. Restore it after each restart.
+PRIVACY_FIX = "03269443358df651b22af6caf48eceb86676d9b6"
+PAUSE_REASON = "force-live-update quiet window"
 DNS_NAME = "sql-prod.corp.mymeter.ai"
 SQL_PORT = 1433
 SHORTCUT_NAME = "Hermes - MyMeter SQL.lnk"
@@ -187,6 +197,14 @@ def gateway_restart_argv(vbs: Path) -> list[str]:
     return ["explorer.exe", str(vbs)]
 
 
+def pause_argv() -> list[str]:
+    return ["hermes", "pause", "--reason", PAUSE_REASON]
+
+
+def resume_argv() -> list[str]:
+    return ["hermes", "resume"]
+
+
 def shortcut_script(lnk: Path) -> str:
     quoted = str(lnk).replace("'", "''")
     return (
@@ -330,6 +348,12 @@ def run_protocol(io, *, target_sha: str, desktop: bool) -> LiveUpdateOutcome:
     """Steps 2-9. ``io`` is a fake in tests and RealLiveUpdateIO on the live run."""
     now = io.now()
     stamp = now.strftime("%Y-%m-%dT%H%M%S")
+    paused = io.pause()
+    if not paused.ok:
+        return _finish(
+            io, stamp, exit_code=2, failed_line=paused.line, rolled_back=False,
+            target_sha=target_sha, desktop=desktop, prev="", resume=False,
+        )
     gate = evaluate_gate(io.running_cards(), io.girl_states(now))
     if not gate.ok:
         return _finish(io, stamp, exit_code=2, failed_line=gate.line, rolled_back=False, target_sha=target_sha, desktop=desktop, prev="")
@@ -362,6 +386,9 @@ def run_protocol(io, *, target_sha: str, desktop: bool) -> LiveUpdateOutcome:
     health = io.wait_gateway(old_pid)
     if not health.ok:
         return _rollback(io, prev, health.line, stamp, target_sha, desktop, swapped)
+    restored = io.restore_privacy_images()
+    if not restored.ok:
+        return _rollback(io, prev, restored.line, stamp, target_sha, desktop, swapped)
     launch, launched = io.launch_desktop()
     if not launched.ok:
         return _rollback(io, prev, launched.line, stamp, target_sha, desktop, swapped)
@@ -376,6 +403,7 @@ def run_protocol(io, *, target_sha: str, desktop: bool) -> LiveUpdateOutcome:
     return _finish(
         io, stamp, exit_code=0, failed_line=None, rolled_back=False,
         target_sha=landed, desktop=desktop, prev=prev, summary=summary,
+        notes=[restored.line],
     )
 
 
@@ -391,7 +419,16 @@ def _rollback(io, prev: str, failed_line: str, stamp: str, target_sha: str, desk
     except Exception as exc:
         notes.append(f"rollback git reset failed: {exc}")
     try:
-        io.restart_gateway()
+        old_pid = io.gateway_pid()
+        restart = io.restart_gateway()
+        if not restart.ok:
+            notes.append(f"rollback restart failed: {restart.line}")
+        else:
+            health = io.wait_gateway(old_pid)
+            if not health.ok:
+                notes.append(f"re-prove gateway failed: {health.line}")
+        restored = io.restore_privacy_images()
+        notes.append(restored.line)
         launch, launched = io.launch_desktop()
         if not launched.ok:
             notes.append(f"re-prove launch failed: {launched.line}")
@@ -419,13 +456,29 @@ def _finish(
     prev: str,
     summary: str | None = None,
     notes: list[str] | None = None,
+    resume: bool = True,
 ) -> LiveUpdateOutcome:
+    notes = list(notes or [])
+    if resume:
+        try:
+            resumed = io.resume()
+        except Exception as exc:
+            resumed = StepResult(False, f"hermes resume failed ({exc})")
+        if not resumed.ok:
+            notes.append(resumed.line)
+            if exit_code == 0:
+                exit_code = 5
+                failed_line = resumed.line
+                summary = None
     if summary is None:
         summary = f"live-update FAILED {failed_line}" if failed_line else "live-update FAILED"
+    receipt_notes = list(notes)
+    if not receipt_notes and failed_line:
+        receipt_notes = [failed_line]
     receipt = {
         "desktop": desktop,
         "failed_line": failed_line,
-        "notes": notes or ([failed_line] if failed_line else []),
+        "notes": receipt_notes,
         "ok": exit_code == 0,
         "prev_sha": prev,
         "rolled_back": rolled_back,
@@ -434,7 +487,7 @@ def _finish(
         "ts": stamp,
     }
     path = str(io.write_receipt(stamp, summary, receipt))
-    return LiveUpdateOutcome(exit_code, failed_line, summary, path, rolled_back, notes or [])
+    return LiveUpdateOutcome(exit_code, failed_line, summary, path, rolled_back, notes)
 
 
 def hidden_run(args, **kwargs):
@@ -591,6 +644,31 @@ class RealLiveUpdateIO:
 
     def gateway_pid(self) -> int | None:
         return read_gateway_pid(self.home / "gateway.lock")
+
+    def pause(self) -> StepResult:
+        proc = self.run(pause_argv(), **self._hidden())
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "hermes pause failed").strip()
+            return StepResult(False, f"refused: hermes pause failed ({detail})")
+        return StepResult(True, "hermes paused")
+
+    def resume(self) -> StepResult:
+        proc = self.run(resume_argv(), **self._hidden())
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "hermes resume failed").strip()
+            return StepResult(False, f"hermes resume failed ({detail})")
+        return StepResult(True, "hermes resumed")
+
+    def restore_privacy_images(self) -> StepResult:
+        ancestor = self._git("merge-base", "--is-ancestor", PRIVACY_FIX, "HEAD")
+        if ancestor.returncode == 0:
+            return StepResult(True, "privacy_images restore skipped (PR 82 is in this tree)")
+        path = self.repo / "gateway" / "privacy_images.py"
+        proc = self._git("checkout", "HEAD", "--", "gateway/privacy_images.py")
+        if proc.returncode != 0 or not path.is_file():
+            detail = (proc.stderr or proc.stdout or "file still missing").strip()
+            return StepResult(False, f"privacy_images restore failed: {detail}")
+        return StepResult(True, "privacy_images.py restored from HEAD")
 
     def restart_gateway(self) -> StepResult:
         vbs = self.home / "restart-gateway.vbs"

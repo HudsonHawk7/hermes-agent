@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
+import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -36,6 +37,9 @@ class FakeIO:
         self.boot = flu.StepResult(True, "boot proof ok")
         self.boot_after = flu.StepResult(True, "boot proof ok")
         self.meter = flu.StepResult(True, "MyMeter proof ok")
+        self.pause_result = flu.StepResult(True, "hermes paused")
+        self.resume_result = flu.StepResult(True, "hermes resumed")
+        self.privacy = flu.StepResult(True, "privacy_images.py restored from HEAD")
         self.calls = []
         self.reset_sha = None
         self.receipts = []
@@ -43,6 +47,18 @@ class FakeIO:
 
     def now(self):
         return NOW
+
+    def pause(self):
+        self.calls.append("pause")
+        return self.pause_result
+
+    def resume(self):
+        self.calls.append("resume")
+        return self.resume_result
+
+    def restore_privacy_images(self):
+        self.calls.append("restore_privacy_images")
+        return self.privacy
 
     def running_cards(self):
         self.calls.append("running_cards")
@@ -147,6 +163,8 @@ def test_gate_refuses_running_card_and_does_not_ff():
     assert "ff_only" not in io.calls
     assert "restart_gateway" not in io.calls
     assert outcome.rolled_back is False
+    assert io.calls[0] == "pause"
+    assert "resume" in io.calls
 
 
 def test_gate_refuses_when_girl_log_is_not_quiet():
@@ -168,6 +186,10 @@ def test_gate_passes_when_quiet_and_writes_ok_receipt():
     assert "git_reset_keep" not in io.calls
     assert "pack_desktop" not in io.calls
     assert io.receipts[-1][1]["ok"] is True
+    assert io.calls[0] == "pause"
+    assert io.calls.index("restore_privacy_images") > io.calls.index("wait_gateway")
+    assert io.calls.index("restore_privacy_images") < io.calls.index("launch_desktop")
+    assert io.calls.index("resume") < io.calls.index("write_receipt")
 
 
 def test_refuses_when_not_a_fast_forward():
@@ -178,6 +200,8 @@ def test_refuses_when_not_a_fast_forward():
     assert "not a fast-forward" in outcome.failed_line
     assert "git_reset_keep" not in io.calls
     assert "swap_release" not in io.calls
+    assert "resume" in io.calls
+    assert "restart_gateway" not in io.calls
 
 
 def test_refuses_when_sha_is_not_on_branch():
@@ -478,3 +502,90 @@ def test_reprove_failure_is_named_and_exit_stays_nonzero():
     assert outcome.exit_code == 4
     assert "missing [boot] Hermes gateway is ready" in outcome.failed_line
     assert any("re-prove failed" in note for note in outcome.notes)
+
+
+def test_pause_failure_does_not_touch_git_or_resume():
+    io = FakeIO()
+    io.pause_result = flu.StepResult(False, "refused: hermes pause failed (ESTOP write failed)")
+    outcome = _run(io)
+    assert outcome.exit_code == 2
+    assert "hermes pause failed" in outcome.failed_line
+    assert io.calls == ["pause", "write_receipt"]
+    assert outcome.rolled_back is False
+
+
+def test_privacy_restore_failure_rolls_back_and_lifts_pause():
+    io = FakeIO()
+    io.privacy = flu.StepResult(False, "privacy_images restore failed: file still missing")
+    outcome = _run(io, desktop=False)
+    assert outcome.exit_code == 4
+    assert outcome.rolled_back is True
+    assert "privacy_images restore failed" in outcome.failed_line
+    assert io.calls.count("restart_gateway") >= 2
+    assert "resume" in io.calls
+    assert io.reset_sha == PREV
+
+
+def test_resume_failure_after_a_good_update_is_exit_5():
+    io = FakeIO()
+    io.resume_result = flu.StepResult(False, "hermes resume failed (ESTOP still present)")
+    outcome = _run(io, desktop=False)
+    assert outcome.exit_code == 5
+    assert "hermes resume failed" in outcome.failed_line
+    assert outcome.rolled_back is False
+    assert "git_reset_keep" not in io.calls
+
+
+def test_real_pause_and_resume_are_hidden(tmp_path):
+    io = flu.RealLiveUpdateIO(tmp_path, tmp_path / "home")
+    seen = {}
+
+    def run(argv, **kwargs):
+        seen["argv"] = list(argv)
+        seen["flags"] = kwargs.get("creationflags")
+        return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+    io.run = run
+    paused = io.pause()
+    assert paused.ok
+    assert seen["argv"] == ["hermes", "pause", "--reason", flu.PAUSE_REASON]
+    assert seen["flags"] == flu.CREATE_NO_WINDOW
+    resumed = io.resume()
+    assert resumed.ok
+    assert seen["argv"] == ["hermes", "resume"]
+    assert seen["flags"] == flu.CREATE_NO_WINDOW
+
+
+def test_real_restore_skips_when_the_fix_is_in_head(tmp_path, monkeypatch):
+    io = flu.RealLiveUpdateIO(tmp_path, tmp_path / "home")
+    calls = []
+
+    def git(*args):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(io, "_git", git)
+    result = io.restore_privacy_images()
+    assert result.ok
+    assert "skipped" in result.line
+    assert calls == [("merge-base", "--is-ancestor", flu.PRIVACY_FIX, "HEAD")]
+
+
+def test_real_restore_checkouts_when_the_fix_is_absent(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    (repo / "gateway").mkdir(parents=True)
+    target = repo / "gateway" / "privacy_images.py"
+    io = flu.RealLiveUpdateIO(repo, tmp_path / "home")
+
+    def git(*args):
+        if args[:2] == ("merge-base", "--is-ancestor"):
+            return subprocess.CompletedProcess(args, 1, "", "not an ancestor")
+        if args[:3] == ("checkout", "HEAD", "--"):
+            target.write_text("restored", encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(io, "_git", git)
+    result = io.restore_privacy_images()
+    assert result.ok
+    assert target.read_text(encoding="utf-8") == "restored"
