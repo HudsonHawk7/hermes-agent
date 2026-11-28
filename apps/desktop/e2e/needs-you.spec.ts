@@ -133,6 +133,9 @@ test.describe('Needs you column (gm-asks part 2)', () => {
   let shots: string = ''
 
   test.beforeAll(async () => {
+    // Hook timeout (not test timeout): Playwright has no beforeAll(fn, { timeout })
+    // overload — that form is TS2345 (fn not assignable to string title).
+    test.setTimeout(180_000)
     shots = proofDir(gitSha())
     // Custom setup so we can seed HERMES_HOME before launch.
     const mock = await startMockServer()
@@ -212,7 +215,7 @@ test.describe('Needs you column (gm-asks part 2)', () => {
 
     await waitForAppReady(fixture, 120_000)
     await openKanban(page)
-  }, { timeout: 180_000 })
+  })
 
   test.afterAll(async () => {
     // Snapshot gateways before teardown so the summary can show before/after.
