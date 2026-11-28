@@ -93,6 +93,7 @@ print('recipes_root:', cfg.get('scene_builder', {}).get('recipes_root'))
 | 1809e4d5dd7 | lift active_pr when a blocked author is promoted back to ready | A run that ended blocked, then a later promoted or promoted_manual event, is a resume of the named PR, not a duplicate. A crash or reclaim stays guarded. Card t_508ee6d7. Upstream not opened. Not installed. |
 | 93547304423 | desktop update never hands the checkout upstream main or master | A missing source probe, a detached HEAD and an explicit main or master land on force/carry; a real non-upstream branch is kept. The desktop-update scripts fall back to force/carry too. A set source channel is not rewritten. Card t_e909e0f1. Upstream not opened. Never upstream (fork-specific). Not installed. |
 | f94b5a0ab3e | refuse a carry checkout whose origin is not the fork | A checkout with CARRY.md stops before fetch unless origin is HudsonHawk7/hermes-agent. The Nous remote is named nous, never upstream. Card t_63f48d71. Upstream not opened. Never upstream (fork-specific). Not installed. |
+| 95766e0da58 | clear desktop electron+e2e tsc debt at force/carry tip | BrowserWindowLikeOptions accepts Electron constructor options; apply return exposes paintWhenInitiallyHidden; tsconfig.e2e lists e2e-hidden.ts; needs-you hook timeout uses test.setTimeout. Card t_7939f5ad. Upstream not opened. Not installed. |
 
 Add new rows here before pushing a carry. Upstream the individual fix as a normal PR from a short-lived branch off origin/main when appropriate.
 
