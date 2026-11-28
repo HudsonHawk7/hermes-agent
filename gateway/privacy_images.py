@@ -2,16 +2,23 @@
 
 A privacy file's name starts with ``privacy_`` so a crash sweep can find
 leftovers without touching pictures the girls already made (those use
-``img_``). Sweep only deletes the privacy prefix.
+``img_``). The sweep looks only in the image cache folders the stager
+writes, and only at regular files with a staged image suffix. It does not
+walk the rest of the home, and it never deletes a ``.py`` file.
 """
 
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 PRIVACY_PREFIX = "privacy_"
+# Suffixes ``gateway.session_images._stage`` accepts for a privacy attach.
+STAGED_PRIVACY_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
 
 
 def is_privacy_staged_path(path: str | os.PathLike) -> bool:
@@ -60,22 +67,72 @@ def release_session_privacy_images(session: dict | None, session_id: str | None 
     return released
 
 
+def _cache_dir_inside(path: Path, root: Path) -> Path | None:
+    """A real directory under *root*, or None. Symlinks are not followed."""
+    if path.is_symlink() or not path.is_dir():
+        return None
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return None
+    return path
+
+
+def privacy_image_cache_dirs(root: str | os.PathLike) -> list[Path]:
+    """Folders the stager writes: ``<home>/cache/images`` and each profile's."""
+    root_path = Path(root)
+    found: list[Path] = []
+    own = _cache_dir_inside(root_path / "cache" / "images", root_path)
+    if own is not None:
+        found.append(own)
+    profiles = root_path / "profiles"
+    if _cache_dir_inside(profiles, root_path) is None:
+        return found
+    try:
+        entries = list(profiles.iterdir())
+    except OSError:
+        logger.warning("privacy image sweep could not list %s", profiles, exc_info=True)
+        return found
+    for entry in entries:
+        if entry.name.startswith(".") or entry.is_symlink() or not entry.is_dir():
+            continue
+        cache = _cache_dir_inside(entry / "cache" / "images", root_path)
+        if cache is not None:
+            found.append(cache)
+    return found
+
+
+def _is_staged_privacy_image(path: Path) -> bool:
+    if not path.name.startswith(PRIVACY_PREFIX):
+        return False
+    suffix = path.suffix.lower()
+    if suffix == ".py" or suffix not in STAGED_PRIVACY_SUFFIXES:
+        return False
+    try:
+        return path.is_file() and not path.is_symlink()
+    except OSError:
+        return False
+
+
 def sweep_privacy_images(root: str | os.PathLike) -> list[str]:
-    """Delete leftover privacy_ files under HERMES_HOME (crash recovery)."""
+    """Delete leftover privacy pictures in the home's image cache folders."""
     root_path = Path(root)
     if not root_path.exists():
         return []
     released: list[str] = []
-    skip = {"node_modules", ".git", "environments", "venv", "__pycache__"}
-    for dirpath, dirs, files in os.walk(root_path):
-        dirs[:] = [name for name in dirs if name not in skip]
-        for name in files:
-            if not name.startswith(PRIVACY_PREFIX):
+    for folder in privacy_image_cache_dirs(root_path):
+        try:
+            names = list(folder.iterdir())
+        except OSError:
+            logger.warning("privacy image sweep could not list %s", folder, exc_info=True)
+            continue
+        for path in names:
+            if not _is_staged_privacy_image(path):
                 continue
-            path = Path(dirpath) / name
             try:
                 path.unlink()
             except OSError:
+                logger.warning("privacy image sweep could not delete %s", path, exc_info=True)
                 continue
             released.append(str(path))
     return released
