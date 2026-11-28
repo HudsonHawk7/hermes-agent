@@ -3,7 +3,7 @@ import { mergeUsage } from '@hermes/shared'
 import { resolveSessionRpcOwner } from '@/app/contrib/wiring-routing'
 import { textWithoutReferenceLines } from '@/components/assistant-ui/reference-kinds'
 import { getSession } from '@/hermes'
-import { sameAttachmentTurn, spliceOlderPreservedRows } from '@/lib/chat-messages'
+import { sameAttachmentTurn, spliceOlderPreservedRows, unwrapCompactionSteerText } from '@/lib/chat-messages'
 import {
   assistantTextPart,
   type ChatMessage,
@@ -1034,8 +1034,8 @@ export function preserveLocalPendingTurnMessages(
           // repeat of the same captioned paste). The rowId-less paste from
           // #120978 carries no identity and keeps matching tolerantly.
           !conflictingTranscriptIdentity(message, candidate) &&
-          (textWithoutReferenceLines(chatMessageText(candidate)) ===
-            textWithoutReferenceLines(chatMessageText(message)) ||
+          (textWithoutReferenceLines(unwrapCompactionSteerText(chatMessageText(candidate))) ===
+            textWithoutReferenceLines(unwrapCompactionSteerText(chatMessageText(message))) ||
             sameAttachmentTurn(candidate, message))
       )
     ) {

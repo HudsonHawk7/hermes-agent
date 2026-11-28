@@ -681,7 +681,7 @@ def _project_for_display(messages: list, *, home=None, inline_images: bool = Tru
     Desktop collapses other display-only rows; typed notices stay for the timeline.
     """
     from agent.compaction_display import project_compaction_message_for_display
-    from agent.context_compressor import is_compaction_summary_message
+    from agent.context_compressor import _INFLIGHT_TASK_REPLAY_HEADER, is_compaction_summary_message
     from agent.conversation_compression import _extract_steer_text_from_message
     from agent.history_commentary import project_history_commentary
     from agent.prompt_builder import STEER_DISPLAY_KIND
@@ -715,9 +715,10 @@ def _project_for_display(messages: list, *, home=None, inline_images: bool = Tru
             projected_messages.append(projected)
             continue
         # Mid-turn steer: the user's own words, not the model-facing marker (same as session.resume).
-        if message.get("role") == "user" and message.get("display_kind") == STEER_DISPLAY_KIND and (
+        # Marker text is the signal: compaction restates a steer without its display_kind.
+        if message.get("role") == "user" and (
                 steer_text := _extract_steer_text_from_message(message)):
-            message = {**message, "display_content": steer_text}
+            message = {**message, "display_content": steer_text, "display_kind": STEER_DISPLAY_KIND}
         if not is_compaction_summary_message(message):
             projected_messages.append(message)
             continue
@@ -732,6 +733,16 @@ def _project_for_display(messages: list, *, home=None, inline_images: bool = Tru
             # wrapper must not hide a successfully recovered live ask.
             projected["display_content"] = display_view.get("content")
             projected.pop("display_kind", None)
+            # A steer merged onto the summary carrier survives the strip as the live ask, wrappers and
+            # all. Peel them here too: the pre-strip pass above only sees the whole carrier.
+            if projected.get("role") == "user" and (
+                    steer_text := _extract_steer_text_from_message(projected)):
+                projected["display_content"] = steer_text
+                projected["display_kind"] = STEER_DISPLAY_KIND
+            elif projected.get("role") == "user" and isinstance(projected.get("display_content"), str) and (
+                    _INFLIGHT_TASK_REPLAY_HEADER in projected["display_content"]):
+                projected["display_content"] = projected["display_content"].rsplit(
+                    _INFLIGHT_TASK_REPLAY_HEADER, 1)[1].strip()
         projected_messages.append(projected)
     return project_history_commentary(projected_messages, home=home)
 

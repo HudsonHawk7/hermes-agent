@@ -376,6 +376,40 @@ def _is_compressed_summary_message(message: Any) -> bool:
     return is_compaction_summary_message(message)
 
 
+def _peel_inflight_header(text: str) -> str:
+    """Drop the compaction in-flight replay header. It is model-facing scaffolding, never typed."""
+    from agent.context_compressor import _INFLIGHT_TASK_REPLAY_HEADER
+    if isinstance(text, str) and _INFLIGHT_TASK_REPLAY_HEADER in text:
+        return text.rsplit(_INFLIGHT_TASK_REPLAY_HEADER, 1)[1].strip()
+    return text
+
+
+def _unwrap_steer_for_display(message: dict) -> dict:
+    """The user's own words, not the model-facing marker wrapper.
+
+    Compaction restates a steer under the in-flight header and drops ``display_kind``, so the
+    markers themselves are the signal — a pre-tagged row is not required. An ordinary user turn
+    restated the same way is peeled too, but stays untagged: only a real steer marker earns
+    ``display_kind='steer'``.
+    """
+    from agent.conversation_compression import (
+        _STEER_FALLBACK_OPEN, _extract_steer_text_from_message, _steer_markers)
+    from agent.prompt_builder import STEER_DISPLAY_KIND
+
+    if message.get("role") != "user":
+        return message
+    steer_text = _extract_steer_text_from_message(message)
+    if not steer_text or steer_text == (message.get("content") or ""):
+        content = message.get("content")
+        peeled = _peel_inflight_header(content) if isinstance(content, str) else content
+        return message if peeled == content else {**message, "content": peeled}
+    open_marker, _ = _steer_markers()
+    raw = message.get("content") or ""
+    if open_marker in raw or _STEER_FALLBACK_OPEN in raw:
+        return {**message, "content": steer_text, "display_kind": STEER_DISPLAY_KIND}
+    return {**message, "content": steer_text}
+
+
 def _project_client_message(message: dict[str, Any]) -> dict[str, Any]:
     """Strip compaction scaffolding: standalone handoffs become hidden empty rows (stable
     ids), merged handoffs keep only the real prior-tail content; inherited tool calls dropped."""
@@ -392,6 +426,8 @@ def _project_client_message(message: dict[str, Any]) -> dict[str, Any]:
         projected = {k: v for k, v in message.items() if k not in _COMPACTION_INTERNAL_FIELDS}
         projected["content"] = ""
         projected["display_kind"] = "hidden"
+    else:
+        projected = _unwrap_steer_for_display(projected)
     return projected
 
 

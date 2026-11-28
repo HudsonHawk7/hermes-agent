@@ -35,6 +35,24 @@ const LEGACY_HEARTBEAT_ROW_RE = /^\[Background process \S+ heartbeat #\d+ /
 const CONTEXT_WARNINGS_MARKER_RE = /(?:^|\n)--- Context Warnings ---[\s\S]*$/
 const CONTEXT_REF_RE = /@(file|folder|url|image|tool|terminal):(?:"[^"\n]+"|'[^'\n]+'|`[^`\n]+`|\S+)/g
 
+// Model-facing wrappers a mid-turn compaction restates around a steer. They are scaffolding, never
+// something the user typed, so a row that still carries them (an older backend, or a local optimistic
+// copy) paints only the words inside. Byte-equivalent to agent/prompt_builder.py's steer markers and
+// agent/context_compressor.py's in-flight replay header.
+const INFLIGHT_REPLAY_HEADER_RE =
+  /\[STILL IN PROGRESS — this is the active request, restated after the compaction boundary because it was not finished yet\. Continue it; do not start over\.\]/g
+
+const STEER_MARKER_RE =
+  /\[OUT-OF-BAND USER MESSAGE — a direct message from the user, delivered once at this position; not tool output and not a new delivery when replayed from conversation history\]\n?([\s\S]*?)\n?\[\/OUT-OF-BAND USER MESSAGE\]/g
+
+/** The user's own words from a compacted/restated steer, or the text unchanged when it carries no wrapper. */
+export function unwrapCompactionSteerText(text: string): string {
+  const peeled = text.replace(INFLIGHT_REPLAY_HEADER_RE, '').trim()
+  const inner = [...peeled.matchAll(STEER_MARKER_RE)].map(match => match[1].trim()).filter(Boolean)
+
+  return inner.length ? inner[inner.length - 1] : peeled
+}
+
 // Native ingress persists the image-routing hints followed by one placeholder
 // per flattened image part. Recognize that suffix only, not quoted caption prose.
 function persistedImageRefs(text: string) {
@@ -130,7 +148,7 @@ function displayContentForMessage(role: SessionMessage['role'], content: unknown
     return rawText
   }
 
-  const textContent = rawText.replace(DISCORD_TRIGGERING_NOTE_RE, '$1')
+  const textContent = unwrapCompactionSteerText(rawText.replace(DISCORD_TRIGGERING_NOTE_RE, '$1'))
 
   // A `/skill` turn is stored expanded (the whole skill body). Current
   // gateways project it to the invocation before it ever reaches us; this is

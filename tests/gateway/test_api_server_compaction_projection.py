@@ -300,3 +300,108 @@ class TestMessagesEndpointProjection:
                      "child question 2", "child answer 2"):
             assert full.count(text) == 1, (text, full)
         assert full.index("parent ask") < full.index("child question 1") < full.index("child answer 2")
+
+    @pytest.mark.asyncio
+    async def test_compacted_and_restated_steer_turn_strips_wrappers_and_preserves_order(
+        self, adapter, session_db, tmp_path, monkeypatch
+    ):
+        from agent.context_compressor import _INFLIGHT_TASK_REPLAY_HEADER, _SUMMARY_END_MARKER
+        from agent.message_metadata import MESSAGE_UID, mark_inflight_restatement, stamp_message_uid
+        from agent.prompt_builder import steer_user_row
+        from hermes_cli.web_routers.sessions import _project_for_display
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        sid = session_db.create_session("steer-compacted", "api_server")
+        session_db.append_message(sid, "user", "initial question")
+        session_db.append_message(sid, "assistant", "", tool_calls=[{
+            "id": "call_1", "type": "function",
+            "function": {"name": "read_file", "arguments": '{"path": "a.txt"}'},
+        }])
+        session_db.append_message(sid, "tool", "contents", tool_name="read_file", tool_call_id="call_1")
+
+        steer_prompt = "you better check in with architect_Claude_Code and get your brief"
+        steer_row = steer_user_row(steer_prompt)
+        stamp_message_uid(steer_row)
+        steer_uid = steer_row[MESSAGE_UID]
+        session_db.append_message(
+            sid, "user", steer_row["content"],
+            display_kind=steer_row["display_kind"],
+            message_uid=steer_uid,
+        )
+        session_db.append_message(sid, "assistant", "", tool_calls=[{
+            "id": "call_2", "type": "function",
+            "function": {"name": "read_file", "arguments": '{"path": "b.txt"}'},
+        }])
+        session_db.append_message(sid, "tool", "more contents", tool_name="read_file", tool_call_id="call_2")
+
+        # Compaction 1: standalone in-flight restatement row (not a summary carrier).
+        restated = {
+            "role": "user",
+            "content": f"{_INFLIGHT_TASK_REPLAY_HEADER}\n{steer_row['content']}",
+            "display_kind": steer_row["display_kind"],
+            MESSAGE_UID: steer_uid,
+        }
+        mark_inflight_restatement(restated)
+        session_db.archive_and_compact(
+            sid,
+            [_row("user", STANDALONE_SUMMARY), restated],
+            watermark=session_db.get_active_message_watermark(sid),
+        )
+        session_db.append_message(sid, "assistant", "Checked my MCP brief and synced.")
+
+        async with TestClient(TestServer(_messages_app(adapter))) as client:
+            resp1 = await client.get(f"/api/sessions/{sid}/messages?include_compacted=true")
+            assert resp1.status == 200
+            gen1_data = (await resp1.json())["data"]
+
+        gen1_visible = [m for m in gen1_data if m.get("display_kind") != "hidden" and (m.get("content") or m.get("tool_calls"))]
+        gen1_texts = [m.get("content") for m in gen1_visible if m["role"] in ("user", "assistant") and m.get("content")]
+        assert gen1_texts == [
+            "initial question",
+            steer_prompt,
+            "Checked my MCP brief and synced.",
+        ]
+        steer_gen1 = next(m for m in gen1_visible if m.get("content") == steer_prompt)
+        assert steer_gen1.get("display_kind") == "steer"
+
+        # Compaction 2: summary merged directly onto the restated steer carrier row.
+        merged_steer_carrier = _row(
+            "user",
+            f"{STANDALONE_SUMMARY}\n\n{_INFLIGHT_TASK_REPLAY_HEADER}\n{steer_row['content']}",
+            _compressed_summary=True,
+            display_kind=steer_row["display_kind"],
+            message_uid=steer_uid,
+        )
+        session_db.archive_and_compact(
+            sid,
+            [merged_steer_carrier, {"role": "assistant", "content": "Checked my MCP brief and synced."}],
+            watermark=session_db.get_active_message_watermark(sid),
+        )
+
+        async with TestClient(TestServer(_messages_app(adapter))) as client:
+            resp2 = await client.get(f"/api/sessions/{sid}/messages?include_compacted=true")
+            assert resp2.status == 200
+            gen2_data = (await resp2.json())["data"]
+
+        gen2_texts = [m.get("content") for m in gen2_data if m.get("display_kind") != "hidden" and m["role"] in ("user", "assistant") and m.get("content")]
+        assert gen2_texts == [
+            "initial question",
+            steer_prompt,
+            "Checked my MCP brief and synced.",
+        ]
+        rendered_blob = " ".join(str(m.get("content") or "") for m in gen2_data)
+        assert "STILL IN PROGRESS" not in rendered_blob
+        assert "OUT-OF-BAND USER MESSAGE" not in rendered_blob
+        steer_gen2 = next(m for m in gen2_data if m.get("content") == steer_prompt)
+        assert steer_gen2.get("display_kind") == "steer"
+
+        web_projected = _project_for_display(session_db.get_messages(sid, include_compacted=True))
+        web_texts = [m.get("display_content") or m.get("content") for m in web_projected if m.get("display_kind") != "hidden" and m.get("role") in ("user", "assistant") and (m.get("display_content") or m.get("content"))]
+        assert web_texts == [
+            "initial question",
+            steer_prompt,
+            "Checked my MCP brief and synced.",
+        ]
+        web_steer = [m for m in web_projected if (m.get("display_content") or m.get("content")) == steer_prompt]
+        assert len(web_steer) == 1
+        assert web_steer[0].get("display_kind") == "steer"

@@ -296,7 +296,7 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
             msg.get("platform_message_id") or msg.get("message_id"),
             1 if msg.get("observed") else 0, 1 if msg.get("_compressed_summary") else 0, 1,
             _str_or_none(msg.get("api_content")), _str_or_none(msg.get("display_kind")),
-            display_metadata, self._display_identity(self._display_dedupe_key(identity_row)),
+            display_metadata, msg.get("_display_identity_override") or self._display_identity(self._display_dedupe_key(identity_row)),
             message_uid_or_none(msg), _absorbed_uids_json(msg),
             _tool_call_uids_json(msg), _tool_call_uid_or_none(msg))
 
@@ -640,7 +640,7 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
             donors: dict[tuple[Any, ...], list[Any]] = {}
             for row in conn.execute(
                     "SELECT id, role, content, timestamp, tool_call_id, tool_calls, tool_name FROM messages "
-                    "WHERE session_id = ? AND active = 1 ORDER BY id", (parent_session_id,)).fetchall():
+                    "WHERE session_id = ? AND (active = 1 OR compacted = 0) ORDER BY id", (parent_session_id,)).fetchall():
                 donors.setdefault((row["role"], row["content"], row["tool_call_id"], row["tool_calls"],
                     row["tool_name"]), []).append(row["timestamp"])
             for i in candidates:
@@ -682,6 +682,25 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
             msg["timestamp"] = message_timestamp
             if cur.lastrowid is not None:
                 msg["_row_id"] = cur.lastrowid
+                if msg.get("_display_order_override") is not None:
+                    conn.execute("UPDATE messages SET display_order = ? WHERE id = ?",
+                                 (msg["_display_order_override"], cur.lastrowid))
+            # A compaction's carried tail is the same turns written again, with a fresh uid and timestamp,
+            # so its display identity cannot join the original and the banner paints the turn twice. The
+            # tail follows the summary carrier in this same insert; fold those rows onto the earlier copy.
+            if msg.get("_compressed_summary"):
+                following = messages[messages.index(msg) + 1:messages.index(msg) + 9]
+                for later in following:
+                    if not later.get("content"):
+                        continue
+                    earlier = conn.execute(
+                        "SELECT display_order, display_identity FROM messages WHERE session_id = ? "
+                        "AND role = ? AND content = ? AND id < ? ORDER BY id LIMIT 1",
+                        (session_id, later.get("role", "unknown"), self._encode_content(later.get("content")),
+                         cur.lastrowid)).fetchone()
+                    if earlier:
+                        later["_display_order_override"] = earlier["display_order"]
+                        later["_display_identity_override"] = earlier["display_identity"]
             inserted += 1
             tool_calls_total += _tool_calls_count(tool_calls)
             now_ts = max(now_ts, message_timestamp) + 1e-6
@@ -877,9 +896,8 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
                 f"WHERE session_id = ? AND id IN ({placeholders})",
                 [session_id, *rewind_ids])
         conn.execute(_ARCHIVE_ACTIVE_SQL, (session_id,))
-        # Same identity carry as publish_compression_child (#59661): carried tail copies keep the
-        # durable row's timestamp so display dedupe still collapses generations. Donors are active-only;
-        # the rewound/archived originals above never donate, so this is a no-op for a clean compaction.
+        # The tail's originals were just rewound above, so the carry has to see rewound rows too or a
+        # verbatim carried copy gets a fresh timestamp and paints as a second turn.
         self._carry_parent_timestamps(conn, session_id, compacted_messages)
         inserted, tool_calls_total = self._insert_message_rows(conn, session_id, compacted_messages)
         if unseen:
@@ -891,8 +909,11 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
             inserted += len(unseen)
             tool_calls_total += unseen_tool_calls
         # A carried copy whose stored identity was computed differently lands in its own
-        # display_order group and would project twice; re-fold before publishing (#122167).
+        # display_order group and would project twice; re-fold before publishing (#122167). The
+        # reconcile recomputes identities from content, which splits a verbatim carried tail back out, so
+        # the tail fold runs last and its slot is what gets published.
         self._reconcile_display_orders(conn, session_id)
+        self._fold_carried_tail(conn, session_id, compacted_messages)
         conn.execute(
             f"{_SET_COUNTERS_SQL}{', model_config = ?' if patch else ''} WHERE id = ?",
             (inserted, tool_calls_total, *((patched_model_config,) if patch else ()), session_id))
@@ -1000,21 +1021,42 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
             conn.execute(f"{_ARCHIVE_ACTIVE_SQL} AND id NOT IN ({placeholders})", [session_id, *rewind_ids])
         else:
             conn.execute(_ARCHIVE_ACTIVE_SQL, (session_id,))
-        # Same identity carry as publish_compression_child (#59661): carried tail copies keep the
-        # durable row's timestamp so display dedupe still collapses generations. Donors are active-only;
-        # the rewound/archived originals above never donate, so this is a no-op for a clean compaction.
+        # The tail's originals were just rewound above, so the carry has to see rewound rows too or a
+        # verbatim carried copy gets a fresh timestamp and paints as a second turn.
         self._carry_parent_timestamps(conn, session_id, compacted_messages)
         inserted, tool_calls_total = self._insert_message_rows(conn, session_id, compacted_messages)
+        self._fold_carried_tail(conn, session_id, compacted_messages)
         if tail_ids:
             self._clone_message_rows(conn, tail_ids)
             inserted += len(tail_ids)
             tool_calls_total += tail_tool_calls
         # A carried copy whose stored identity was computed differently lands in its own
-        # display_order group and would project twice; re-fold before publishing (#122167).
+        # display_order group and would project twice; re-fold before publishing (#122167). The
+        # reconcile recomputes identities from content, which splits a verbatim carried tail back out, so
+        # the tail fold runs last and its slot is what gets published.
         self._reconcile_display_orders(conn, session_id)
+        self._fold_carried_tail(conn, session_id, compacted_messages)
         conn.execute(f"{_SET_COUNTERS_SQL}{', model_config = ?' if patch else ''} WHERE id = ?",
             (inserted, tool_calls_total, *((patched_model_config,) if patch else ()), session_id))
         return inserted
+
+    def _fold_carried_tail(self, conn, session_id: str, compacted_messages: list[dict[str, Any]]) -> None:
+        """Point a carried tail row at its original's display identity.
+
+        The tail is the same turn written again, sharing nothing the insert trigger can match, so it
+        gets a slot of its own and the banner paints the turn twice. Sharing the identity lets the
+        visibility trigger re-slot it into the original's group.
+        """
+        for msg in compacted_messages:
+            if msg.get("_compressed_summary") or not msg.get("content") or msg.get("_row_id") is None:
+                continue
+            earlier = conn.execute(
+                "SELECT display_order, display_identity FROM messages WHERE session_id = ? AND role = ? "
+                "AND content = ? AND id < ? ORDER BY id LIMIT 1",
+                (session_id, msg.get("role"), self._encode_content(msg.get("content")), msg["_row_id"])).fetchone()
+            if earlier and earlier["display_identity"] is not None:
+                conn.execute("UPDATE messages SET display_identity = ?, display_order = ? WHERE id = ?",
+                             (earlier["display_identity"], earlier["display_order"], msg["_row_id"]))
 
     def _message_column_names(self, conn) -> list[str]:
         """Column names of the messages table, cached per-connection era."""
@@ -1088,6 +1130,16 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
                 "display_metadata": self._decode_display_metadata(row["display_metadata"])})
             if handoff is not None and live_view is not None:
                 dedupe_content = self._encode_content(live_view.get("content"))
+            else:
+                # A compaction restates a still-running turn under the in-flight header (and a steer
+                # inside its markers). The header changes the bytes but not the turn, so the copy and
+                # its original must share one display identity or the banner paints the request twice.
+                from agent.conversation_compression import _display_inner_text
+                decoded = self._decode_content(row["content"])
+                if isinstance(decoded, str):
+                    inner = _display_inner_text(decoded)
+                    if inner and inner != decoded:
+                        dedupe_content = self._encode_content(inner)
         return _stable_tool_key(row) or (
             row["role"], dedupe_content, row["timestamp"], row["tool_call_id"], row["tool_calls"], row["tool_name"])
 
@@ -1111,6 +1163,12 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
             return key
         if row["_compressed_summary"]:
             return first_by_uid.get(uid, key)
+        from agent.context_compressor import _INFLIGHT_TASK_REPLAY_HEADER
+        content = row["content"] or ""
+        if _INFLIGHT_TASK_REPLAY_HEADER in content and uid in first_by_uid:
+            # A standalone in-flight restatement keeps its message's uid but gets a fresh timestamp,
+            # so the content key cannot join it to the original. It IS that turn, restated.
+            return first_by_uid[uid]
         first_by_uid.setdefault(uid, key)
         return key
 
@@ -1126,6 +1184,8 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
         seen: dict[tuple[Any, ...], Any] = {}
         first_id: dict[tuple[Any, ...], int] = {}
         uid_key: dict[Any, tuple[Any, ...]] = {}  # message_uid -> the display key of its first copy
+        content_key: dict[tuple, tuple[Any, ...]] = {}  # (role, content) of a carrier's tail -> first copy's key
+        after_carrier = False
         removed: dict[Any, bool] = {}  # copy identity -> its newest copy is removed (rows come in id order)
         identities: dict[tuple[Any, ...], list[Any]] = {}
         removed_ts: set[Any] = set()
@@ -1156,6 +1216,15 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
             # Only the summary carrier folds by uid: other rewritten copies (a pruned tool stub) must keep
             # their archived original visible.
             key = self._fold_summary_carrier(row, key, uid_key)
+            # A verbatim carried tail is the same turn written again. It keeps its message's uid only when
+            # the compressor copied the row; a hand-built carrier does not, and the copy's fresh timestamp
+            # then beats every other key. Role plus bytes is all such a copy shares, so that joins it.
+            if row["_compressed_summary"]:
+                after_carrier = True
+            elif after_carrier and row["content"]:
+                key = content_key.setdefault((row["role"], row["content"]), key)
+            else:
+                after_carrier = False
             cur = seen.get(key)
             if cur is None or (row["active"], row["id"]) > (cur["active"], cur["id"]):
                 seen[key] = row
@@ -1179,21 +1248,32 @@ class SessionMessagesMixin(SessionDetachedResultsMixin, SessionTodoResultMixin):
         path's ``ORDER BY candidate.active DESC, candidate.id DESC``. Writes only on drift."""
         first_id: dict[bytes, int] = {}
         uid_identity: dict[str, bytes] = {}  # message_uid -> its first copy's identity (the carrier rule)
+        content_identity: dict[tuple, bytes] = {}  # (role, content) of a carrier's tail -> first copy's identity
+        after_carrier = False
+        batch_ended_on_carrier = False
         last_id = 0
         while True:
             rows = conn.execute(
                 "SELECT id, role, content, timestamp, tool_call_id, tool_calls, tool_name, "
                 "display_kind, display_metadata, display_order, display_identity, message_uid, _compressed_summary "
                 "FROM messages INDEXED BY idx_messages_session_id "
-                "WHERE session_id = ? AND id > ? AND (active = 1 OR compacted = 1) "
-                "ORDER BY id LIMIT 1000",
+                "WHERE session_id = ? AND id > ? ORDER BY id LIMIT 1000",
                 (session_id, last_id))
             batch_start = last_id
             updates = []
+            after_carrier = batch_ended_on_carrier
             for row in rows:
                 last_id = row["id"]
                 identity = self._fold_summary_carrier(
                     row, self._display_identity(self._display_dedupe_key(row)), uid_identity)
+                # Same rule as _dedupe_display_generations: a carried copy shares nothing but role and bytes.
+                if row["_compressed_summary"]:
+                    after_carrier = True
+                elif after_carrier and row["content"]:
+                    identity = content_identity.setdefault((row["role"], row["content"]), identity)
+                else:
+                    after_carrier = False
+                batch_ended_on_carrier = after_carrier
                 # A row already holding this identity keeps its stored slot (an in-place prune changes a
                 # row's content, not its place); otherwise the slot is the identity's first row.
                 kept = row["display_order"] if row["display_identity"] == identity else None

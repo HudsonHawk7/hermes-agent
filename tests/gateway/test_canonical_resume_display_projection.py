@@ -79,3 +79,58 @@ async def test_resume_without_projection_is_unchanged(tmp_path, monkeypatch):
     reply = await native.dispatch({'id': 1, 'method': 'session.resume', 'params': {'session_id': 'old-tui'}})
     assert 'result' in reply, reply
     assert 'display_messages' not in reply['result']
+
+
+@pytest.mark.asyncio
+async def test_resume_display_projection_unwraps_compacted_and_restated_steer(tmp_path, monkeypatch):
+    from agent.context_compressor import SUMMARY_PREFIX, _INFLIGHT_TASK_REPLAY_HEADER, _SUMMARY_END_MARKER
+    from agent.message_metadata import mark_inflight_restatement
+    from agent.prompt_builder import steer_user_row
+
+    db, native = await _native(tmp_path, monkeypatch)
+    db.create_session('compacted-steer-tui', source='tui', model='fake-model')
+    steer = steer_user_row('check in with architect_ClaudeCode first')
+    merged_carrier = (
+        f"{SUMMARY_PREFIX}\nCompacted context.\n"
+        f"{_SUMMARY_END_MARKER}\n\n"
+        f"{_INFLIGHT_TASK_REPLAY_HEADER}\n"
+        f"{steer['content']}"
+    )
+    db.append_message(
+        'compacted-steer-tui',
+        'user',
+        merged_carrier,
+        display_kind=steer['display_kind'],
+    )
+    db.append_message('compacted-steer-tui', 'assistant', 'Checked brief and synced.')
+
+    restated_user = {
+        'role': 'user',
+        'content': f"{_INFLIGHT_TASK_REPLAY_HEADER}\ntake the first work item",
+    }
+    mark_inflight_restatement(restated_user)
+    db.append_message(
+        'compacted-steer-tui',
+        'user',
+        restated_user['content'],
+        display_metadata=restated_user['display_metadata'],
+    )
+    db.append_message('compacted-steer-tui', 'assistant', 'Working on it now.')
+    db.end_session('compacted-steer-tui', 'tui_shutdown')
+
+    reply = await native.dispatch({
+        'id': 2,
+        'method': 'session.resume',
+        'params': {'session_id': 'compacted-steer-tui', 'display_projection': True},
+    })
+    assert 'result' in reply, reply
+    shown = reply['result']['display_messages']
+    blob = json.dumps(shown)
+    assert 'STILL IN PROGRESS' not in blob
+    assert 'OUT-OF-BAND' not in blob
+    assert [(m['role'], m['text'].strip(), m.get('display_kind')) for m in shown] == [
+        ('user', 'check in with architect_ClaudeCode first', 'steer'),
+        ('assistant', 'Checked brief and synced.', None),
+        ('user', 'take the first work item', None),
+        ('assistant', 'Working on it now.', None),
+    ]
