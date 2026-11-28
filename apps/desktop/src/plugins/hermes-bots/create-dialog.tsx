@@ -66,7 +66,6 @@ import { canonicalGroupCreateError, canonicalGroupCreateNotice, canonicalGroupRe
 import type { GroupCreationIntent } from './canonical-groups'
 import { $botMeta, $lastRoster, botHandle, botRosterKey, filterBots, ROSTER_KEY, saveBotMeta } from './data'
 import { labeled, ResizableFrame } from './dialog-parts'
-import { GroupImageControls } from './group-chat-parts'
 import { GROUP_CHAT_MAX_MEMBERS, mintGroupRoomId, uniqueGroupChatName, updateGroupChat } from './group-chat'
 import { memberMachineOffline, setGroupMembership } from './group-chat-view-members'
 import {
@@ -1418,7 +1417,6 @@ export function CreateGroupChatDialog({ open, roster, onClose, onCreated, seed }
   const [query, setQuery] = useState('')
   const [checked, setChecked] = useState<Record<string, boolean>>({})
   const [name, setName] = useState('')
-  const [image, setImage] = useState<null | string>(null)
   const [notice, setNotice] = useState('')
   // A notice speaks for the draft that asked; a late answer must not land on a newer one.
   const draft = useRef(0)
@@ -1437,7 +1435,6 @@ export function CreateGroupChatDialog({ open, roster, onClose, onCreated, seed }
       setQuery('')
       setChecked(Object.fromEntries((seed?.bots ?? []).map(bot => [botRosterKey(bot), true])))
       setName(seed?.name ?? '')
-      setImage(null)
     }
     // The seed is read once per open: a re-render must not wipe the person's picks.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1509,8 +1506,6 @@ export function CreateGroupChatDialog({ open, roster, onClose, onCreated, seed }
         updateGroupChat(groupName, room => {
           room.members = roomMembers
           room.roomId = roomId
-
-          if (image) {room.image = image}
 
           return room
         })
@@ -1687,12 +1682,6 @@ export function CreateGroupChatDialog({ open, roster, onClose, onCreated, seed }
               create()
             }}
           >
-            <GroupImageControls
-              image={image}
-              onImage={setImage}
-              seedMembers={selected.map(bot => bot.name)}
-              seedName={name.trim() || placeholder}
-            />
             <Input
               aria-label={b.group.nameLabel}
               maxLength={64}

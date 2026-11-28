@@ -176,6 +176,7 @@ export function CanonicalGroupAttachments({ binding, attachments, onChange, onUp
 
   const chips = (attachments.length > 0 || error) && <div className={cn('flex flex-wrap items-center gap-1.5', !readOnly && ROOM_COMPOSER_AREAS.files, readOnly && 'mt-1')}>
     {attachments.map(a => <span className="inline-flex min-w-0 items-center gap-1 rounded-md border border-(--ui-stroke-tertiary) py-0.5 pl-1.5 pr-0.5 text-[0.6875rem] text-(--ui-text-secondary)" key={a.attachment_id ?? a.name}>
+      {readOnly && <InlineAttachment attachment={a} binding={binding} disabled={disabled} />}
       <Codicon className="shrink-0 text-(--ui-text-tertiary)" name={a.kind === 'image' ? 'file-media' : a.kind === 'pdf' ? 'file-pdf' : 'file'} />
       <span className="max-w-48 truncate">{a.name}</span>
       <Tip label={labels.download}>

@@ -95,8 +95,8 @@ import {
   observeGroupChatLogResize,
   scrollGroupChatToBottom
 } from './group-chat-follow'
-import { GroupClarifyCard, GroupImageControls, GroupMentionInput, focusComposerEnd } from './group-chat-parts'
 import { LegacyRoomTitle, LegacyWorkingRow } from './group-chat-legacy-parts'
+import { focusComposerEnd, GroupClarifyCard, GroupImageControls, GroupMentionInput } from './group-chat-parts'
 import type { GroupRoomPrompt } from './group-chat-parts'
 import { GroupMemberPicker } from './group-chat-view-members'
 import { compressGroupMemberHistory } from './group-compress'
@@ -810,6 +810,7 @@ function GroupExecutionGate(props: GroupChatWorkspaceProps) {
 
       if (!sourceCurrent()) {
         setError(b.canonical.driverUnavailable)
+
         return
       }
 
@@ -824,7 +825,7 @@ function GroupExecutionGate(props: GroupChatWorkspaceProps) {
         })
         .catch(e => { if (sourceCurrent()) {setError(canonicalGroupCreateError(e, b.canonical))} }).finally(() => setBusy(false))
     }}>{b.canonical.startGatewayGroup}</Button>}
-    {canonicalGroupKeyRoute(props.group, props.origin ?? 'name') === null && <GateEarlierMessages labels={b.canonical} room={classicRoom} />}
+    {mode !== 'checking' && canonicalGroupKeyRoute(props.group, props.origin ?? 'name') === null && <GateEarlierMessages labels={b.canonical} room={classicRoom} />}
   </div>
 }
 
