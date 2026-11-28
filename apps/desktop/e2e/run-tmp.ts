@@ -55,4 +55,6 @@ export async function prepareRunTmp(): Promise<string> {
       // Windows can still hold a handle for a moment
     }
   })
+
+  return root
 }

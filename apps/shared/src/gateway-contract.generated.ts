@@ -2960,7 +2960,7 @@ export interface ImageAttachParams {
   profile?: string | null
   path: string
 }
-/** ``content_base64`` (or the ``data`` alias) carries the bytes; ``filename`` / ``ext`` only hint the extension — magic bytes decide. */
+/** ``content_base64`` (or the ``data`` alias) carries the bytes; ``filename`` / ``ext`` only hint the extension — magic bytes decide. ``privacy`` is the group-chat flag (bool or ``true`` / ``false``); the canonical dispatcher refuses an undeclared key before the handler. */
 export interface ImageAttachBytesParams {
   session_id: string
   profile?: string | null
@@ -2968,6 +2968,7 @@ export interface ImageAttachBytesParams {
   data?: string | null
   filename?: string | null
   ext?: string | null
+  privacy?: boolean | string | null
 }
 /** Host ``path`` or base64 ``content_base64`` / ``data``; ``first_page`` / ``last_page`` bound the render (per-call page cap enforced server-side). */
 export interface PdfAttachParams {
@@ -3180,6 +3181,7 @@ export interface WakeStartResult {
 export interface WakeStopParams {
   persist?: boolean | null
   profile?: string | null
+  reason?: string | null
 }
 export interface WakeStopResult {
   reason?: string | null
@@ -3241,6 +3243,50 @@ export interface WakeFeedParams {
 export interface WakeFeedResult {
   reason?: string | null
   fed: boolean
+}
+export interface VoiceHubStateParams {
+  profile?: string | null
+}
+/** ``tui_gateway/voice_hub.py::VoiceHub.state`` — the listening light's ONLY input. Exactly four fields, and the contract stays closed (``Result`` forbids extras) so a fifth one fails here instead of drifting into a client that renders the mic. ``status`` is the state machine; ``owner_surface`` the surface holding the claim (null when nothing does); ``since`` the epoch seconds of the last transition; ``stop_reason`` why capture is not open (``user_stop`` / ``paused`` / ``detected`` / ``reclaimed`` / ``start_failed``), null while armed. */
+export interface VoiceHubStateResult {
+  status: VoiceHubStatus
+  owner_surface?: string | null
+  since?: number | null
+  stop_reason?: string | null
+}
+/** The Hub's whole state machine: idle at boot, armed by a person, stopped when released. */
+export type VoiceHubStatus = 'armed' | 'idle' | 'stopped'
+export interface VoiceHubGuardParams {
+  profile?: string | null
+}
+/** ``tui_gateway/voice_hub.py::VoiceHub.guard_state`` — a doctor read, not the light. ``guard`` is null when no guard is in force, which is exactly what a restarted gateway must look like (VH1 AC1/AC3). */
+export interface VoiceHubGuardResult {
+  guard?: VoiceGuardState | null
+}
+/** What the guard *did*, read from ``tools/voice_guard.py::VoiceGuard.state``. ``frames`` seen, ``speech_frames`` after cancellation, ``cancelled_frames`` where the far end changed the sample, ``utterances`` emitted, ``dropped_short`` discarded for length, ``late_reference_frames`` mic frames with no far end, ``max_reference_lag_ms`` the worst far-end staleness seen, ``degraded`` once the far end stopped being causally early (or went missing past its limit). ``reference`` / ``reference_pump`` say whether the loopback tap is actually running, and ``settings`` is the value line the guard prints at arm, so a doctor read can never show a guard whose tap is silent. */
+export interface VoiceGuardState {
+  frames?: number
+  speech_frames?: number
+  cancelled_frames?: number
+  utterances?: number
+  dropped_short?: number
+  late_reference_frames?: number
+  max_reference_lag_ms?: number
+  degraded?: boolean
+  reference?: string | null
+  reference_pump?: VoiceGuardReferencePump | null
+  dropped_reference_frames?: number
+  echo_cancel?: string | null
+  vad?: string | null
+  settings?: string | null
+}
+/** The far-end tap's own thread: whether it runs, and what it has pulled. */
+export interface VoiceGuardReferencePump {
+  running: boolean
+  frames?: number
+  errors?: number
+  last_error?: string | null
+  [key: string]: unknown
 }
 export interface SessionCreateParams {
   profile?: string | null
@@ -3648,6 +3694,17 @@ export interface SessionHistoryParams {
 export interface SessionHistoryResult {
   count: number
   messages: TranscriptMessage[]
+}
+/** One plugin-authored system line (desktop ``host.voice.note`` — the call-ended line). ``text`` is the line itself (whitespace-trimmed, 500 chars max); ``source`` is an optional label the renderer may show beside it. There is no role field: a note is always a system line. */
+export interface SessionNoteParams {
+  session_id: string
+  profile?: string | null
+  text: string
+  source?: string | null
+}
+export interface SessionNoteResult {
+  ok: boolean
+  session_id: string
 }
 export interface SessionUsageParams {
   session_id: string
@@ -5254,6 +5311,7 @@ export interface CanonicalCreateParams {
   editor?: Record<string, unknown> | null
   title?: string | null
   hidden?: boolean
+  room_plumbing?: boolean
   follow_profile_config?: boolean | null
   service_tier?: string | null
   cwd_explicit?: boolean | null
@@ -5844,7 +5902,15 @@ export interface PreviewActRequestParams {
   amount?: number | null
   max?: number | null
   allow_shortcut?: boolean | null
+  file?: PreviewUploadFile | null
   vault?: PreviewVaultOperation | null
+}
+/** One checked local file for ``action='upload'`` (``tools/preview_upload.py``): the renderer builds a ``File`` from ``data`` (base64) and never sees a path. */
+export interface PreviewUploadFile {
+  name: string
+  mime: string
+  size: number
+  data: string
 }
 /** Internal vault transport, never arguments exposed to the model. */
 export interface PreviewVaultOperation {
@@ -6045,6 +6111,7 @@ export interface MessageCompletePayload {
   error_surface?: ErrorSurface | null
   partial?: boolean | null
   persisted_turn?: PersistedTurn | null
+  image_routing?: ImageRoutingReceipt | null
   paused?: boolean | null
 }
 /** ``prompt_turn._result_status``. */
@@ -6101,6 +6168,13 @@ export interface PersistedTurn {
   user_row_ids?: number[] | null
   submission_id?: string | null
 }
+/** ``prompt_turn._route_turn_images`` → ``message.complete.image_routing``. Real gateway decision for this turn's user-attached images — never client-assumed. */
+export interface ImageRoutingReceipt {
+  mode: 'native' | 'text'
+  count: number
+  reason?: string | null
+  attached?: number | null
+}
 /** ``server._status_update`` and the direct emitters (goal / loop / heartbeat / process). */
 export interface StatusUpdatePayload {
   kind: string
@@ -6146,6 +6220,11 @@ export interface ReactionPayload {
 /** ``server`` background_review_callback. */
 export interface ReviewSummaryPayload {
   text: string
+}
+/** ``methods_session`` ``session.note``: a plugin-authored line for this session's transcript. Live-only — no message row is written, so the line paints once and never replays on resume. The role is fixed server-side: a note is always a system line, never the user's or the agent's voice. */
+export interface SessionNotePayload {
+  text: string
+  source?: string | null
 }
 /** A session-authority local-viewer turn: one line the agent printed through ``_print_fn`` (subagent completion, compaction, errors, budget notices), which main's classic CLI rendered through ``_agent_status_print``. */
 export interface AgentPrintPayload {
@@ -6810,6 +6889,8 @@ export interface RpcMethods {
   'session.list': { params: SessionListParams; result: SessionListResult }
   /** Most recent human-facing session; errors fold into a null session_id. */
   'session.most_recent': { params: SessionMostRecentParams; result: SessionMostRecentResult }
+  /** Append a plugin-authored system line to a live session's transcript (live-only, never model input). */
+  'session.note': { params: SessionNoteParams; result: SessionNoteResult }
   /** Redirect the active turn (queued for the next turn while the agent is still building). */
   'session.redirect': { params: SessionCorrectionParams; result: SessionCorrectionResult }
   /** Attach to a stored session: reuse it if live here, else lazy / deferred / cold / eager rebuild. */
@@ -6928,6 +7009,10 @@ export interface RpcMethods {
   'voice.toggle': { params: VoiceToggleParams; result: VoiceToggleResult }
   /** Speak text through the backend TTS engine (barge-in aware). */
   'voice.tts': { params: VoiceTtsParams; result: VoiceTtsResult }
+  /** The armed listening guard's counters (null when no guard is in force). */
+  'voice_hub.guard': { params: VoiceHubGuardParams; result: VoiceHubGuardResult }
+  /** Who owns the microphone right now: status, owner surface, since, stop reason. */
+  'voice_hub.state': { params: VoiceHubStateParams; result: VoiceHubStateResult }
   /** Push client-captured PCM into the armed detector (mic-less remote backends). */
   'wake.feed': { params: WakeFeedParams; result: WakeFeedResult }
   /** Release the mic (e.g. while the desktop's browser captures audio). */
@@ -7143,6 +7228,7 @@ export const RPC_METHODS = [
   'session.interrupt',
   'session.list',
   'session.most_recent',
+  'session.note',
   'session.redirect',
   'session.resume',
   'session.save',
@@ -7202,6 +7288,8 @@ export const RPC_METHODS = [
   'voice.record',
   'voice.toggle',
   'voice.tts',
+  'voice_hub.guard',
+  'voice_hub.state',
   'wake.feed',
   'wake.pause',
   'wake.resume',
@@ -7524,6 +7612,8 @@ export interface BackendGatewayEventMap {
   'session.control.update': SessionControlUpdatePayload
   /** Live session settings snapshot (``server._session_info``); also the ``info`` of create/resume/activate. */
   'session.info': SessionLiveInfo
+  /** A plugin added one system line to this session's transcript. */
+  'session.note': SessionNotePayload
   /** The backend reclaimed a live session out from under its clients. */
   'session.reclaimed': SessionReclaimedPayload
   /** Deferred resume hydration progress. */
@@ -7635,6 +7725,7 @@ export const GATEWAY_EVENT_TYPES = [
   'review.summary',
   'session.control.update',
   'session.info',
+  'session.note',
   'session.reclaimed',
   'session.resume_progress',
   'session.title',

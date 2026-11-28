@@ -124,15 +124,6 @@ async function createRoom(page: MockBackendFixture['page']) {
 
   return page.getByRole('textbox', { name: `Message ${ROOM}` }).filter({ visible: true })
 }
-  await dialog.getByRole('textbox', { name: 'Group name' }).fill('Programmer, Reviewer')
-  await dialog.getByRole('button', { name: 'Create group (2)' }).click()
-
-  const groupTab = page.getByRole('tab', { name: /Programmer, Reviewer Close/ })
-  const groupComposer = page.getByRole('textbox', { name: 'Message Programmer, Reviewer' }).filter({ visible: true })
-  await expect(groupTab).toBeVisible({ timeout: 20_000 })
-  await expect(groupTab).toHaveAttribute('aria-selected', 'true')
-  await expect(groupComposer).toBeVisible()
-  expect(await page.evaluate(() => (window as any).__courierProbes)).toBeGreaterThan(0)
 
 async function submitThreadReply(page: MockBackendFixture['page'], text: string) {
   // Bot intros and "New session" can steal the center strip mid-hold. Keep

@@ -934,12 +934,7 @@ export function durableGroupChatRooms(all: Record<string, GroupChat> = $groupCha
     // room as an empty record on the next load AND keep its name "taken" for
     // same-name recreates.
     if (room && Array.isArray(room.log) && !room.tombstone) {
-      durable[name] = {
-        ...durableGroupChatRoom(room),
-        // Force picture fields are not on the upstream durable helper.
-        pictures: room.pictures,
-        picturesBackLedger: room.picturesBackLedger,
-      }
+      durable[name] = durableGroupChatRoom(room)
     }
   }
 

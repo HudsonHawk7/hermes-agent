@@ -18,7 +18,6 @@ import { DatabaseSync } from 'node:sqlite'
 import { _electron, type Browser, chromium, type ElectronApplication, expect, type Page, test } from '@playwright/test'
 
 import { resolveElectronBinary } from '../electron-binary'
-import { stopSandboxGatewayDaemons } from '../run-tmp-reaper'
 
 import { isSandboxProcess, procfsCensus, type ProcInfo, readProc, sandboxProcessesOf, treeKill } from './process-census'
 import { pathUnder, windowsProcessHomes } from './process-environment'

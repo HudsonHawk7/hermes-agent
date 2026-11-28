@@ -24,6 +24,7 @@ import type { PluginContext } from '@hermes/plugin-sdk'
 import { vi } from 'vitest'
 
 import type { DurableGroupChat } from './types'
+import { DEFAULT_GROUP_PICTURE_SETTINGS } from './group-picture-settings'
 
 export const HELD_GROUP_ROOM: DurableGroupChat = {
   log: [{ id: 'm1', thread: 't1', at: 1, from: { kind: 'user', name: 'You' }, text: '@alpha stop' }],
@@ -42,6 +43,8 @@ export const HELD_GROUP_ROOM: DurableGroupChat = {
   rosterOrder: 2,
   pinned: true,
   sectionId: 'work',
+  pictures: { ...DEFAULT_GROUP_PICTURE_SETTINGS, sendMode: 'tap', picturesBack: 'every-reply' },
+  picturesBackLedger: { alpha: { retried: false, turnsSincePicture: 1 } },
   syncRevision: 4
 }
 

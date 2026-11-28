@@ -104,6 +104,7 @@ export function writeMockProviderConfig(
         send: false,
         offer_version: 2,
       },
+    },
     // Pre-v2026.8.13 releases lazy-install faster-whisper on the WS reader when STT is on, stalling the first send.
     stt: { ...config.stt, enabled: false },
     ...extra,

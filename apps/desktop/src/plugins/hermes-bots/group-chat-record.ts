@@ -19,6 +19,8 @@ export function durableGroupChatRoom(room: GroupChat): DurableGroupChat {
     rosterOrder: room.rosterOrder,
     pinned: room.pinned,
     sectionId: room.sectionId ?? null,
+    pictures: room.pictures,
+    picturesBackLedger: room.picturesBackLedger,
     syncRevision: Math.max(0, Number(room.syncRevision || 0))
   }
 }
@@ -43,6 +45,8 @@ export function hydrateDurableGroupChatRoom(room: DurableGroupChat): DurableGrou
     rosterOrder: Number.isFinite(room.rosterOrder) ? room.rosterOrder : undefined,
     pinned: Boolean(room.pinned),
     sectionId: room.sectionId ?? null,
+    pictures: room.pictures,
+    picturesBackLedger: objectOrEmpty(room.picturesBackLedger),
     syncRevision: Math.max(0, Number(room.syncRevision || 0))
   }
 }

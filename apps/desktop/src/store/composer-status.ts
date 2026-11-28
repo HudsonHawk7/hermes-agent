@@ -455,7 +455,7 @@ export async function refreshBackgroundProcesses(sid: string): Promise<void> {
       markSessionGone(sid)
       // Don't leave a frozen hollow-dot after the runtime is declared gone —
       // there is no process left to poll under this id.
-      writeBackground(sid, [])
+      writeBackground(sid, [], undefined)
 
       return
     }

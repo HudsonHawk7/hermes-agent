@@ -6,7 +6,7 @@
     "composite": true,
     "noEmit": false
   },
-  "files": ["electron/backend-discovery.ts"],
+  "files": ["electron/backend-discovery.ts", "electron/e2e-hidden.ts"],
   "include": ["e2e", "playwright.config.ts", "../../tests-js/scripts", "../../tests/install/e2e-assets/desktop-smoke.ts"],
   "exclude": ["src", "electron"]
 }

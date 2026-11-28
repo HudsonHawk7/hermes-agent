@@ -212,7 +212,7 @@ test.describe('Needs you column (gm-asks part 2)', () => {
 
     await waitForAppReady(fixture, 120_000)
     await openKanban(page)
-  }, { timeout: 180_000 })
+  })
 
   test.afterAll(async () => {
     // Snapshot gateways before teardown so the summary can show before/after.
