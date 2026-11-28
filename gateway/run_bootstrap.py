@@ -813,7 +813,7 @@ async def _start_gateway_runtime(config: Optional[GatewayConfig] = None, replace
         from gateway.privacy_images import sweep_privacy_images
         sweep_privacy_images(get_hermes_home())
     except Exception:
-        logger.debug("privacy image sweep skipped", exc_info=True)
+        logger.warning("privacy image sweep skipped", exc_info=True)
 
     # Config verdicts come before the duplicate-instance guard: `--replace` must not stop a healthy
     # gateway for a launch that cannot start.
