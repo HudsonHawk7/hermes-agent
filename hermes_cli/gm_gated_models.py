@@ -7,9 +7,11 @@ recorded with the answering identity. An agent setting a flag, or answering
 its own card, does not count. If the check cannot prove the model is allowed,
 it is not launched and the gated chain is not kept.
 
-The list is off when the key is missing, null, or not a list. This module
-never invents a pattern. An unreadable list is not off: the model is not
-launched, and a gated chain is not kept.
+The list is off when the key is missing, null, or not a list. A profile that
+does not set the key uses the root Hermes home's list. A profile value wins
+only when that profile set the key. This module never invents a pattern. An
+unreadable or malformed root list is not off: the model is not launched, and
+a gated chain is not kept.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ import logging
 import os
 import sqlite3
 from fnmatch import fnmatchcase
+from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -51,7 +54,12 @@ _ASK_CONTEXT = (
 
 
 def patterns_from_config(config: Any) -> list[str]:
-    """Return ``models.gm_gated`` or an empty list. Never a built-in default."""
+    """Return ``models.gm_gated`` from *config*, or an empty list.
+
+    Pure read of the dict it is given. Never a built-in default, and never a
+    read of another file. The profile-or-root choice lives in
+    ``current_patterns`` and ``apply_profile_model_gate``.
+    """
     if not isinstance(config, dict):
         return []
     models = config.get("models")
@@ -77,6 +85,59 @@ def _config_names_gate(config: Any) -> bool:
         and isinstance(config.get("models"), dict)
         and "gm_gated" in config["models"]
     )
+
+
+def _home_is_profile() -> bool:
+    """True when this process's home is ``<root>/profiles/<name>``, not the root."""
+    from hermes_constants import get_default_hermes_root, get_hermes_home
+
+    return Path(get_hermes_home()).resolve() != Path(get_default_hermes_root()).resolve()
+
+
+def _install_root_gate_config() -> dict:
+    """The root Hermes home ``config.yaml``. A missing file is an empty dict.
+
+    A present file that cannot be read or parsed raises ``GateListUnreadable``
+    after logging. Does not call ``load_config``: that re-enters this gate, and
+    a worker snapshot ignores the path. Uses ``get_default_hermes_root``.
+    """
+    from hermes_constants import get_default_hermes_root
+
+    path = Path(get_default_hermes_root()) / "config.yaml"
+    try:
+        exists = path.is_file()
+    except OSError as exc:
+        _warn_unreadable()
+        raise GateListUnreadable("could not read root models.gm_gated") from exc
+    if not exists:
+        return {}
+    try:
+        from utils import fast_safe_load
+
+        with open(path, encoding="utf-8-sig") as handle:
+            loaded = fast_safe_load(handle)
+    except Exception as exc:
+        _warn_unreadable()
+        raise GateListUnreadable("could not read root models.gm_gated") from exc
+    if loaded is None:
+        return {}
+    if not isinstance(loaded, dict):
+        _warn_unreadable()
+        raise GateListUnreadable("could not read root models.gm_gated")
+    return loaded
+
+
+def _patterns_from_root_when_unset(config: Any) -> Any:
+    """The install-root config when *config* did not set the key and home is a profile.
+
+    Returns *config* unchanged when the key is set, or when this process is not
+    a profile. The caller still applies ``patterns_from_config`` to the result.
+    """
+    if _config_names_gate(config) or not isinstance(config, dict):
+        return config
+    if not _home_is_profile():
+        return config
+    return _install_root_gate_config()
 
 
 def _warn_unreadable() -> None:
@@ -117,6 +178,7 @@ def current_patterns(config: Any = None) -> list[str]:
     list, raises :class:`GateListUnreadable`. That is not an empty list, and
     callers must not treat it as "not gated". A missing file stays list-off.
     """
+    loaded_here = config is None
     if config is None:
         try:
             from hermes_cli.config import load_config_readonly
@@ -132,6 +194,8 @@ def current_patterns(config: Any = None) -> list[str]:
         raise GateListUnreadable(
             "could not read models.gm_gated; no last-known-good list"
         )
+    if loaded_here:
+        config = _patterns_from_root_when_unset(config)
     return patterns_from_config(config)
 
 
@@ -623,22 +687,44 @@ def filter_cached_last_known_good(config: dict[str, Any]) -> dict[str, Any]:
 def apply_profile_model_gate(config: dict[str, Any]) -> dict[str, Any]:
     """Skip gated profile models in a loaded config. The file on disk is not rewritten.
 
-    One warning names every setting skipped in this load. The next allowed
-    model in the fallback chain replaces a gated ``model.default``. A missing
-    key is a no-op only when the list can be read. An unreadable list raises
-    so the caller does not keep the gated model.
+    A missing key falls back to the root Hermes home list when this process is
+    a profile. That fallback is a no-op only when the root list is absent and
+    readable. An unreadable or malformed root list raises so the caller does
+    not keep the gated model. The root list is not written into the returned
+    config, and the file on disk is not rewritten.
     """
     global _apply_depth
     if _apply_depth or not isinstance(config, dict):
         return config
-    if not patterns_from_config(config):
+    working = config
+    injected = False
+    if not patterns_from_config(config) and not _config_names_gate(config):
+        root = _patterns_from_root_when_unset(config)
+        patterns = patterns_from_config(root)
+        if patterns:
+            working = dict(config)
+            models = dict(working.get("models") or {})
+            models["gm_gated"] = patterns
+            working["models"] = models
+            injected = True
+    if not patterns_from_config(working):
         require_readable_list(config)
         return config
     _apply_depth += 1
     try:
-        return _apply_profile_model_gate(config)
+        result = _apply_profile_model_gate(working)
     finally:
         _apply_depth -= 1
+    if injected:
+        models = result.get("models")
+        if isinstance(models, dict):
+            models = dict(models)
+            models.pop("gm_gated", None)
+            if models:
+                result["models"] = models
+            else:
+                result.pop("models", None)
+    return result
 
 
 def _apply_profile_model_gate(config: dict[str, Any]) -> dict[str, Any]:
