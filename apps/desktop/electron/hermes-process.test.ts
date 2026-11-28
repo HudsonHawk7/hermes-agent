@@ -1,28 +1,24 @@
 import assert from 'node:assert/strict'
+import test from 'node:test'
+import { commandLineIsHermesRuntime, hermesProcessProbe } from './hermes-process'
 
-import { test } from 'vitest'
+test('commandLineIsHermesRuntime matches only the hermes executable token', () => {
+  assert.equal(commandLineIsHermesRuntime('/usr/local/bin/hermes chat'), true)
+  assert.equal(commandLineIsHermesRuntime('hermes.exe --profile default'), true)
+  assert.equal(commandLineIsHermesRuntime('C:\\Hermes\\hermes.cmd gateway'), true)
 
-import { commandLineIsHermes, hermesProcessProbe } from './hermes-process'
-
-test('a hermes command line matches, and a recycled pid does not', () => {
-  assert.equal(commandLineIsHermes('python.exe C:\Users\judso\AppData\Local\hermes\hermes-agent\gateway.py'), true)
-  assert.equal(commandLineIsHermes('notepad.exe'), false)
-  assert.equal(commandLineIsHermes(''), false)
-  assert.equal(commandLineIsHermes(null), false)
+  assert.equal(commandLineIsHermesRuntime('ps aux | grep hermes'), false)
+  assert.equal(commandLineIsHermesRuntime('tail -f /tmp/hermes.log'), false)
+  assert.equal(commandLineIsHermesRuntime('/usr/local/bin/hermes-dashboard'), false)
+  assert.equal(commandLineIsHermesRuntime('node /opt/hermes-data/server.js'), false)
+  assert.equal(commandLineIsHermesRuntime(''), false)
 })
 
-test('Windows probes the process command line because ps and /proc are absent', () => {
+test('windows probe reads the process command line through CIM, not ps', () => {
   const spec = hermesProcessProbe('win32', 4242)
-
   assert.equal(spec?.command, 'powershell.exe')
-  assert.deepEqual(spec?.args.slice(0, 3), ['-NoProfile', '-NonInteractive', '-Command'])
-  assert.match(spec?.args[3] ?? '', /Get-CimInstance Win32_Process/)
-  assert.match(spec?.args[3] ?? '', /ProcessId = 4242/)
+  assert.match(spec?.args.join(' ') ?? '', /ProcessId=4242/)
+  assert.match(spec?.args.join(' ') ?? '', /Win32_Process/)
+  assert.equal(hermesProcessProbe('linux', 4242), null)
   assert.equal(hermesProcessProbe('win32', 0), null)
-  assert.equal(hermesProcessProbe('win32', 1.5), null)
-})
-
-test('other platforms probe with ps args, not a shell string', () => {
-  assert.deepEqual(hermesProcessProbe('darwin', 7), { command: 'ps', args: ['-p', '7', '-o', 'args='] })
-  assert.deepEqual(hermesProcessProbe('linux', 7), { command: 'ps', args: ['-p', '7', '-o', 'args='] })
 })

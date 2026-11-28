@@ -11,6 +11,8 @@ import pytest
 
 from tests.gateway.test_session_follow_profile_config import _owner
 
+pytestmark = pytest.mark.usefixtures("authority_cwd_in_tmp")  # symbolic profile ids are relative homes
+
 CAPS = ['session:create', 'session:read', 'session:submit', 'session:control',
         'session:approve', 'session:respond']
 
@@ -43,11 +45,18 @@ async def _rpc(connection, method, **params):
 
 
 def _stamp_running(authority, session_id):
-    """The drain is not running in this test. A started row is what ``_handle`` calls running."""
-    from hermes_state_runtime import list_session_admissions
-    rows = list_session_admissions(authority.db, session_id=session_id)
+    """The drain is not running in this test. A started row is what ``_handle`` calls running.
+
+    This tree's authority stores rows on persistence, not the force/carry ``.db`` handle.
+    """
+    from persistence.sqlite.authority._admission_store import list_session_admissions
+    from tests.fixtures.storage_holder import raw_holder
+    from tests.fixtures.storage_read import session_row
+    holder = raw_holder(authority.persistence)
+    rows = list_session_admissions(holder, session_id=session_id)
     assert rows and rows[0]['status'] == 'queued', rows
-    session = authority.db.get_session(session_id)
+    session = session_row(authority.persistence, session_id)
+    assert session is not None, session_id
     generation = session['runtime_generation'] + 1
     admission_id = rows[0]['admission_id']
 
@@ -60,7 +69,7 @@ def _stamp_running(authority, session_id):
         if changed.rowcount != 1:
             raise AssertionError('could not stamp the turn started')
 
-    authority.db._execute_write(write)
+    holder._execute_write(write)
     from gateway.session_contract import SessionRef
     handle = authority._handle(SessionRef(authority.profile_id, session_id))
     assert handle.execution_state == 'running', handle
@@ -74,7 +83,9 @@ async def _running_session(connection, authority, home, source, request_id):
                          cwd=str(home), toolsets=[])
     assert 'result' in created, created
     session_id = created['result']['session_id']
-    assert authority.db.get_session(session_id)['source'] == source
+    from tests.fixtures.storage_read import session_row
+    row = session_row(authority.persistence, session_id)
+    assert row is not None and row['source'] == source
     submitted = await _rpc(connection, 'prompt.submit', session_id=session_id,
                            input_id=request_id + '-turn', text='keep going')
     assert 'result' in submitted, submitted

@@ -9,8 +9,8 @@
  */
 
 import { Button, cn, Codicon, host, Input, RowButton, Textarea, useI18n, useValue } from '@hermes/plugin-sdk'
-import type { ClipboardEvent } from 'react'
-import { useRef, useState } from 'react'
+import type { ClipboardEvent, Ref, RefObject } from 'react'
+import { useImperativeHandle, useRef, useState } from 'react'
 
 import { $imagenAvailable, normalizeAvatarImage, pickImageFromDevice, probeImagen } from './avatar-image'
 import { $botMeta, botHandle, botMentionTag } from './data'
@@ -81,7 +81,7 @@ export function GroupImageControls({ image, onImage, seedName, seedMembers }: Gr
       })
 
       if (!res?.success) {
-        throw new Error(res?.error || 'generation failed')
+        throw new Error(res?.error || b.group.pictureGenerationFailed)
       }
 
       const img = res.image_data || res.image
@@ -160,12 +160,30 @@ interface GroupMentionInputProps {
   'aria-label'?: string
   autoFocus?: boolean
   className?: string
+  disabled?: boolean
+  /** The exact token a member's mention inserts, for rooms that resolve only frozen handles. */
+  handleFor?: (member: GroupMember) => string | undefined
   members: GroupMember[]
   onChange: (value: string) => void
   onPaste?: (event: ClipboardEvent<HTMLTextAreaElement>) => void
   onSubmitDraft?: () => void
   placeholder?: string
+  ref?: Ref<HTMLTextAreaElement>
   value: string
+}
+
+/** A hover Reply moves the user into the composer, caret after the seeded words, once React has painted them. */
+export function focusComposerEnd(input: RefObject<HTMLTextAreaElement | null>) {
+  requestAnimationFrame(() => {
+    const el = input.current
+
+    if (!el) {
+      return
+    }
+
+    el.focus()
+    el.setSelectionRange(el.value.length, el.value.length)
+  })
 }
 
 /** Mention-aware composer input for group rooms. The core composer's
@@ -175,10 +193,11 @@ interface GroupMentionInputProps {
  *  the strings parseGroupChatMentions resolves. Keyboard: Up/Down navigate,
  *  Tab inserts, Enter inserts only on a prefix (an exact unique handle
  *  sends), Escape dismisses. */
-export function GroupMentionInput({ members, onChange, onSubmitDraft, value, ...inputProps }: GroupMentionInputProps) {
+export function GroupMentionInput({ handleFor, members, onChange, onSubmitDraft, ref, value, ...inputProps }: GroupMentionInputProps) {
   const b = useBots()
   const allMeta: Record<string, BotMeta> = useValue($botMeta)
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
+  useImperativeHandle(ref, () => inputRef.current as HTMLTextAreaElement)
   const [token, setToken] = useState<MentionToken | null>(null)
   const [selected, setSelected] = useState(0)
   const options: MentionOption[] = []
@@ -197,7 +216,7 @@ export function GroupMentionInput({ members, onChange, onSubmitDraft, value, ...
       const handle = String(botHandle(member.name, member) || '').trim()
       const display = displayName(member, botRosterMeta(member, allMeta))
       // Renamed members complete on their friendly tag; parser resolves both.
-      const tag = String(botMentionTag(member) || handle).trim()
+      const tag = String(handleFor?.(member) ?? (botMentionTag(member) || handle)).trim()
 
       if (!tag) {
         continue
@@ -408,6 +427,13 @@ interface GroupClarifyCardProps {
  *    closed choice. Answer sends via the member's own source. */
 export function GroupClarifyCard({ entry, members }: GroupClarifyCardProps) {
   const b = useBots()
+  const { t } = useI18n()
+
+  const approvalLabels: Record<string, string> = {
+    once: b.canonical.allowOnce, deny: b.canonical.deny,
+    session: t.assistant.approval.allowSession, always: t.assistant.approval.alwaysAllow
+  }
+
   const { group } = entry
   const isApproval = entry.kind === 'approval'
   const member = members.find(m => groupMemberKey(m) === entry.memberKey) || members.find(m => m.name === entry.member)
@@ -562,7 +588,7 @@ export function GroupClarifyCard({ entry, members }: GroupClarifyCardProps) {
                     size="sm"
                     variant={chosen ? 'default' : 'secondary'}
                   >
-                    {choice}
+                    {isApproval ? approvalLabels[choice] || choice : choice}
                   </Button>
                 )
               })}
@@ -596,7 +622,7 @@ export function GroupClarifyCard({ entry, members }: GroupClarifyCardProps) {
                   void submit()
                 }
               }}
-              placeholder={q.choices.length ? 'Or type your own answer…' : 'Type your answer…'}
+              placeholder={q.choices.length ? b.group.ownAnswerPlaceholder : b.group.answerPlaceholder}
               value={drafts[q.qid] || ''}
             />
           )}
@@ -606,7 +632,7 @@ export function GroupClarifyCard({ entry, members }: GroupClarifyCardProps) {
       {isApproval ? null : (
         <div className="flex justify-end">
           <Button disabled={sending || !anyAnswered || !member} onClick={() => void submit()} size="sm">
-            {sending ? 'Sending…' : 'Answer'}
+            {sending ? b.group.sending : b.group.answer}
           </Button>
         </div>
       )}
