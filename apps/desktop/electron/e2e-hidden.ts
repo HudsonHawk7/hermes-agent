@@ -86,18 +86,37 @@ export function installE2eCrashExit(
   return true
 }
 
+/**
+ * Loose constructor-options shape for applyE2eHiddenWindowOptions.
+ *
+ * - webPreferences stays `object` (not Record<string, unknown>): Electron's
+ *   WebPreferences has no string index signature, so a Record field rejects it.
+ * - No `[key: string]: unknown` index signature: BrowserWindowConstructorOptions
+ *   also lacks one, and would fail the same assignability check at the call site.
+ * - Extra BrowserWindow fields ride through the generic `T` via the spread.
+ */
 export type BrowserWindowLikeOptions = {
   show?: boolean
   paintWhenInitiallyHidden?: boolean
-  webPreferences?: Record<string, unknown>
-  [key: string]: unknown
+  webPreferences?: object
 }
 
-/** Merge constructor options so a hidden e2e window still paints for Playwright. */
+/** Fields the hidden path always writes on top of the caller’s object. */
+export type E2eHiddenWindowApplied = {
+  show: false
+  paintWhenInitiallyHidden: true
+  webPreferences: object & { backgroundThrottling: false }
+}
+
+/**
+ * Merge constructor options so a hidden e2e window still paints for Playwright.
+ * Return type always exposes the optional hidden fields so callers/tests can
+ * read `paintWhenInitiallyHidden` without narrowing on the env flag (TS2339).
+ */
 export function applyE2eHiddenWindowOptions<T extends BrowserWindowLikeOptions>(
   options: T,
   env: E2eHiddenEnv = process.env
-): T {
+): T & BrowserWindowLikeOptions {
   if (!isDesktopE2eHidden(env)) {
     return options
   }
@@ -107,7 +126,7 @@ export function applyE2eHiddenWindowOptions<T extends BrowserWindowLikeOptions>(
     show: false,
     paintWhenInitiallyHidden: true,
     webPreferences: {
-      ...(options.webPreferences ?? {}),
+      ...(options.webPreferences as Record<string, unknown> | undefined ?? {}),
       backgroundThrottling: false
     }
   }
