@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import os
 import shutil
 from pathlib import Path
 
@@ -951,3 +952,137 @@ def test_cli_start_load_does_not_serve_gated_model(kanban_home, caplog, monkeypa
     assert _served_gated(loaded) == []
     assert SETTING in caplog.text
     assert RULE in caplog.text
+
+
+def _root_and_profile(tmp_path: Path, *, root_text: str, profile_text: str) -> tuple[Path, Path]:
+    """A profile home outside the native Hermes home, so root is the parent of profiles/."""
+    root = tmp_path / "hermes-root"
+    profile = root / "profiles" / "solara"
+    profile.mkdir(parents=True)
+    (root / "config.yaml").write_text(root_text, encoding="utf-8")
+    (profile / "config.yaml").write_text(profile_text, encoding="utf-8")
+    return root, profile
+
+
+def _point_home_at_profile(monkeypatch, profile: Path, root: Path) -> None:
+    import hermes_constants
+
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_PROFILE", raising=False)
+    monkeypatch.setattr(hermes_constants, "_default_hermes_root_memo", None, raising=False)
+    assert hermes_constants.get_default_hermes_root().resolve() == root.resolve()
+
+
+def _hold_root_unreadable(path: Path):
+    """Hold the root config so a real open fails. Returns a closer. Not a mocked reader."""
+    if os.name != "nt":
+        path.chmod(0)
+        return lambda: path.chmod(0o644)
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    generic_read = 0x80000000
+    file_share_none = 0
+    open_existing = 3
+    file_attribute_normal = 0x80
+    handle = kernel32.CreateFileW(
+        str(path), generic_read, file_share_none, None, open_existing,
+        file_attribute_normal, None,
+    )
+    invalid = ctypes.c_void_p(-1).value
+    if handle == invalid or handle == -1:
+        raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+
+    def _close() -> None:
+        kernel32.CloseHandle(handle)
+
+    try:
+        open(path, encoding="utf-8").read()
+    except OSError:
+        return _close
+    _close()
+    raise AssertionError("root config.yaml is still readable; the unreadable test is not real")
+
+
+_PROFILE_GATED = """\
+model:
+  default: claude-fable-5-1
+  provider: copilot
+fallback_providers:
+  - provider: xai
+    model: grok-4.7
+"""
+
+_ROOT_FABLE = """\
+models:
+  gm_gated:
+    - claude-fable-*
+    - "*/claude-fable-*"
+"""
+
+
+def test_profile_without_gate_key_uses_root_list(monkeypatch, tmp_path):
+    """A profile that never set models.gm_gated still gates from the root list."""
+    root, profile = _root_and_profile(
+        tmp_path, root_text=_ROOT_FABLE, profile_text=_PROFILE_GATED,
+    )
+    _point_home_at_profile(monkeypatch, profile, root)
+    from hermes_cli.gm_gated_models import apply_profile_model_gate
+
+    loaded = apply_profile_model_gate({
+        "model": {"default": GATED, "provider": "copilot"},
+        "fallback_providers": [{"provider": "xai", "model": "grok-4.7"}],
+    })
+    assert loaded["model"]["default"] != GATED
+    assert "gm_gated" not in (loaded.get("models") or {})
+    assert model_is_gated(GATED) is True
+
+
+def test_profile_gate_list_wins_over_root(monkeypatch, tmp_path):
+    """A profile that set its own list is not overridden by the root list."""
+    profile_text = (
+        "model:\n  default: claude-fable-5-1\n  provider: copilot\n"
+        "models:\n  gm_gated:\n    - never-this-*\n"
+    )
+    root, profile = _root_and_profile(
+        tmp_path, root_text=_ROOT_FABLE, profile_text=profile_text,
+    )
+    _point_home_at_profile(monkeypatch, profile, root)
+    from hermes_cli.gm_gated_models import apply_profile_model_gate
+
+    loaded = apply_profile_model_gate({
+        "model": {"default": GATED, "provider": "copilot"},
+        "models": {"gm_gated": ["never-this-*"]},
+    })
+    assert loaded["model"]["default"] == GATED
+    assert model_is_gated(GATED) is False
+
+
+def test_unreadable_root_gate_list_fails_closed(monkeypatch, tmp_path, caplog):
+    """An unreadable root list is gated, and the error is logged. Never a silent pass."""
+    root, profile = _root_and_profile(
+        tmp_path, root_text=_ROOT_FABLE, profile_text=_PROFILE_GATED,
+    )
+    _point_home_at_profile(monkeypatch, profile, root)
+    closer = _hold_root_unreadable(root / "config.yaml")
+    try:
+        from hermes_cli.config import _apply_gm_gate
+        from hermes_cli.gm_gated_models import GateListUnreadable
+
+        import hermes_cli.gm_gated_models as gate
+
+        gate._unreadable_logged = False
+        cfg = {
+            "model": {"default": GATED, "provider": "copilot"},
+            "fallback_providers": [{"provider": "xai", "model": "grok-4.7"}],
+        }
+        with caplog.at_level(logging.WARNING, logger="hermes_cli.gm_gated_models"):
+            loaded = _apply_gm_gate(cfg)
+            with pytest.raises(GateListUnreadable):
+                model_is_gated(GATED)
+        assert loaded["model"]["default"] != GATED
+        assert SETTING in caplog.text
+        assert "could not read" in caplog.text
+    finally:
+        closer()

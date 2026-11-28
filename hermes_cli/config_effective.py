@@ -94,11 +94,20 @@ def _yes_restores(pre: Any) -> bool:
     """True when a GM Yes may now keep a model this copy would have skipped."""
     if not isinstance(pre, dict):
         return False
-    from hermes_cli.gm_gated_models import _profile_keeps, model_is_gated
+    from hermes_cli.gm_gated_models import (
+        _config_names_gate,
+        _patterns_from_root_when_unset,
+        _profile_keeps,
+        model_is_gated,
+        patterns_from_config,
+    )
 
     for name, provider in _profile_model_names(pre):
         try:
-            if model_is_gated(name, provider=provider, config=pre) and _profile_keeps(None, "profile", name):
+            gate_config = pre if _config_names_gate(pre) else _patterns_from_root_when_unset(pre)
+            if model_is_gated(
+                name, provider=provider, patterns=patterns_from_config(gate_config)
+            ) and _profile_keeps(None, "profile", name):
                 return True
         except Exception:
             return True
