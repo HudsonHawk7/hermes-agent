@@ -1305,6 +1305,25 @@ def _rollback_verified(git, git_dir: Path, pre: str, owned: set[str] | None = No
     return status.returncode == 0 and not (changed if owned is None else changed & owned)
 
 
+def head_tracks(root: Path, rel: str) -> bool:
+    """True when ``HEAD``'s tree still has ``rel``.
+
+    Update cleanup may unlink a file the rolled-back commit does not have. It must not unlink a
+    path the current commit still tracks: a fork switch's added-list includes carry files the
+    detached upstream checkout lacked, and deleting those after HEAD is the carry commit removes
+    tracked source.
+    """
+    path = PurePosixPath(rel)
+    if not rel or path.is_absolute() or ".." in path.parts or ":" in rel or "\\" in rel:
+        return True
+    found = subprocess.run(
+        ["git", "-C", str(root), "cat-file", "-e", f"HEAD:{rel}"],
+        capture_output=True,
+        check=False,
+    )
+    return found.returncode == 0
+
+
 def _put_back_paths(git, root: Path, restore: list[str], added: list[str],
                     kept: set[str]) -> subprocess.CompletedProcess | None:
     """Return ``restore`` to HEAD and drop ``added``, renaming those in ``kept`` aside; the failed git run, or None."""
@@ -1313,6 +1332,7 @@ def _put_back_paths(git, root: Path, restore: list[str], added: list[str],
                   "--pathspec-file-nul", stdin="\0".join(restore))
         if run.returncode:
             return run
+    added = [rel for rel in added if not head_tracks(root, rel)]
     if added:
         run = git("rm", "-q", "--cached", "--ignore-unmatch", "--pathspec-from-file=-",
                   "--pathspec-file-nul", stdin="\0".join(added))

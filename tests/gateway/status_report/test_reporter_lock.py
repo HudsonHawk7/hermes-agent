@@ -316,7 +316,7 @@ async def test_a_watcher_cancelled_while_it_takes_the_lock_leaves_no_lock_held(c
     await async_wait_until(lambda: taken, timeout=5, what="the lock taken after the cancel")
 
     assert watcher.cancelled() and taken == [True]
-    await async_wait_until(lambda: not list(gateway_status._get_lock_dir().glob("*.lock")), timeout=5,
+    await async_wait_until(lambda: not list(gateway_status.machine_lock_dir().glob("*.lock")), timeout=5,
                            what="a cancelled watcher to give back the lock it took")
     assert receiver.requests == []
 
@@ -354,7 +354,7 @@ async def test_a_sender_cancelled_while_it_confirms_its_lock_leaves_no_lock_held
     await async_wait_until(lambda: len(taken) == 2, timeout=5, what="the confirmation after the cancel")
 
     assert watcher.cancelled() and taken == [True, True]
-    await async_wait_until(lambda: not list(gateway_status._get_lock_dir().glob("*.lock")), timeout=5,
+    await async_wait_until(lambda: not list(gateway_status.machine_lock_dir().glob("*.lock")), timeout=5,
                            what="a cancelled sender to give back the lock its confirmation took again")
     # The cleanup leaves the lock to the confirmation in flight, which gives it back once, on the
     # event loop: a release reads the owner and then unlinks, so one on another thread could unlink
@@ -390,7 +390,7 @@ async def test_a_goodbye_still_taking_the_lock_when_the_watcher_stops_neither_ta
     await settle()
 
     assert receiver.kinds == ["beat"], "a goodbye went out after the watcher stopped"
-    await async_wait_until(lambda: not list(gateway_status._get_lock_dir().glob("*.lock")), timeout=5,
+    await async_wait_until(lambda: not list(gateway_status.machine_lock_dir().glob("*.lock")), timeout=5,
                            what="the lock to be free after the watcher stopped")
 
 
@@ -424,7 +424,7 @@ async def test_a_goodbye_cancelled_while_it_confirms_the_lock_leaves_the_sender_
     await asyncio.to_thread(reporter._pool.shutdown, True)
 
     assert len(confirmed) == 2
-    assert list(gateway_status._get_lock_dir().glob("*.lock")), "a cancelled goodbye gave the sender's lock back"
+    assert list(gateway_status.machine_lock_dir().glob("*.lock")), "a cancelled goodbye gave the sender's lock back"
     assert receiver.kinds == ["beat"]
 
 
@@ -435,12 +435,12 @@ async def test_the_lock_is_released_when_the_watcher_stops(clock):
     watcher = asyncio.create_task(reporter.run(lambda: running[0], tick=0.01))
     try:
         await async_wait_until(lambda: len(receiver.requests) == 1, timeout=5, what="the first report")
-        assert list(gateway_status._get_lock_dir().glob("*.lock")), "reporting without the sender lock"
+        assert list(gateway_status.machine_lock_dir().glob("*.lock")), "reporting without the sender lock"
     finally:
         running[0] = False
         await asyncio.wait_for(watcher, timeout=5)
 
-    assert list(gateway_status._get_lock_dir().glob("*.lock")) == []
+    assert list(gateway_status.machine_lock_dir().glob("*.lock")) == []
 
 
 async def test_a_lock_taken_after_the_watcher_died_follows_the_respawned_watcher(clock, monkeypatch):
@@ -478,11 +478,11 @@ async def test_a_lock_taken_after_the_watcher_died_follows_the_respawned_watcher
     clock.advance(AFTER_INTERVAL_S)
     release.set()
     await async_wait_until(lambda: receiver.kinds == ["beat", "beat"], timeout=5, what="the respawned watcher's beat")
-    assert list(gateway_status._get_lock_dir().glob("*.lock")), "the old run gave back the respawned sender's lock"
+    assert list(gateway_status.machine_lock_dir().glob("*.lock")), "the old run gave back the respawned sender's lock"
 
     respawned.cancel()
     await asyncio.wait({respawned}, timeout=5)
-    await async_wait_until(lambda: not list(gateway_status._get_lock_dir().glob("*.lock")), timeout=5,
+    await async_wait_until(lambda: not list(gateway_status.machine_lock_dir().glob("*.lock")), timeout=5,
                            what="the lock to be free once the respawned watcher stopped")
 
 
@@ -509,9 +509,9 @@ async def test_a_beat_and_a_goodbye_share_one_lock_confirmation(clock, monkeypat
     assert await asyncio.wait_for(second, timeout=5) is True
     assert calls == ["status-report"], "a second confirmation ran beside the first"
     assert reporter._is_sender
-    assert list(gateway_status._get_lock_dir().glob("*.lock")), "a cancelled caller gave back the sender's lock"
+    assert list(gateway_status.machine_lock_dir().glob("*.lock")), "a cancelled caller gave back the sender's lock"
     await reporter.run(lambda: False)
-    assert not list(gateway_status._get_lock_dir().glob("*.lock"))
+    assert not list(gateway_status.machine_lock_dir().glob("*.lock"))
 
 
 async def test_a_watcher_stopped_while_a_confirmation_is_out_gives_the_lock_back_once_it_is_done(clock, monkeypatch):
@@ -538,12 +538,12 @@ async def test_a_watcher_stopped_while_a_confirmation_is_out_gives_the_lock_back
         waiting = asyncio.create_task(reporter._become_sender())
         await async_wait_until(entered.is_set, timeout=5, what="the confirmation")
         await reporter.run(lambda: False)
-        assert list(gateway_status._get_lock_dir().glob("*.lock")), "released while the confirmation was out"
+        assert list(gateway_status.machine_lock_dir().glob("*.lock")), "released while the confirmation was out"
         release.set()
 
         assert await asyncio.wait_for(waiting, timeout=5) is False
         assert not reporter._is_sender
-        assert not list(gateway_status._get_lock_dir().glob("*.lock")), f"lock left after a stop ({answer!r})"
+        assert not list(gateway_status.machine_lock_dir().glob("*.lock")), f"lock left after a stop ({answer!r})"
 
 
 async def test_a_confirmation_failing_after_the_watcher_stopped_still_gives_back_the_senders_lock(clock, monkeypatch):
@@ -569,7 +569,7 @@ async def test_a_confirmation_failing_after_the_watcher_stopped_still_gives_back
     release.set()
 
     assert await asyncio.wait_for(waiting, timeout=5) is False
-    assert not list(gateway_status._get_lock_dir().glob("*.lock")), "the sender's lock was kept"
+    assert not list(gateway_status.machine_lock_dir().glob("*.lock")), "the sender's lock was kept"
 
 
 def test_a_sender_whose_confirmation_the_loop_cancels_gives_back_its_lock_even_if_the_thread_fails(monkeypatch):
@@ -596,10 +596,10 @@ def test_a_sender_whose_confirmation_the_loop_cancels_gives_back_its_lock_even_i
         # asyncio.run returns here and cancels the confirmation still in flight
 
     asyncio.run(confirm_and_shut_down())
-    assert list(gateway_status._get_lock_dir().glob("*.lock")), "released before the thread was done"
+    assert list(gateway_status.machine_lock_dir().glob("*.lock")), "released before the thread was done"
     release.set()
     reporter._pool.shutdown(wait=True)
-    assert not list(gateway_status._get_lock_dir().glob("*.lock")), "the sender's lock was kept"
+    assert not list(gateway_status.machine_lock_dir().glob("*.lock")), "the sender's lock was kept"
 
 
 async def test_a_confirmation_no_caller_waits_for_any_more_is_read_when_it_fails(clock, monkeypatch):
